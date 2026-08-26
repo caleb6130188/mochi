@@ -41,13 +41,23 @@
     { label: '隐藏', value: 'hidden' }
   ];
 
+  // v3.11.x：未自定义的配色默认值跟随深浅主题。此前默认色写死浅色（白气泡/黑时间字），
+  // 且以 root 内联样式写入——内联优先级高于 dark.css 的 [data-theme] 覆盖，导致
+  // 深色模式下联系人气泡纯白、时间戳纯黑看不见。用户自定义过（store 有值）仍优先。
+  function themeDefaults() {
+    const dark = document.documentElement.getAttribute('data-theme') === 'dark';
+    return dark
+      ? { inBg: '#2a2a2a', inInk: '#f0f0f0', outBg: '#3a3a3a', outInk: '#ffffff', timeInk: '#8a8a8a', sendBg: '#f0f0f0', sendInk: '#111111' }
+      : { inBg: '#ffffff', inInk: '#111111', outBg: '#111111', outInk: '#ffffff', timeInk: '#111111', sendBg: '#111111', sendInk: '#ffffff' };
+  }
   function applySettings() {
     // 设置页值写入（定义在最前，避免暂时性死区）
     const set = (id, v) => { const el = document.getElementById(id); if (el) el.textContent = v; };
-    const inBg = store.get('cs-in-bg') || '#ffffff';
-    const inInk = store.get('cs-in-ink') || '#111111';
-    const outBg = store.get('cs-out-bg') || '#111111';
-    const outInk = store.get('cs-out-ink') || '#ffffff';
+    const DEF = themeDefaults();
+    const inBg = store.get('cs-in-bg') || DEF.inBg;
+    const inInk = store.get('cs-in-ink') || DEF.inInk;
+    const outBg = store.get('cs-out-bg') || DEF.outBg;
+    const outInk = store.get('cs-out-ink') || DEF.outInk;
     const fs = store.get('cs-font-size') || '14px';
     const pad = store.get('cs-bubble-size') || '11px 14px';
     root.style.setProperty('--msg-in-bg', inBg);
@@ -56,29 +66,29 @@
     root.style.setProperty('--msg-out-ink', outInk);
     root.style.setProperty('--chat-font-size', fs);
     root.style.setProperty('--chat-bubble-pad', pad);
-    // 时间轴颜色（默认黑）
-    const timeInk = store.get('cs-time-ink') || '#111111';
+    // 时间轴颜色（默认黑/深色模式灰）
+    const timeInk = store.get('cs-time-ink') || DEF.timeInk;
     root.style.setProperty('--msg-time-ink', timeInk);
     // 正在输入中颜色（默认灰）
     const typingInk = store.get('cs-typing-ink') || '#8a8a8a';
     root.style.setProperty('--typing-ink', typingInk);
-    // 发送按钮颜色（默认黑）
-    const sendBg = store.get('cs-send-bg') || '#111111';
+    // 发送按钮颜色（默认黑/深色模式白）
+    const sendBg = store.get('cs-send-bg') || DEF.sendBg;
     root.style.setProperty('--send-bg', sendBg);
-    // 发送按钮文字颜色（默认白）
-    const sendInk = store.get('cs-send-ink') || '#ffffff';
+    // 发送按钮文字颜色（默认白/深色模式黑）
+    const sendInk = store.get('cs-send-ink') || DEF.sendInk;
     root.style.setProperty('--send-ink', sendInk);
     // 发送按钮显示/隐藏（默认显示；隐藏后仍可按 Enter 发送）
     const sendShow = store.get('cs-send-show') || 'show';
     const sendBtn = document.getElementById('chat-send');
     if (sendBtn) sendBtn.style.display = sendShow === 'hide' ? 'none' : '';
-    set('cs-send-bg-val', sendBg === '#111111' ? '默认 #111111' : sendBg);
-    set('cs-send-ink-val', sendInk === '#ffffff' ? '默认 #ffffff' : sendInk);
+    set('cs-send-bg-val', sendBg === DEF.sendBg ? '默认 ' + DEF.sendBg : sendBg);
+    set('cs-send-ink-val', sendInk === DEF.sendInk ? '默认 ' + DEF.sendInk : sendInk);
     // 双方气泡颜色/文字颜色当前值回显（默认值显示「默认 #色值」，让用户知道默认颜色）
-    set('cs-out-bg-val', outBg === '#111111' ? '默认 #111111' : outBg);
-    set('cs-out-ink-val', outInk === '#ffffff' ? '默认 #ffffff' : outInk);
-    set('cs-in-bg-val', inBg === '#ffffff' ? '默认 #ffffff' : inBg);
-    set('cs-in-ink-val', inInk === '#111111' ? '默认 #111111' : inInk);
+    set('cs-out-bg-val', outBg === DEF.outBg ? '默认 ' + DEF.outBg : outBg);
+    set('cs-out-ink-val', outInk === DEF.outInk ? '默认 ' + DEF.outInk : outInk);
+    set('cs-in-bg-val', inBg === DEF.inBg ? '默认 ' + DEF.inBg : inBg);
+    set('cs-in-ink-val', inInk === DEF.inInk ? '默认 ' + DEF.inInk : inInk);
     // 聊天头像形状（circle 圆形 / square 方形）
     const avShape = store.get('cs-av-shape') || 'circle';
     root.style.setProperty('--msg-av-radius', avShape === 'square' ? '10px' : '50%');
@@ -124,42 +134,54 @@
   }
   window.applyChatSettings = applySettings;
   applySettings();
+  // v3.11.x：深色/浅色切换时重算默认配色（personalize.js 切换 html data-theme，
+  // 这里监听属性变化即时重写内联变量，不用跨模块调用）
+  try {
+    new MutationObserver(() => { try { applySettings(); } catch (e) {} })
+      .observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
+  } catch (e) {}
 
   // 各设置行
   const row = (id) => document.getElementById(id);
   const csBg = row('cs-bg-upload');
   if (csBg) {
-    csBg.addEventListener('click', () => {
-      const input = document.createElement('input');
-      input.type = 'file'; input.accept = 'image/*';
-      input.onchange = () => {
-        const f = input.files && input.files[0];
-        if (!f) return;
-        const reader = new FileReader();
-        reader.onload = () => {
-          // 压缩：v3.5.126 按设备物理像素定上限——之前固定 900px，
-          // 在 2-3x 高分屏（物理宽 1080-1440）铺满时被放大发糊
-          const img = new Image();
-          img.onload = () => {
-            try {
-              const dpr = Math.max(1, window.devicePixelRatio || 1);
-              const screenH = (window.screen && window.screen.height) || 1920;
-              const maxSide = Math.min(4096, Math.max(2160, Math.round(screenH * dpr)));
-              const c = document.createElement('canvas');
-              const scale = Math.min(1, maxSide / Math.max(img.width, img.height));
-              c.width = Math.max(1, Math.round(img.width * scale));
-              c.height = Math.max(1, Math.round(img.height * scale));
-              c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
-              const data = c.toDataURL('image/jpeg', 0.85);
-              store.set('cs-bg', data);
-              applySettings();
-            } catch (e) {}
-          };
-          img.src = reader.result;
+    // v3.9.x：红米/真我等 Android Edge 对「点击时动态创建 + 立即 click()」的 file input
+    // 会静默忽略（不弹系统选择器）。改为持久化 input（初始化时创建一次、永久挂 body、
+    // 移出屏幕、每次复用），与 avatar-lib.js bindPoolUpload 已验证可用套路一致。
+    const bgInput = document.createElement('input');
+    bgInput.type = 'file'; bgInput.accept = 'image/*';
+    bgInput.style.cssText = 'position:fixed;left:-9999px;top:0;width:1px;height:1px;opacity:0;';
+    document.body.appendChild(bgInput);
+    bgInput.onchange = () => {
+      const f = bgInput.files && bgInput.files[0];
+      bgInput.value = ''; // 允许重选同一文件
+      if (!f) return;
+      const reader = new FileReader();
+      reader.onload = () => {
+        // 压缩：v3.5.126 按设备物理像素定上限——之前固定 900px，
+        // 在 2-3x 高分屏（物理宽 1080-1440）铺满时被放大发糊
+        const img = new Image();
+        img.onload = () => {
+          try {
+            const dpr = Math.max(1, window.devicePixelRatio || 1);
+            const screenH = (window.screen && window.screen.height) || 1920;
+            const maxSide = Math.min(4096, Math.max(2160, Math.round(screenH * dpr)));
+            const c = document.createElement('canvas');
+            const scale = Math.min(1, maxSide / Math.max(img.width, img.height));
+            c.width = Math.max(1, Math.round(img.width * scale));
+            c.height = Math.max(1, Math.round(img.height * scale));
+            c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
+            const data = c.toDataURL('image/jpeg', 0.85);
+            store.set('cs-bg', data);
+            applySettings();
+          } catch (e) {}
         };
-        reader.readAsDataURL(f);
+        img.src = reader.result;
       };
-      input.click();
+      reader.readAsDataURL(f);
+    };
+    csBg.addEventListener('click', () => {
+      try { bgInput.click(); } catch (e) { toast('无法打开相册，请重试'); }
     });
   }
   const csBgRm = row('cs-bg-remove');
@@ -229,32 +251,32 @@
       img.src = dataUrl;
     });
   }
-  // v3.9.x：修复红米/真我等 Android Edge 文件选择器不弹出——动态创建的 file input
-  // 必须先挂载到 DOM 再 click()（未挂载时部分 Android 浏览器会静默忽略合成点击）；
-  // 用 position:fixed 移出屏幕而非 display:none 最稳。参考 data-backup.js 导入修复。
-  function pickHead(cb) {
-    const input = document.createElement('input');
-    input.type = 'file'; input.accept = 'image/*';
-    input.style.position = 'fixed';
-    input.style.left = '-9999px';
-    input.style.top = '0';
-    input.style.opacity = '0';
-    document.body.appendChild(input);
-    input.onchange = () => {
-      const f = input.files && input.files[0];
-      try { input.remove(); } catch (e) {}
-      if (!f) return;
-      const reader = new FileReader();
-      reader.onload = () => {
-        compressHead(reader.result, 256).then(data => {
-          if (!data) { toast('图片过大或格式不支持，请换一张小图'); return; }
-          cb(data);
-        });
-      };
-      reader.readAsDataURL(f);
+  // v3.9.x：红米/真我等 Android Edge 对「点击时动态创建 + 立即 click()」的 file input
+  // 会静默忽略（不弹系统选择器）。改为持久化 input：初始化时创建一次、永久挂 body、
+  // 移出屏幕、每次复用（先清 value 再 click）——与 avatar-lib.js bindPoolUpload
+  // 已验证可用套路一致。两个头像按钮（联系人/我的）共用这一个 input，靠回调区分。
+  let headCb = null;
+  const headInput = document.createElement('input');
+  headInput.type = 'file'; headInput.accept = 'image/*';
+  headInput.style.cssText = 'position:fixed;left:-9999px;top:0;width:1px;height:1px;opacity:0;';
+  document.body.appendChild(headInput);
+  headInput.onchange = () => {
+    const f = headInput.files && headInput.files[0];
+    headInput.value = ''; // 允许重选同一文件
+    if (!f) return;
+    const cb = headCb; headCb = null;
+    const reader = new FileReader();
+    reader.onload = () => {
+      compressHead(reader.result, 256).then(data => {
+        if (!data) { toast('图片过大或格式不支持，请换一张小图'); return; }
+        if (cb) cb(data);
+      });
     };
-    input.click();
-    setTimeout(() => { try { if (input.parentNode) input.remove(); } catch (e) {} }, 120000);
+    reader.readAsDataURL(f);
+  };
+  function pickHead(cb) {
+    headCb = cb;
+    try { headInput.click(); } catch (e) { toast('无法打开相册，请重试'); }
   }
   function applyProfile() {
     const set = (id, v) => { const el = document.getElementById(id); if (el) el.textContent = v; };
@@ -576,6 +598,23 @@
   // ================= 气泡 CSS（自定义样式，极简黑白灰） =================
   const csCss = row('cs-css');
   const CSS_KEY = 'cs-bubble-css';
+  // v3.14.x：安卓 ce-box 转换后 .value 代理在个别内核读空（mail.js/music-player.js/
+  // period.js 同款先例）——代理读空但 ce-box 里仍有可见内容时直接从盒子取值兜底，
+  // 防「点应用存了空串」→ 重进后退回默认气泡；用户真清空时盒子也是空的，语义不变
+  function cssReadVal(el) {
+    if (!el) return '';
+    let v = '';
+    try { v = el.value || ''; } catch (e) {}
+    if (String(v).trim()) return String(v);
+    try {
+      const box = el.__ceBox || (el.parentNode && el.parentNode.querySelector('.ce-box[data-for="' + (el.id || '') + '"]'));
+      if (box) {
+        const t = box.innerText || box.textContent || '';
+        if (String(t).trim()) return String(t);
+      }
+    } catch (e) {}
+    return v;
+  }
   function applyCss() {
     const old = document.getElementById('cs-bubble-style');
     if (old) old.remove();
@@ -621,7 +660,7 @@
         toast('已清空气泡样式');
       });
       document.getElementById('cs-css-ok').addEventListener('click', () => {
-        const v = (document.getElementById('cs-css-input').value || '').trim();
+        const v = cssReadVal(document.getElementById('cs-css-input')).trim();
         store.set(CSS_KEY, v);
         document.getElementById('tc-mask').hidden = true;
         applyCss();
@@ -725,6 +764,16 @@
           applyFont();
         }
       });
+      // v3.14.x：气泡 CSS 同款兜底——LS 写失败（配额满）或被浏览器清理后值只剩 IDB 副本，
+      // boot 时 applyCss 跑在回填前读空 → 重进后退回默认气泡（荣耀200Pro Edge 实测）。
+      // 启动补读 + 重应用（applyCss 幂等）
+      window.idbGet(myPrefix + ':' + CSS_KEY).then(v => {
+        if (window.activePrefix() !== myPrefix) return;
+        if (v && typeof v === 'string' && v.length > 0 && !store.get(CSS_KEY)) {
+          store.set(CSS_KEY, v);
+          applyCss();
+        }
+      });
     }
   } catch (e) {}
   // v3.7.x 修复：上传字体 dataURL 属大键（>200KB）只进 IDB+memoryCache、localStorage 被删，
@@ -734,6 +783,10 @@
   document.addEventListener('mochi-restore-done', function () {
     try { applyFont(); } catch (e) {}
     try { applyProfile(); } catch (e) {}
+    // v3.14.x：气泡 CSS 补应用——boot 时 applyCss 跑在 IDB 回填完成前（值只在 IDB 时
+    // 读空不注入），字体/头像此前有本兜底而气泡 CSS 漏了 → 重进后回退默认气泡。
+    // applyCss 幂等：会话内已写入时 memoryCache 值更新，重应用无副作用
+    try { applyCss(); } catch (e) {}
   });
   // v3.6.x：多桌面——切换联系人后重新应用聊天美化（壁纸/气泡颜色/字号/形状按新桌面）
   // v3.9.x 修复：气泡 CSS / 全局字体也是按联系人存储（cs-bubble-css / cs-font），
@@ -781,24 +834,25 @@
     setInterval(syncCsEg, 500);
   }
 
-  // v3.7.x：聊天设置「音乐悬浮小窗」开关——与音乐页 #music-float-en / 音乐设置
-  // #sm-set-float 同源（music-global.floatEn，每桌面独立）。本文件先于 music-player.js
+  // v3.7.x：聊天设置「隐藏音乐悬浮小窗」开关——与音乐页 #music-float-en / 音乐设置
+  // #sm-set-float 同源（music-global.floatEn，每桌面独立）。本开关语义反转：勾选=隐藏，
+  // 与「隐藏通话小框」一致（音乐页/音乐设置里仍是勾选=开启）。本文件先于 music-player.js
   // 加载，故优先走 window.musicFloatGet/Set 钩子（完整走保存+悬浮框渲染流程）；
   // 钩子未就绪时退化为直读写 store（切换桌面/初始态兜底，浮框由音乐模块下次渲染兜住）。
   const csMf = document.getElementById('cs-music-float');
   if (csMf) {
-    const mfGet = () => {
-      if (window.musicFloatGet) return !!window.musicFloatGet();
+    const mfGet = () => { // 返回「隐藏中」= !floatEn；floatEn 默认开 → 默认不隐藏
+      if (window.musicFloatGet) return !window.musicFloatGet();
       try {
         const s = JSON.parse(store.get('music-global') || '{}');
-        return s.floatEn !== undefined ? !!s.floatEn : true; // 默认开
-      } catch (e) { return true; }
+        return s.floatEn !== undefined ? !s.floatEn : false;
+      } catch (e) { return false; }
     };
-    const mfSet = (en) => {
-      if (window.musicFloatSet) { window.musicFloatSet(en); return; }
+    const mfSet = (hide) => {
+      if (window.musicFloatSet) { window.musicFloatSet(!hide); return; }
       try {
         const s = JSON.parse(store.get('music-global') || '{}');
-        s.floatEn = !!en;
+        s.floatEn = !hide;
         store.set('music-global', JSON.stringify(s));
       } catch (e) {}
     };
@@ -807,6 +861,7 @@
     csMf.addEventListener('change', () => {
       if (csMf.checked === mfGet()) return;
       mfSet(csMf.checked);
+      toast(csMf.checked ? '音乐悬浮小窗已隐藏：播放时不再显示右上角悬浮小框' : '音乐悬浮小窗已恢复显示：播放时右上角出现悬浮小框');
     });
     // 音乐页/音乐设置/桌面部件改动或切桌面后 500ms 内同步回本页开关
     setInterval(syncCsMf, 500);
@@ -897,5 +952,49 @@
       toast(csBs.checked ? '已开启：聊天输入栏右侧显示「批量发送」按钮，可插入表情包/图片/文字批量发送' : '已关闭：聊天输入栏「批量发送」按钮已隐藏');
     });
     document.addEventListener('contact-switched', syncBs);
+  }
+
+  // v3.16.x：「我可发送语音」开关——默认关闭，每联系人独立。开启后聊天输入栏左侧显示
+  // 「麦克风」按钮：点击打开录音半框，录完可试听并作为语音消息发送进聊天。
+  // 存 cs-voice-send，chat.js 读同一键控制按钮显隐与录音逻辑。
+  const csVs = document.getElementById('cs-voice-send');
+  if (csVs) {
+    const vsGet = () => { try { return store.get('cs-voice-send') === '1'; } catch (e) { return false; } };
+    const vsSet = (en) => { try { store.set('cs-voice-send', en ? '1' : '0'); } catch (e) {} };
+    const syncVs = () => { const v = vsGet(); if (v !== csVs.checked) csVs.checked = v; };
+    syncVs();
+    csVs.addEventListener('change', () => {
+      if (csVs.checked === vsGet()) return;
+      vsSet(csVs.checked);
+      // 通知聊天页即时刷新「麦克风」按钮显隐（不依赖切联系人）
+      try { document.dispatchEvent(new Event('voice-send-changed')); } catch (e) {}
+      toast(csVs.checked ? '已开启：聊天输入栏左侧显示「麦克风」按钮，点击可录音并发送语音' : '已关闭：聊天输入栏「麦克风」按钮已隐藏');
+    });
+    document.addEventListener('contact-switched', syncVs);
+  }
+
+  // v3.12.x：「隐藏联系人的表情包」开关——默认关闭，全局生效（存根命名空间，与
+  // my-emoji-groups 全局化同口径：聊天/朋友圈表情包面板是跨桌面共用 UI，不随桌面切换）。
+  // 开启后聊天与朋友圈的表情包面板只显示「我的表情包」，不再显示 TA 的/公用表情包。
+  // 写回后广播 hide-ta-sticker-changed 事件，chat.js 即时重渲染面板；feed.js 每次打开时读键。
+  const csHts = document.getElementById('cs-hide-ta-sticker');
+  if (csHts) {
+    const GNS = 'xy-home-v2';
+    const KEY = 'hide-ta-sticker';
+    const htsGet = () => {
+      try { if (window.xyStore) return window.xyStore(GNS).get(KEY) === '1'; } catch (e) {}
+      try { return store.get(KEY) === '1'; } catch (e) { return false; }
+    };
+    const htsSet = (en) => { try { if (window.xyStore) window.xyStore(GNS).set(KEY, en ? '1' : '0'); } catch (e) {} };
+    const syncHts = () => { const v = htsGet(); if (v !== csHts.checked) csHts.checked = v; };
+    syncHts();
+    csHts.addEventListener('change', () => {
+      if (csHts.checked === htsGet()) return;
+      htsSet(csHts.checked);
+      try { document.dispatchEvent(new Event('hide-ta-sticker-changed')); } catch (e) {}
+      toast(csHts.checked ? '已隐藏：聊天和朋友圈的表情包面板只显示「我的表情包」' : '已恢复显示 TA 的和公用表情包');
+    });
+    setInterval(syncHts, 500);
+    document.addEventListener('contact-switched', syncHts);
   }
 })();

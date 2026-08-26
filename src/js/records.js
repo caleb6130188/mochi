@@ -32,6 +32,168 @@
     callsSave(list);
     if (!document.getElementById('page-home').hidden) render();
   };
+  // ---- 摸鱼抓包记录（v3.15.x：双向） ----
+  // type='me'：我抓到联系人摸鱼（p2-features.js 桌面浮字点击抓包成功时写入）
+  // type='ta'：被联系人抓到我摸鱼（personalize.js 摸鱼+1 点太频被反向抓包时写入）
+  function catchesLoad() {
+    try { return JSON.parse(store.get('records-fishcatch') || '[]'); } catch (e) { return []; }
+  }
+  function catchesSave(list) { store.set('records-fishcatch', JSON.stringify(list)); } // v3.15.x：用户要求保留全部历史，不设上限（事件本身低频，量级可控）
+  window.addFishCatchRecord = function (type, text) {
+    const list = catchesLoad();
+    list.unshift({ type: type, text: text || '', ts: Date.now() });
+    catchesSave(list);
+    if (!document.getElementById('page-home').hidden) render();
+  };
+  // 摸鱼抓包记录渲染（最新在前，全部保留；文案按当前联系人昵称动态适配）
+  function renderCatch() {
+    const el = document.getElementById('home-catch');
+    if (!el) return;
+    const name = store.get('lbl-partner') || (window.taWord ? window.taWord() : 'TA');
+    const esc = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+    const list = catchesLoad();
+    el.innerHTML = list.length
+      ? list.map(x =>
+          '<div class="tc-listitem"><div class="tc-li-top"><span class="tc-li-q">' +
+          (x.type === 'ta'
+            ? '<svg class="st-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 9v4"/><path d="M12 17h.01"/><path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/></svg>' + name + ' 抓到我摸鱼'
+            : '<svg class="st-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg>' + '抓到 ' + name + ' 摸鱼') +
+          '</span><span class="tc-li-time">' + fmtDT(x.ts) + '</span></div>' +
+          (x.text ? '<div class="tc-li-line">' + (window.taFit ? window.taFit(esc(x.text)) : esc(x.text)) + '</div>' : '') +
+          '</div>'
+        ).join('')
+      : '<div class="ta-empty">暂无摸鱼抓包记录（桌面浮字可点击抓包 TA；点太快会被 TA 反向抓包）</div>';
+  }
+  // ---- 心意币流水（v3.16.x：赚钱 / 申请记录，分列我和当前联系人） ----
+  // 数据由 gift-shop.js 的 giftCoinLedgerLoad 提供（按联系人桌面前缀隔离）；记录结构 { ts, myFen, taFen, src }
+  function renderCoinPanel(kind) {
+    const el = document.getElementById(kind === 'ask' ? 'home-coinask' : 'home-coinearn');
+    if (!el) return;
+    const list = (window.giftCoinLedgerLoad ? window.giftCoinLedgerLoad(kind) : []) || [];
+    const name = store.get('lbl-partner') || (window.taWord ? window.taWord() : 'TA');
+    const myName = store.get('lbl-user') || '我';
+    const esc = (s) => String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+    if (!list.length) {
+      el.innerHTML = '<div class="ta-empty">' + (kind === 'ask' ? '暂无申请记录（可点心意币余额行向 Mochi 申请）' : '暂无赚钱记录（玩游戏、种花、钓鱼都能赚心意币）') + '</div>';
+      return;
+    }
+    const yuan = (fen) => (fen / 100).toFixed(2);
+    el.innerHTML = list.map(x => {
+      let line;
+      if (x.myFen && x.taFen && x.myFen === x.taFen) line = '双方各 +¥' + yuan(x.myFen);
+      else {
+        const parts = [];
+        if (x.myFen) parts.push(myName + ' +¥' + yuan(x.myFen));
+        if (x.taFen) parts.push(name + ' +¥' + yuan(x.taFen));
+        line = parts.join(' · ') || '—';
+      }
+      const src = x.src ? esc(x.src) : (kind === 'ask' ? '向 Mochi 申请' : '赚钱');
+      return '<div class="tc-listitem"><div class="tc-li-top"><span class="tc-li-q">🪙 ' + src + '</span><span class="tc-li-time">' + fmtDT(x.ts) + '</span></div>' +
+        '<div class="tc-li-line">' + line + '</div></div>';
+    }).join('');
+  }
+  // 供 gift-shop.js 记账后即时重绘当前可见的流水面板
+  window.__renderHomeCoin = function () {
+    if (htab === 'coinearn') renderCoinPanel('earn');
+    else if (htab === 'coinask') renderCoinPanel('ask');
+  };
+  // ---- 联系人的关心/提醒记录（v3.16.x：查岗 / 经期关心 / 喝水提醒 / 吃饭提醒 / 番茄陪伴） ----
+  // 事件低频、按联系人桌面隔离；番茄陪伴只记时间不记内容
+  function caresLoad() {
+    try { return JSON.parse(store.get('records-care') || '[]'); } catch (e) { return []; }
+  }
+  function caresSave(list) { store.set('records-care', JSON.stringify(list.slice(0, 100))); }
+  // kind: checkin=查岗 / period=经期关心 / water=喝水提醒 / eat=吃饭提醒 / pomo=番茄陪伴
+  // v3.17.x：desk-checkin=桌面查岗（跨桌面「来消息」触发的查岗，记到【该联系人自己桌面】的
+  // records-care，主页关心记录按联系人聚合展示；与聊天里触发的 checkin 区分，见 renderCarePanel）
+  window.addCareRecord = function (kind, text, ts) {
+    const list = caresLoad();
+    list.unshift({ kind: kind, text: text || '', ts: ts || Date.now() });
+    caresSave(list);
+    const hp = document.getElementById('page-home');
+    if (hp && !hp.hidden && htab === 'care') renderCarePanel();
+  };
+  // v3.17.x：写【指定联系人桌面】的关心记录——跨桌面查岗落在该桌面自己的命名空间
+  window.addCareRecordFor = function (cid, kind, text, ts) {
+    try {
+      const s = (cid && window.storeFor) ? window.storeFor(cid) : store;
+      let list = [];
+      try { list = JSON.parse(s.get('records-care') || '[]'); } catch (e) { list = []; }
+      if (!Array.isArray(list)) list = [];
+      list.unshift({ kind: kind, text: text || '', ts: ts || Date.now() });
+      s.set('records-care', JSON.stringify(list.slice(0, 100)));
+    } catch (e) {}
+  };
+  // 查岗/经期/喝水/吃饭从聊天记录回溯（带 tag 或 ask-card），番茄陪伴读 records-care
+  function renderCarePanel() {
+    const el = document.getElementById('home-care');
+    if (!el) return;
+    const name = store.get('lbl-partner') || (window.taWord ? window.taWord() : 'TA');
+    const esc = (s) => String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+    const KIND_ICON = { checkin: '📋', period: '🌸', water: '💧', eat: '🍚', pomo: '🍅', deskcheck: '🏠' };
+    const rows = [];
+    // 1) 番茄陪伴：records-care 里的 pomo 记录（只记时间）
+    caresLoad().forEach(r => { if (r.kind === 'pomo') rows.push({ icon: '🍅', main: '番茄钟陪伴', sub: fmtDT(r.ts), ts: r.ts }); });
+    // 2) 查岗 / 经期 / 喝水 / 吃饭：从聊天记录回溯
+    let msgs = [];
+    try { msgs = (window.getChatMsgs ? window.getChatMsgs() : JSON.parse(store.get('chat-msgs') || '[]')); } catch (e) {}
+    (msgs || []).forEach(m => {
+      if (!m) return;
+      const t = m.ts || 0;
+      const tag = (m.mood && m.mood[0] && m.mood[0].tag) || '';
+      if (tag === '经期关心') rows.push({ icon: KIND_ICON.period, main: '经期关心 · ' + esc(m.text || ''), sub: fmtDT(t), ts: t });
+      else if (tag === '喝水提醒') rows.push({ icon: KIND_ICON.water, main: '提醒喝水 · ' + esc(m.text || ''), sub: fmtDT(t), ts: t });
+      else if (tag === '吃饭提醒') rows.push({ icon: KIND_ICON.eat, main: '提醒吃饭 · ' + esc(m.text || ''), sub: fmtDT(t), ts: t });
+      // 查岗：ask-card 是问题卡本体；ask-msg 提示语只作补充（若 30s 内已有问卡则不重复列）
+      else if (m.special === 'ask-card' && m.askQuestion) rows.push({ icon: KIND_ICON.checkin, main: '查岗 · ' + esc(m.askQuestion), sub: fmtDT(t), ts: t });
+      else if (m.special === 'ask-msg' && /查岗/.test(m.text || '')) {
+        const nearCard = (msgs || []).some(o => o && o.special === 'ask-card' && o.askQuestion && Math.abs((o.ts || 0) - t) < 30000);
+        if (!nearCard) rows.push({ icon: KIND_ICON.checkin, main: '查岗', sub: fmtDT(t), ts: t });
+      }
+    });
+    // 3) 桌面查岗（v3.17.x）：跨桌面「来消息」触发的查岗——记在各联系人自己桌面的
+    //    records-care（addCareRecordFor 写入），这里按联系人聚合展示。
+    //    与聊天触发的查岗（上一节 checkin）分开列：主文案「桌面查岗 · <联系人昵称>」。
+    if (window.getContacts) {
+      (window.getContacts() || []).forEach(function (c) {
+        let care = [];
+        try {
+          const s = (c.id && window.storeFor) ? window.storeFor(c.id) : store;
+          care = JSON.parse(s.get('records-care') || '[]');
+        } catch (e) { care = []; }
+        (Array.isArray(care) ? care : []).forEach(function (r) {
+          if (!r || r.kind !== 'desk-checkin') return;
+          const cname = (c && c.name) || 'TA';
+          rows.push({ icon: KIND_ICON.deskcheck, main: '桌面查岗 · ' + esc(cname) + ' · ' + esc(r.text || ''), sub: fmtDT(r.ts || 0), ts: r.ts || 0 });
+        });
+      });
+    }
+    if (!rows.length) { el.innerHTML = '<div class="ta-empty">暂无联系人的关心记录（TA 会主动查岗、提醒你喝水吃饭、关心经期、陪你专注）</div>'; return; }
+    rows.sort((a, b) => (b.ts || 0) - (a.ts || 0));
+    el.innerHTML = rows.map(r => '<div class="tc-listitem"><div class="tc-li-top"><span class="tc-li-q">' + r.icon + ' ' + r.main + '</span><span class="tc-li-time">' + r.sub + '</span></div></div>').join('');
+  }
+  // ---- 心意币红包记录（v3.16.x：双向——我发 + 联系人发；红包即心意币，读当前桌面聊天记录） ----
+  function renderRpPanel() {
+    const el = document.getElementById('home-coinrp');
+    if (!el) return;
+    const name = store.get('lbl-partner') || (window.taWord ? window.taWord() : 'TA');
+    const myName = store.get('lbl-user') || '我';
+    const esc = (s) => String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+    let msgs = [];
+    try { msgs = (window.getChatMsgs ? window.getChatMsgs() : JSON.parse(store.get('chat-msgs') || '[]')); } catch (e) {}
+    const list = (msgs || []).filter(m => m && m.special === 'redpacket');
+    if (!list.length) { el.innerHTML = '<div class="ta-empty">暂无红包记录（红包也是心意币，快去发一个试试）</div>'; return; }
+    const stMap = { pending: '待领取', received: '已领取', expired: '已过期·退回', returned: '已退回' };
+    el.innerHTML = list.slice().reverse().map(m => {
+      const out = m.side === 'out';
+      const st = stMap[m.rpStatus || 'pending'] || '';
+      const amt = Number(m.rpAmount || 0).toFixed(2);
+      const sub = (out ? myName + ' 发给 ' + name : name + ' 发给 ' + myName) + ' · ' + (st || '待领取') +
+        (m.rpWish ? ' · 「' + esc(m.rpWish) + '」' : '');
+      return '<div class="tc-listitem"><div class="tc-li-top"><span class="tc-li-q">' + (out ? '🧧 我发红包 ¥' + amt : '🧧 ' + esc(name) + ' 发红包 ¥' + amt) + '</span><span class="tc-li-time">' + fmtDT(m.rpTs || m.ts) + '</span></div>' +
+        '<div class="tc-li-line">' + sub + '</div></div>';
+    }).join('');
+  }
   // ---- 渲染主页记录 ----
   function histList(key) { try { return JSON.parse(store.get(key) || '[]'); } catch (e) { return []; } }
   // v3.9.x：联系人今日情话 / 我的备忘 / 我的心情记录已迁移到日历页按天查看，主页不再保留
@@ -41,7 +203,7 @@
     const el = document.getElementById('home-fish');
     if (!el) return;
     const h = (window.getFishHistory && window.getFishHistory()) || [];
-    const name = store.get('lbl-partner') || 'TA';
+    const name = store.get('lbl-partner') || (window.taWord ? window.taWord() : 'TA');
     const myName = store.get('lbl-user') || '我';
     // 顶部历史累计（我的 + 联系人）
     const tot = (window.getFishTotals && window.getFishTotals()) || { mine: 0, ta: 0 };
@@ -50,7 +212,12 @@
         '<span class="ft-item"><b>' + myName + '</b> 累计 ' + (tot.mine || 0) + '</span>' +
         '<span class="ft-item"><b>' + name + '</b> 累计 ' + (tot.ta || 0) + '</span>' +
       '</div>';
-    el.innerHTML = totalHtml + (h.length
+    // v3.13.x：摸鱼连击纪录（桌面周末组件「摸鱼+1」短时连击的最高存档）
+    const cb = (window.getFishComboBest && window.getFishComboBest()) || { today: 0, best: 0 };
+    const comboHtml = (cb && (cb.today > 0 || cb.best > 0))
+      ? '<div class="fish-combo-line">今日最高连击 ×' + (cb.today || 0) + ' · 历史最高 ×' + (cb.best || 0) + '</div>'
+      : '';
+    el.innerHTML = totalHtml + comboHtml + (h.length
       ? h.map(x => '<div class="tc-listitem"><div class="tc-li-top"><span class="tc-li-q">' + x.date + '</span></div>' +
           '<div class="tc-li-line">' + myName + ' 当天摸鱼：+' + (x.mine || 0) + '</div>' +
           '<div class="tc-li-line">' + name + ' 当天摸鱼：+' + (x.ta || 0) + '</div></div>').join('')
@@ -61,7 +228,7 @@
     const el = document.getElementById('home-work');
     if (!el) return;
     const h = (window.getWorkHistory && window.getWorkHistory()) || [];
-    const name = store.get('lbl-partner') || 'TA';
+    const name = store.get('lbl-partner') || (window.taWord ? window.taWord() : 'TA');
     const myName = store.get('lbl-user') || '我';
     const tot = (window.getWorkTotals && window.getWorkTotals()) || { mine: 0, ta: 0 };
     const totalHtml =
@@ -86,16 +253,35 @@
     if (showOnly === 'fish') {
       window.renderFishHistory();
     }
+    // 摸鱼抓包记录（双向：我抓到 TA / 被 TA 抓到）
+    if (showOnly === 'catch') {
+      renderCatch();
+    }
+    // 心意币赚钱记录 / 申请记录（v3.16.x）
+    if (showOnly === 'coinearn') {
+      renderCoinPanel('earn');
+    }
+    if (showOnly === 'coinask') {
+      renderCoinPanel('ask');
+    }
+    // 心意币红包记录（v3.16.x：双向）
+    if (showOnly === 'coinrp') {
+      renderRpPanel();
+    }
+    // 联系人的关心/提醒记录（v3.16.x）
+    if (showOnly === 'care') {
+      renderCarePanel();
+    }
     // 换头像记录（全部事件：直接换 / 邀请同意 / 邀请拒绝 / 我手动更换）
     if (showOnly === 'av') {
       const avEl = document.getElementById('home-av');
       if (avEl) {
         const list = avatarsLoad();
-        const name = store.get('lbl-partner') || 'TA';
+        const name = store.get('lbl-partner') || (window.taWord ? window.taWord() : 'TA');
         const esc = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
         avEl.innerHTML = list.length
           ? list.map(x =>
-              '<div class="tc-listitem"><div class="tc-li-top"><span class="tc-li-q">' + esc(x.text || (name + ' 更换了头像')) + '</span><span class="tc-li-time">' + fmtDT(x.ts) + '</span></div>' +
+              '<div class="tc-listitem"><div class="tc-li-top"><span class="tc-li-q">' + (window.taFit ? window.taFit(esc(x.text || (name + ' 更换了头像'))) : esc(x.text || (name + ' 更换了头像'))) + '</span><span class="tc-li-time">' + fmtDT(x.ts) + '</span></div>' +
               (x.img ? '<img class="rec-av-img" src="' + x.img + '" alt="头像">' : '') +
               '</div>'
             ).join('')
@@ -107,13 +293,13 @@
       const callEl = document.getElementById('home-call');
       if (callEl) {
         const list = callsLoad();
-        const name = store.get('lbl-partner') || 'TA';
+        const name = store.get('lbl-partner') || (window.taWord ? window.taWord() : 'TA');
         callEl.innerHTML = list.length
           ? list.map(x =>
               '<div class="tc-listitem"><div class="tc-li-top"><span class="tc-li-q">' +
               (x.type === 'in' ? '<svg class="st-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M22 16.92v3a2 2 0 01-2.18 2 19.79 19.79 0 01-8.63-3.07 19.5 19.5 0 01-6-6 19.79 19.79 0 01-3.07-8.67A2 2 0 014.11 2h3a2 2 0 012 1.72 12.84 12.84 0 00.7 2.81 2 2 0 01-.45 2.11L8.09 9.91a16 16 0 006 6l1.27-1.27a2 2 0 012.11-.45 12.84 12.84 0 002.81.7A2 2 0 0122 16.92z"/></svg>' + name + ' 来电' : '<svg class="st-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M22 16.92v3a2 2 0 01-2.18 2 19.79 19.79 0 01-8.63-3.07 19.5 19.5 0 01-6-6 19.79 19.79 0 01-3.07-8.67A2 2 0 014.11 2h3a2 2 0 012 1.72 12.84 12.84 0 00.7 2.81 2 2 0 01-.45 2.11L8.09 9.91a16 16 0 006 6l1.27-1.27a2 2 0 012.11-.45 12.84 12.84 0 002.81.7A2 2 0 0122 16.92z"/><path d="M16 3v6M19 6h-6"/></svg>' + name + ' 拨打') +
               '</span><span class="tc-li-time">' + fmtDT(x.ts) + '</span></div>' +
-              (x.text ? '<div class="tc-li-line">' + x.text + '</div>' : '') +
+              (x.text ? '<div class="tc-li-line">' + (window.taFit ? window.taFit(x.text) : x.text) + '</div>' : '') +
               '</div>'
             ).join('')
           : '<div class="ta-empty">暂无通话记录</div>';

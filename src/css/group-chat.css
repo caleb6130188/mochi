@@ -8,6 +8,10 @@
   font-size: 10px; color: #888; margin-bottom: 2px;
   display: block; max-width: 64px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
+/* v3.16.x：昵称显示开启时，任何时间轴样式下都保持「昵称在头像上方」——
+   cs-time-bubble 把 .msg-side 改成行向布局，需换行让昵称独占一行 */
+#page-group-chat.cs-time-bubble .msg-side { flex-wrap: wrap; }
+#page-group-chat.cs-time-bubble .msg-side .gc-from-name { width: 100%; text-align: center; }
 
 /* contenteditable placeholder（复用 .chat-input 的，此处兜底） */
 .gc-input:empty:before {
@@ -16,6 +20,21 @@
 
 /* ---- 右上角三点下拉菜单（v3.9.x） ---- */
 .gc-head { position: relative; }
+
+/* ---- 共享更多面板分类行最右的 @群成员（v3.16.x：仅群聊打开时显示，聊天页隐藏） ---- */
+.more-tabs { align-items: center; }
+.gc-more-at-top {
+  display: inline-flex; align-items: center; gap: 5px;
+  margin-left: auto; /* 推到分类 tabs 最右 */
+  padding: 6px 12px; font-size: 12px; font-weight: 600; color: #444;
+  background: rgba(0,0,0,.04); border: none; border-radius: 99px;
+  cursor: pointer; font-family: inherit; -webkit-tap-highlight-color: transparent;
+  flex-shrink: 0;
+}
+.gc-more-at-top[hidden] { display: none; }
+.gc-more-at-top svg { width: 15px; height: 15px; flex-shrink: 0; }
+.gc-more-at-top:active { background: rgba(0,0,0,.09); }
+
 .gc-more-menu {
   position: absolute; top: 42px; right: 2px; z-index: 60;
   min-width: 148px; padding: 4px;

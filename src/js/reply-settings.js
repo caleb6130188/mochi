@@ -24,10 +24,21 @@
     // 猜拳/游戏邀请（游戏在 Pong/贪吃蛇中随机），命中后打开对应半框取代普通消息；
     // 概率默认低于普通主动消息，避免邀请过于频繁
     // v3.9.x：再降默认概率（15%/10% → 8%/5%）——用户反馈邀请太频繁，降一半
+    // v3.14.x：贴贴邀请（cuddle）独立门——正常情侣贴贴互动，同意后 TA 回应一句；
+    // 默认开 5%（与游戏门同档），话术在字卡库「TA的邀请」贴贴分类逐句开关
     'ai-rps-en': 1, 'ai-rps-prob': 8, 'ai-game-en': 1, 'ai-game-prob': 5,
+    'ai-cuddle-en': 1, 'ai-cuddle-prob': 5,
+    // v3.15.x：TA 主动分享用户自建字卡——从字卡库（含公用）抽一张纯文本卡当 TA 的
+    // 悄悄话发出来；默认开 4%（低于其他邀请门，避免频繁占用「主动消息」观感），
+    // 池过滤与冷却见 ta-ask.js maybeTriggerTACC
+    'ai-cc-en': 1, 'ai-cc-prob': 4,
     // v3.9.x：TA 主动查岗——主动发送轮里 TA 按概率来查你的岗（查岗问题卡进聊天，
     // 概率自动弹回答弹窗，作答后 TA 回应）；冷却默认 30 分钟防高概率连查
-    'ckq-en': 1, 'ckq-prob': 15, 'ckq-popup-prob': 70, 'ckq-cool': 30,
+    // v3.12.x：默认概率 15% → 8%——用户反馈互动卡片整体太频繁（询问/小问题/好奇/吐槽同步降半）
+    // v3.13.x：互动卡整体降频第二轮——五类卡加全局闸门（任一卡发出后 60 分钟内其余类型不再自动触发，
+    // 见 ta-ask.js interactGateOk）+ 存量旧默认概率一次性迁移到 5%；本文件 ckq-prob 默认 8 保持不变，
+    // ck-question.js 的兜底默认已从 15 对齐为 8
+    'ckq-en': 1, 'ckq-prob': 8, 'ckq-popup-prob': 70, 'ckq-cool': 30,
     // 信箱（星言信箱设置）
     // v3.5.99：最长写信/回信时间默认 480 分钟（8 小时）太久，容易让用户误以为 TA 不写信，改为 120 分钟
     // v3.6.x：默认最多字卡条数 100 → 50（信太长反而像刷屏）；新增最少字卡条数默认 20
@@ -101,6 +112,21 @@
     return out;
   }
   window.replyCfg = getCfg;
+  // v3.17.x：跨桌面「来消息」用——读取【指定联系人桌面】的回复设置（非当前桌面）。
+  // getCfg 用 activeStore() 读当前激活桌面，这里改用 storeFor(cid)；gc-* 群聊设置
+  // 仍是全局（与 getCfg 同）。供 incoming-requests.js 按各桌面自己的开关/概率/冷却调度。
+  window.replyCfgFor = function (cid) {
+    const out = {};
+    let s = null;
+    try { s = (cid && window.storeFor) ? window.storeFor(cid) : ls; } catch (e) { s = ls; }
+    Object.keys(DEFAULTS).forEach(k => {
+      const v = k.indexOf('gc-') === 0 ? gcRead(k) : (s ? s.get('reply-' + k) : null);
+      let n = (v === null || v === undefined || v === '') ? DEFAULTS[k] : Number(v);
+      if (isNaN(n)) n = DEFAULTS[k];
+      out[k] = n;
+    });
+    return out;
+  };
   // v3.9.x：群聊页/群聊回复逻辑读取群聊回复设置（含默认值）
   window.groupChatCfg = function () {
     try {
@@ -151,7 +177,7 @@
       }
     });
     // 开关
-    ['py-en', 'as-en', 'dnd-en', 'as-badge', 'ml-kaomoji-en', 'ml-emoji-en', 'ml-sticker-en', 'cs-normal', 'cs-trigger-name', 'cs-trigger-bar', 'gc-py-en', 'ai-rps-en', 'ai-game-en', 'ckq-en'].forEach(k => {
+    ['py-en', 'as-en', 'dnd-en', 'as-badge', 'ml-kaomoji-en', 'ml-emoji-en', 'ml-sticker-en', 'cs-normal', 'cs-trigger-name', 'cs-trigger-bar', 'gc-py-en', 'ai-rps-en', 'ai-game-en', 'ai-cuddle-en', 'ai-cc-en', 'ckq-en'].forEach(k => {
       const el = document.getElementById(k);
       if (el) el.checked = cfg[k] === 1;
     });
@@ -238,7 +264,7 @@
     });
   });
   // 开关交互
-  ['py-en', 'as-en', 'dnd-en', 'as-badge', 'ml-kaomoji-en', 'ml-emoji-en', 'ml-sticker-en', 'cs-normal', 'cs-trigger-name', 'cs-trigger-bar', 'gc-py-en', 'ai-rps-en', 'ai-game-en', 'ckq-en'].forEach(k => {
+  ['py-en', 'as-en', 'dnd-en', 'as-badge', 'ml-kaomoji-en', 'ml-emoji-en', 'ml-sticker-en', 'cs-normal', 'cs-trigger-name', 'cs-trigger-bar', 'gc-py-en', 'ai-rps-en', 'ai-game-en', 'ai-cuddle-en', 'ai-cc-en', 'ckq-en'].forEach(k => {
     const el = document.getElementById(k);
     if (el) {
       el.addEventListener('change', () => {
@@ -290,7 +316,7 @@
             window.saveReplyCfg(k, v);
           }
         });
-        ['py-en', 'as-en', 'dnd-en', 'as-badge', 'ml-kaomoji-en', 'ml-emoji-en', 'ml-sticker-en', 'cs-normal', 'cs-trigger-name', 'cs-trigger-bar', 'gc-py-en', 'ai-rps-en', 'ai-game-en', 'ckq-en'].forEach(k => {
+        ['py-en', 'as-en', 'dnd-en', 'as-badge', 'ml-kaomoji-en', 'ml-emoji-en', 'ml-sticker-en', 'cs-normal', 'cs-trigger-name', 'cs-trigger-bar', 'gc-py-en', 'ai-rps-en', 'ai-game-en', 'ai-cuddle-en', 'ai-cc-en', 'ckq-en'].forEach(k => {
           const el = document.getElementById(k);
           if (el) window.saveReplyCfg(k, el.checked ? 1 : 0);
         });

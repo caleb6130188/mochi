@@ -5,6 +5,40 @@
 (function () {
   const uid = 'xy-home-v2';
   const store = window.xyStore(uid);
+  // v3.13.x：根键滞留回收——contacts.js EXCLUDE 生效前，migrateLegacy 曾把 feed-* 根键
+  // 当旧顶层业务键迁进 default: 并删根键（首次迁移；其后 default 已有副本时每次刷新
+  // 连迁移都不做直接删根键）→ 朋友圈通知列表/未读角标/双方朋友圈昵称头像/封面每次
+  // 刷新全丢（用户反馈：联系人回复我朋友圈评论没有提示）。这里把仍滞留在 default: 的
+  // 副本一次性搬回根命名空间（根键已有值不覆盖，搬完删副本），幂等；等 restore-done
+  // 后跑（大键已从 IDB 回填再搬，避免读到空）。EXCLUDE 已补，此后不会再产生新滞留。
+  (function feedRootRescue() {
+    const KEYS = ['feed-notices', 'feed-app-unread', 'feed-cover-bg', 'feed-ta-cover', 'feed-ta-name', 'feed-ta-avatar', 'feed-user-name', 'feed-user-avatar', 'feed-last', 'feed-next', 'feed-day-count'];
+    function run() {
+      try {
+        const root = window.xyStore('xy-home-v2');
+        const def = window.xyStore('xy-home-v2:default');
+        KEYS.forEach(function (k) {
+          let rv = null;
+          try { rv = root.get(k); } catch (e) {}
+          if (rv !== null && rv !== undefined && rv !== '') { try { def.remove(k); } catch (e) {} return; }
+          let dv = null;
+          try { dv = def.get(k); } catch (e) {}
+          if (dv !== null && dv !== undefined && dv !== '') {
+            try { root.set(k, dv); } catch (e) {}
+            try { def.remove(k); } catch (e) {}
+          }
+        });
+        try { renderNoticeBadge(); } catch (e) {}
+      } catch (e) {}
+    }
+    if (window.__mochiDataReady) { run(); return; }
+    try {
+      document.addEventListener('mochi-restore-done', function h() {
+        document.removeEventListener('mochi-restore-done', h);
+        run();
+      });
+    } catch (e) {}
+  })();
   const KEY = 'feed-posts';
   // v3.7.x：LS 剥图快照兜底——主键 >200KB（含图片 dataURL）时 xyStore 只进
   // IndexedDB + 内存缓存（LS 5MB 配额保护），Edge 等浏览器杀后台/强制关闭会丢
@@ -161,11 +195,51 @@
   //   save 只暂存内存（feedPending），绝不落盘；load 合并暂存，弹窗提示过的动态都可见。
   let feedDbReady = false;
   let feedPending = null;
-  // 按 id 合并两个动态列表（后者覆盖同 id），按 ts 倒序
+  // v3.10.x 修复「评论聊了多个回合次日只剩一条」：同 id 动态深度合并。
+  //   原实现 post 级后者整条覆盖——启动权威回读 feedMergeFromIdb 里本地副本（LS 主键/
+  //   剥图快照）优先级高于 IDB，而本地副本可能陈旧：主键 >200KB 时只进 IDB 不进 LS，
+  //   剥图快照超 200KB 会静默停写冻结在旧时刻，iOS 还可能在存储压力下清 LS 键——
+  //   陈旧本地版本整条盖掉 IDB 里带全部后续评论的新版本并随即写回 IDB，旧评论永久丢失。
+  //   改为字段择优 + 评论/回复/点赞按内容并集，任一侧的新数据都不再被整条挤掉。
+  function itemKey(o) { return (o && o.ts ? o.ts : 0) + '|' + (o.role || o.by || '') + '|' + (o.authorName || '') + '|' + (o.content || ''); }
+  function deeperList(a, b) {
+    const byKey = {};
+    const put = (o) => {
+      if (!o || typeof o !== 'object') return;
+      const k = itemKey(o);
+      const prev = byKey[k];
+      if (!prev) { byKey[k] = Object.assign({}, o); return; }
+      if (Array.isArray(o.replies) && o.replies.length) prev.replies = deeperList(prev.replies || [], o.replies);
+      else if (!Array.isArray(prev.replies) && Array.isArray(o.replies)) prev.replies = o.replies;
+    };
+    (a || []).forEach(put);
+    (b || []).forEach(put);
+    return Object.keys(byKey).map(k => byKey[k]).sort((x, y) => (x.ts || 0) - (y.ts || 0));
+  }
+  function unionStrArr(a, b) {
+    const out = [], seen = {};
+    (a || []).concat(b || []).forEach(s => { if (typeof s === 'string' && !seen[s]) { seen[s] = 1; out.push(s); } });
+    return out;
+  }
+  function deepMergePost(a, b) {
+    const newer = (b.ts || 0) >= (a.ts || 0) ? b : a;
+    const older = newer === a ? b : a;
+    const out = Object.assign({}, older, newer);
+    // 剥图快照侧 content 内联图被换成 [图片]、imgs/头像被清空——取未剥图的完整版
+    if ((older.content || '').length > (newer.content || '').length) out.content = older.content;
+    out.imgs = (newer.imgs && newer.imgs.length) ? newer.imgs : (older.imgs || []);
+    if (!out.authorAv && older.authorAv) out.authorAv = older.authorAv;
+    if (!out.taAv && older.taAv) out.taAv = older.taAv;
+    out.likes = unionStrArr(older.likes, newer.likes);
+    out.comments = deeperList(older.comments, newer.comments);
+    return out;
+  }
+  // 按 id 合并两个动态列表（同 id 深度合并，见 deepMergePost），按 ts 倒序
   function mergePosts(a, b) {
     const map = {};
-    (a || []).forEach(p => { if (p && p.id) map[p.id] = p; });
-    (b || []).forEach(p => { if (p && p.id) map[p.id] = p; });
+    const put = p => { if (p && p.id) map[p.id] = map[p.id] ? deepMergePost(map[p.id], p) : p; };
+    (a || []).forEach(put);
+    (b || []).forEach(put);
     return Object.keys(map).map(k => map[k]).sort((x, y) => (y.ts || 0) - (x.ts || 0));
   }
   function load() {
@@ -201,7 +275,25 @@
   //   抽成独立函数：预就绪落盘时也复用，保证评论/动态在任何阶段都有持久兜底。
   function persistSnap(arr) {
     try {
-      const snap = JSON.stringify(arr.map(stripPostImg));
+      const items = arr.map(stripPostImg);
+      // v3.10.x：只做一次全量序列化——原实现先 stringify 探大小、结尾再 stringify 一次
+      //   （超限裁剪时循环里还逐条 stringify），每次评论/点赞都多付 1~2 次兆级序列化
+      let snap = JSON.stringify(items);
+      // v3.10.x：剥图后仍超 200KB 时按新→旧裁剪动态数——原实现直接静默跳过，
+      //   快照从此冻结在旧时刻不再更新，之后每次重启权威合并都用它盖掉 IDB 新评论
+      //   （丢评论根因之一）；裁剪保证快照始终可写、始终含最新动态
+      if (snap.length > LS_BIG_LIMIT) {
+        const sorted = items.slice().sort((x, y) => (y.ts || 0) - (x.ts || 0));
+        let budget = LS_BIG_LIMIT - 2;
+        const keep = [];
+        for (let i = 0; i < sorted.length; i++) {
+          const cost = JSON.stringify(sorted[i]).length + 1;
+          if (budget - cost < 0) break;
+          budget -= cost;
+          keep.push(sorted[i]);
+        }
+        snap = JSON.stringify(keep);
+      }
       if (snap.length <= LS_BIG_LIMIT) localStorage.setItem('xy-home-v2:default:' + SNAP_KEY, snap);
     } catch (e) {}
   }
@@ -258,8 +350,11 @@
       return pk.length ? new Set(pk) : null;
     })();
     const text = [], kaomoji = [], emoji = [];
-    const mediaSticker = cid ? (window.getMediaCardsFor ? window.getMediaCardsFor(cid, 'sticker') : []) : ((window.getMediaCards && window.getMediaCards('sticker')) || []);
-    const mediaImage = cid ? (window.getMediaCardsFor ? window.getMediaCardsFor(cid, 'image') : []) : ((window.getMediaCards && window.getMediaCards('image')) || []);
+    // v3.11.x：只收 dataURL 媒体——朋友圈配图会把图片拼进正文文本（data:image 正则
+    // 识别内联），链接导入的 http(s) 字卡进来只会显示成一段 URL 文字，先过滤掉
+    const onlyData = (arr) => (arr || []).filter(s => typeof s === 'string' && s.indexOf('data:') === 0);
+    const mediaSticker = onlyData(cid ? (window.getMediaCardsFor ? window.getMediaCardsFor(cid, 'sticker') : []) : ((window.getMediaCards && window.getMediaCards('sticker')) || []));
+    const mediaImage = onlyData(cid ? (window.getMediaCardsFor ? window.getMediaCardsFor(cid, 'image') : []) : ((window.getMediaCards && window.getMediaCards('image')) || []));
     cards.forEach(c => {
       if (pokeSet && pokeSet.has(c)) return;
       if (typeof c === 'string' && c.indexOf('data:') === 0) return; // dataURL 已按媒体分类
@@ -273,13 +368,25 @@
     // v3.7.x：默认字卡补池——TA 发动态/评论素材不足时用系统默认字卡补，
     //   受「朋友圈使用」场景开关控制（聊天默认字卡-设置页可关闭）
     // v3.8.x：分类开关——已关闭的默认字卡分类不参与补池
+    // v3.12.x：三处对齐聊天页语义——
+    //   ① 开关按【该联系人桌面】读（defaultCardApiFor(storeFor(cid))）：某联系人桌面
+    //      关「朋友圈使用」→ 只有这个联系人的动态/评论不用默认字卡；
+    //   ② main 去掉「自定义为空才补」门——加了公用/专属字卡后 text 永远非空，
+    //      4621 张默认字卡从此不参与（用户反馈：朋友圈只会用自定义字卡）。
+    //      开启即始终混入（同 chat.js getPool / 群聊 gcPool）；
+    //   ③ 补上单卡开关过滤（此前朋友圈漏过滤 dc-off-*）+ 总开关 dc-enabled 检查
     try {
-      if (window.defaultCardUse && window.defaultCardUse('feed') && window.getDefaultCardGroups) {
+      const st = (cid && window.storeFor) ? window.storeFor(cid) : null;
+      const a = (window.defaultCardApiFor && st) ? window.defaultCardApiFor(st) : null;
+      const useFeed = a ? a.use('feed') : (window.defaultCardUse ? window.defaultCardUse('feed') : true);
+      const en = a ? a.enabled() : ((window.defaultCardCfg && window.defaultCardCfg().enabled) !== false);
+      if (en && useFeed && window.getDefaultCardGroups) {
         const gd = window.getDefaultCardGroups;
-        const catOn = window.defaultCardCat || (() => true);
-        if (catOn('main') && !text.length) (gd('main') || []).forEach(g => (g[1] || []).forEach(c => { if (typeof c === 'string' && c) text.push(c); }));
-        if (catOn('kaomoji') && !kaomoji.length) (gd('kaomoji') || []).forEach(g => (g[1] || []).forEach(c => { if (typeof c === 'string' && c) kaomoji.push(c); }));
-        if (catOn('emoji') && !emoji.length) (gd('emoji') || []).forEach(g => (g[1] || []).forEach(c => { if (typeof c === 'string' && c) emoji.push(c); }));
+        const catOn = a ? a.cat : (window.defaultCardCat || (() => true));
+        const isOff = a ? a.isOff : (window.isDefaultCardOff || null);
+        if (catOn('main')) (gd('main') || []).forEach(g => (g[1] || []).forEach(c => { if (isOff && isOff('main', c)) return; if (typeof c === 'string' && c) text.push(c); }));
+        if (catOn('kaomoji') && !kaomoji.length) (gd('kaomoji') || []).forEach(g => (g[1] || []).forEach(c => { if (isOff && isOff('kaomoji', c)) return; if (typeof c === 'string' && c) kaomoji.push(c); }));
+        if (catOn('emoji') && !emoji.length) (gd('emoji') || []).forEach(g => (g[1] || []).forEach(c => { if (isOff && isOff('emoji', c)) return; if (typeof c === 'string' && c) emoji.push(c); }));
       }
     } catch (e) {}
     return { text: text, kaomoji: kaomoji, emoji: emoji, sticker: mediaSticker, image: mediaImage };
@@ -288,17 +395,22 @@
   function esc(s) { return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;'); }
   function attrEsc(s) { return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/'/g, '&#39;'); }
   // 图文混排正文渲染（与聊天一致）：data:image 段 → 内联图片，其余文字保留空格
-  function inlineBody(s) {
+  // v3.x.x：称呼跟随——文字段按动态所属联系人(owner cid)在显示层替换 TA/他
+  function inlineBody(s, cid) {
     const str = String(s || '');
     let html = '';
     const re = /(data:image\/[a-zA-Z0-9.+-]+;base64,[A-Za-z0-9+/=]+)/g;
     let last = 0, m;
+    const fitSeg = (seg) => {
+      seg = seg.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+      return (cid && window.taFit) ? window.taFit(seg, cid) : seg;
+    };
     while ((m = re.exec(str))) {
-      html += str.slice(last, m.index).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+      html += fitSeg(str.slice(last, m.index));
       html += '<img class="feed-inline-img" src="' + m[0] + '" alt="图片">';
       last = m.index + m[0].length;
     }
-    html += str.slice(last).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+    html += fitSeg(str.slice(last));
     return html;
   }
   // 无重复抽取器：同一轮生成内不重复抽同一张卡（池子抽完一轮后重新洗牌再继续），
@@ -394,24 +506,37 @@
     // 引擎会在 'data:image' 中间误匹配 'image'，导致后面 (data:image…) 整体匹配失败
     // （mail.js renderBody 同款已生效模式）
     content = content.replace(/((?:sticker|image):)?(data:image\/[a-zA-Z0-9.+-]+;base64,[A-Za-z0-9+/=]+)/g, (m, pre, u) => { imgs.push(u); return ' '; });
-    let html = inlineBody(content);
+    let html = inlineBody(content, (p.role || p.by) === 'me' ? '' : p.owner);
     if (imgs.length) {
       html += '<div class="feed-imgs">' + imgs.map(u => '<img src="' + attrEsc(u) + '" alt="图片" loading="lazy">').join('') + '</div>';
     }
     return html;
   }
   // 评论区 HTML（v3.5.95：提升到模块作用域，主列表 + 全部朋友圈共用）
+  // v3.14.x：回复目标按对话轮次解析——不再一律指向原评论作者（旧版 TA 回应我的回复
+  //   会显示成「联系人 回复 联系人」）。每条新回复写入 to=被回复人昵称快照；旧数据无 to
+  //   时按「本楼最近一位与我不同名的发言者」推断。回复行可点 → 定向回复该条作者。
   function commentsHtmlFor(p, name) {
     if (!p.comments || !p.comments.length) return '';
     return '<div class="feed-comments">' + p.comments.map((c, ci) => {
-      const cName = esc(c.authorName || ((c.role || c.by) === 'me' ? feedUserName() : (name || taFeedName())));
-      const cBody = inlineBody(c.content);
+      const cNameRaw = c.authorName || ((c.role || c.by) === 'me' ? feedUserName() : (name || taFeedName()));
+      const cName = esc(cNameRaw);
+      const cBody = inlineBody(c.content, (c.role || c.by) === 'me' ? '' : p.owner);
       let repliesHtml = '';
       if (c.replies && c.replies.length) {
-        repliesHtml = '<div class="feed-replies">' + c.replies.map(r => {
-          const rName = esc(r.authorName || ((r.role || r.by) === 'me' ? feedUserName() : (name || taFeedName())));
-          const rBody = inlineBody(r.content);
-          return '<div class="feed-reply"><b>' + rName + '</b> 回复 <b>' + cName + '</b>：' + rBody + '</div>';
+        // v3.11.x：回复加 data-ri——通知点击可直接定位闪烁到具体这条回复
+        // v3.14.x：data-ci/data-ri 供点行定向回复；to 缺失按发言轮次推断（存量数据兼容）
+        const speakers = [cNameRaw];
+        repliesHtml = '<div class="feed-replies">' + c.replies.map((r, ri) => {
+          const rNameRaw = r.authorName || ((r.role || r.by) === 'me' ? feedUserName() : (name || taFeedName()));
+          let toRaw = (typeof r.to === 'string' && r.to) ? r.to : '';
+          if (!toRaw) {
+            for (let i = speakers.length - 1; i >= 0; i--) { if (speakers[i] !== rNameRaw) { toRaw = speakers[i]; break; } }
+            if (!toRaw) toRaw = cNameRaw !== rNameRaw ? cNameRaw : feedUserName();
+          }
+          speakers.push(rNameRaw);
+          const rBody = inlineBody(r.content, (r.role || r.by) === 'me' ? '' : p.owner);
+          return '<div class="feed-reply" data-ci="' + ci + '" data-ri="' + ri + '"><b>' + esc(rNameRaw) + '</b><span class="fd-r-sep">回复</span><b>' + esc(toRaw) + '</b>：' + rBody + '</div>';
         }).join('') + '</div>';
       }
       return '<div class="feed-comment" data-c="' + p.id + '" data-ci="' + ci + '">' +
@@ -501,37 +626,83 @@
     if (v) return safeBg(v, 'feed-ta-cover', s);
     return safeBg(store.get('feed-ta-cover'), 'feed-ta-cover', store);
   }
+  // v3.10.x：单张动态卡片 HTML（主列表模板）——render 全量渲染与评论/点赞后的
+  //   局部刷新（refreshPostCard）共用同一模板，避免两处 markup 漂移
+  function postCardHtml(p, name) {
+    const isMine = (p.role || p.by) === 'me';
+    // v3.7.x：旧数据缺 authorName 快照时，昵称回退按动态所属桌面取
+    // v3.8.x：'me' 动态作者/头像也读朋友圈独立身份（按动态所属桌面）
+    const author = p.authorName || (isMine ? feedUserNameFor(p.owner || 'default') : taFeedNameFor(p.owner || 'default'));
+    // v3.7.x：跨桌面——TA 动态头像按动态所属桌面取，不再显示当前桌面的 TA 头像
+    const av = p.authorAv || (isMine ? feedUserAvFor(p.owner || 'default') : taAvFor(p.owner || 'default'));
+    // 头像可点击 → 打开该联系人的全部朋友圈
+    const avWrap = '<div class="feed-head-av" data-owner="' + esc(p.owner || '') + '" title="查看' + esc(author) + '的全部朋友圈">' + avHtml(av) + '</div>';
+    // 点赞列表：显示"XX、XX 觉得很赞"
+    const likes = p.likes && p.likes.length
+      ? '<div class="feed-likes"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" style="width:12px;height:12px;vertical-align:-2px;margin-right:5px"><path d="M12 21s-7.5-4.7-9.3-9A5.3 5.3 0 0112 6.4a5.3 5.3 0 019.3 5.6c-1.8 4.3-9.3 9-9.3 9z"/></svg>' + esc(p.likes.join('、')) + ' 觉得很赞</div>'
+      : '';
+    const liked = p.likes && p.likes.some(l => l === feedUserName());
+    return '<div class="feed-post" id="feed-post-' + p.id + '"><div class="feed-head">' + avWrap +
+      '<div class="feed-who"><div class="feed-name">' + esc(author) + '</div><div class="feed-time">' + fmtDT(p.ts) + '</div></div>' +
+      '<button class="feed-del" data-id="' + p.id + '" title="删除"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:14px;height:14px"><path d="M3 6h18M8 6V4a1 1 0 011-1h6a1 1 0 011 1v2"/><path d="M6 6l1 14a2 2 0 002 2h6a2 2 0 002-2l1-14"/></svg></button>' + '</div>' +
+      '<div class="feed-content">' + contentHtmlFor(p) + '</div>' +
+      '<div class="feed-actions">' +
+      '<button class="feed-act' + (liked ? ' liked' : '') + '" data-like="' + p.id + '"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:15px;height:15px;vertical-align:-3px;margin-right:4px"><path d="M12 21s-7.5-4.7-9.3-9A5.3 5.3 0 0112 6.4a5.3 5.3 0 019.3 5.6c-1.8 4.3-9.3 9-9.3 9z"/></svg>赞</button>' +
+      '<button class="feed-act" data-comment="' + p.id + '"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:15px;height:15px;vertical-align:-3px;margin-right:4px"><path d="M21 11.5a8.38 8.38 0 01-.9 3.8 8.5 8.5 0 01-7.6 4.7 8.38 8.38 0 01-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 01-.9-3.8 8.5 8.5 0 014.7-7.6 8.38 8.38 0 018 8v.5z"/></svg>评论</button>' +
+      '</div>' + likes + commentsHtmlFor(p, name) + '</div>';
+  }
   // 渲染动态列表
+  // v3.12.x：列表窗口化渲染——TA 自动发帖每天累积、动态含 dataURL 配图，原实现每次进页把
+  // 全部动态一次性 innerHTML 进列表（挂机数月可达数百上千条），整页 <img> 位图解码的内存
+  // 峰值是安卓 Chrome「网页崩溃」（渲染进程 OOM）的主要触发点。改为只渲染最新 FEED_RENDER_MAX
+  // 条，更早的经底部「查看更早」按 FEED_LOAD_STEP 增量插入；存储不裁剪、历史零丢失。
+  // 初始窗口取 200 兼容既有回归（verify-feed-comment-perf 种子 151 条需全量可见）。
+  const FEED_RENDER_MAX = 200, FEED_LOAD_STEP = 100;
+  let feedShownMain = 0, feedShownAll = 0;
+  function feedMoreBtnHtml(remaining) {
+    return '<button class="feed-more-btn" type="button">查看更早的动态（还有 ' + remaining + ' 条）</button>';
+  }
+  // 「查看更早」点击：插入下一批卡片后给新按钮重新挂监听（按钮每次重建，必须重绑）
+  function feedBindMoreBtn(listEl) {
+    const moreBtn = listEl.querySelector('.feed-more-btn');
+    if (!moreBtn) return;
+    moreBtn.addEventListener('click', () => {
+      const isAll = listEl.id === 'feed-all-list';
+      let posts = feedSortedAll();
+      if (isAll) posts = posts.filter(p => (p.owner || 'default') === feedAllCid);
+      const shown = isAll ? feedShownAll : feedShownMain;
+      const end = Math.min(posts.length, shown + FEED_LOAD_STEP);
+      if (end <= shown) { moreBtn.remove(); return; }
+      const htmlFn = isAll ? postCardHtmlAll : (p => postCardHtml(p, partnerName()));
+      moreBtn.remove();
+      const tmp = document.createElement('div');
+      tmp.innerHTML = posts.slice(shown, end).map(htmlFn).join('');
+      // 先取静态数组再逐张搬移——tmp.children 是活 HTMLCollection，边 appendChild（节点
+      // 随即离开 tmp）边迭代会「隔一跳一」只搬一半，曾致加载更多少插一半卡片
+      const cards = Array.prototype.slice.call(tmp.children);
+      cards.forEach(function (card) {
+        listEl.appendChild(card);
+        try { bindEvents(card); } catch (e) {}
+      });
+      const left = posts.length - end;
+      if (left > 0) {
+        listEl.insertAdjacentHTML('beforeend', feedMoreBtnHtml(left));
+        feedBindMoreBtn(listEl); // 新按钮重新挂监听
+      }
+      if (isAll) feedShownAll = end; else feedShownMain = end;
+    });
+  }
+  function feedSortedAll() { return load().slice().sort((a, b) => b.ts - a.ts); }
   function render() {
     renderCover();
     const listEl = document.getElementById('feed-list');
     if (!listEl) return;
-    const posts = load().slice().sort((a, b) => b.ts - a.ts);
+    const posts = feedSortedAll();
+    feedShownMain = Math.min(posts.length, FEED_RENDER_MAX);
     const name = partnerName();
     listEl.innerHTML = posts.length
-      ? posts.map(p => {
-          const isMine = (p.role || p.by) === 'me';
-          // v3.7.x：旧数据缺 authorName 快照时，昵称回退按动态所属桌面取
-          // v3.8.x：'me' 动态作者/头像也读朋友圈独立身份（按动态所属桌面）
-          const author = p.authorName || (isMine ? feedUserNameFor(p.owner || 'default') : taFeedNameFor(p.owner || 'default'));
-          // v3.7.x：跨桌面——TA 动态头像按动态所属桌面取，不再显示当前桌面的 TA 头像
-          const av = p.authorAv || (isMine ? feedUserAvFor(p.owner || 'default') : taAvFor(p.owner || 'default'));
-          // 头像可点击 → 打开该联系人的全部朋友圈
-          const avWrap = '<div class="feed-head-av" data-owner="' + esc(p.owner || '') + '" title="查看' + esc(author) + '的全部朋友圈">' + avHtml(av) + '</div>';
-          // 点赞列表：显示"XX、XX 觉得很赞"
-          const likes = p.likes && p.likes.length
-            ? '<div class="feed-likes"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" style="width:12px;height:12px;vertical-align:-2px;margin-right:5px"><path d="M12 21s-7.5-4.7-9.3-9A5.3 5.3 0 0112 6.4a5.3 5.3 0 019.3 5.6c-1.8 4.3-9.3 9-9.3 9z"/></svg>' + esc(p.likes.join('、')) + ' 觉得很赞</div>'
-            : '';
-          const liked = p.likes && p.likes.some(l => l === feedUserName());
-          return '<div class="feed-post" id="feed-post-' + p.id + '"><div class="feed-head">' + avWrap +
-            '<div class="feed-who"><div class="feed-name">' + esc(author) + '</div><div class="feed-time">' + fmtDT(p.ts) + '</div></div>' +
-            '<button class="feed-del" data-id="' + p.id + '" title="删除"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:14px;height:14px"><path d="M3 6h18M8 6V4a1 1 0 011-1h6a1 1 0 011 1v2"/><path d="M6 6l1 14a2 2 0 002 2h6a2 2 0 002-2l1-14"/></svg></button>' + '</div>' +
-            '<div class="feed-content">' + contentHtmlFor(p) + '</div>' +
-            '<div class="feed-actions">' +
-            '<button class="feed-act' + (liked ? ' liked' : '') + '" data-like="' + p.id + '"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:15px;height:15px;vertical-align:-3px;margin-right:4px"><path d="M12 21s-7.5-4.7-9.3-9A5.3 5.3 0 0112 6.4a5.3 5.3 0 019.3 5.6c-1.8 4.3-9.3 9-9.3 9z"/></svg>赞</button>' +
-            '<button class="feed-act" data-comment="' + p.id + '"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:15px;height:15px;vertical-align:-3px;margin-right:4px"><path d="M21 11.5a8.38 8.38 0 01-.9 3.8 8.5 8.5 0 01-7.6 4.7 8.38 8.38 0 01-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 01-.9-3.8 8.5 8.5 0 014.7-7.6 8.38 8.38 0 013.8-.9h.5a8.48 8.48 0 018 8v.5z"/></svg>评论</button>' +
-            '</div>' + likes + commentsHtmlFor(p, name) + '</div>';
-        }).join('')
+      ? posts.slice(0, feedShownMain).map(p => postCardHtml(p, name)).join('') +
+        (posts.length > feedShownMain ? feedMoreBtnHtml(posts.length - feedShownMain) : '')
       : '<div class="ta-empty">还没有动态，TA 会不定期分享生活</div>';
     const clearBtn = document.getElementById('feed-page-clear');
     if (clearBtn) clearBtn.hidden = !posts.length;
@@ -561,7 +732,29 @@
     const fa = document.getElementById('page-feed-all');
     if (fa && !fa.hidden) { try { renderFeedAll(); } catch (e) {} } else { render(); }
   }
+  // v3.10.x：单卡局部刷新——评论/回复/点赞只改动一条动态，原实现走 renderVisible()
+  //   全量重渲染整个列表：所有卡片 HTML 字符串重建 + 全部 dataURL 配图重新解码 +
+  //   全部事件重绑，重度图片数据下发一条评论就卡顿数百 ms~秒级（手机端明显）。
+  //   改为只替换该动态的卡片节点，其余卡片 DOM 原地不动（不解码图片、不重绑事件）；
+  //   卡片不在当前列表（刚发布/已删除/空态）时回退全量渲染兜底。
+  function refreshPostCard(pid) {
+    const el = document.getElementById('feed-post-' + pid);
+    if (!el) { renderVisible(); return; }
+    const p = load().find(x => x.id === pid);
+    if (!p) { renderVisible(); return; }
+    // 「全部朋友圈」页卡片模板与主列表略有差异（点赞行样式/作者取 feedAllCid），按所在列表选模板
+    const html = el.closest('#feed-all-list') ? postCardHtmlAll(p) : postCardHtml(p, partnerName());
+    const wrap = document.createElement('div');
+    wrap.innerHTML = html;
+    const fresh = wrap.firstElementChild;
+    if (!fresh || fresh.id !== 'feed-post-' + pid) { renderVisible(); return; }
+    el.replaceWith(fresh);
+    bindEvents(fresh);
+  }
   function bindEvents(listEl) {
+    // v3.12.x：「查看更早」增量加载——只插入新卡片并逐卡绑定（refreshPostCard 同款单卡
+    // bindEvents 复用），旧卡片 DOM 原地不动：不重新解码已显示的 dataURL 配图、不重复绑定
+    feedBindMoreBtn(listEl);
     // v3.5.63：动态头像点击 → 打开该人的全部朋友圈
     listEl.querySelectorAll('.feed-head-av').forEach(av => av.addEventListener('click', (e) => {
       e.stopPropagation();
@@ -585,7 +778,7 @@
       const wasMe = i >= 0;
       if (wasMe) p.likes.splice(i, 1); else p.likes.push(nm);
       save(list);
-      renderVisible();
+      refreshPostCard(b.dataset.like);
       if (!wasMe && (p.role || p.by) === 'me' && Math.random() * 100 < feedCfgFor(p.owner || 'default').likeback) {
         // v3.7.x：回赞的是动态所属桌面 TA，用该桌面设置
         const cfg = feedCfgFor(p.owner || 'default');
@@ -596,7 +789,7 @@
           p2.likes = p2.likes || [];
           if (p2.likes.indexOf(p2.taName || taFeedNameFor(p2.owner || 'default')) < 0) p2.likes.push(p2.taName || taFeedNameFor(p2.owner || 'default'));
           save(list2);
-          renderVisible();
+          refreshPostCard(p.id);
           addNotice('like', p2.id, (p2.taName || taFeedNameFor(p2.owner || 'default')) + ' 赞了你的动态', p2.owner || 'default');
         }, (cfg.likeSpeedMin + Math.random() * Math.max(1, cfg.likeSpeedMax - cfg.likeSpeedMin)) * 1000);
       }
@@ -613,6 +806,22 @@
       const p = list.find(x => x.id === pid);
       if (!p || !p.comments || !p.comments[ci] || (p.comments[ci].role || p.comments[ci].by) === 'me') return;
       showCommentBar(pid, { pid: pid, ci: ci });
+    }));
+    // v3.14.x：点楼内某条回复 → 定向回复该条作者（不再只能对着原评论回，TA 的最新
+    // 回复也能继续聊）；自己的回复不可自回；stopPropagation 防冒泡触发整条评论的回复
+    listEl.querySelectorAll('.feed-reply').forEach(rEl => rEl.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const wrap = rEl.closest('.feed-comment');
+      if (!wrap) return;
+      const pid = wrap.dataset.c;
+      const ci = Number(rEl.dataset.ci);
+      const ri = Number(rEl.dataset.ri);
+      const list = load();
+      const p = list.find(x => x.id === pid);
+      const tc = p && p.comments && p.comments[ci];
+      const tr = tc && tc.replies && tc.replies[ri];
+      if (!tr || (tr.role || tr.by) === 'me') return;
+      showCommentBar(pid, { pid: pid, ci: ci, ri: ri });
     }));
   }
   // ================= 评论条（固定元素只绑定一次，v3.5.64 修复重复弹窗） =================
@@ -663,13 +872,18 @@ function showCommentBar(pid, replyTarget) {
   if (comInput) {
     comInput.value = '';
     // v3.7.x：回复占位显示被回复评论的作者昵称（跨桌面时不再一律显示当前桌面 TA 名）
+    // v3.14.x：ri 指定楼内某条回复时，占位显示该条回复作者
     let rpName = partnerName();
     if (replyTarget) {
       try {
         const lst = load();
         const pp = lst.find(x => x.id === pid);
         const tc = pp && pp.comments && pp.comments[replyTarget.ci];
-        if (tc && tc.authorName) rpName = tc.authorName;
+        if (tc) {
+          if (tc.authorName) rpName = tc.authorName;
+          const tr = replyTarget.ri != null && tc.replies ? tc.replies[replyTarget.ri] : null;
+          if (tr && tr.authorName) rpName = tr.authorName;
+        }
       } catch (e) {}
     }
     comInput.placeholder = replyTarget ? '回复 ' + rpName + '…' : '评论…';
@@ -714,8 +928,17 @@ let comStickerTab = 'ta';   // 'ta' | 'mine'
 let comStickerCur = '';     // 当前分组
 function comStickerGroups() {
   // TA 的表情包：聊天字卡库 sticker 分类；我的表情包：my-emoji-groups
-  if (comStickerTab === 'ta') return (window.getMediaGroups && window.getMediaGroups('sticker')) || [];
-  try { const v = JSON.parse(store.get('my-emoji-groups') || 'null'); return Array.isArray(v) ? v : []; } catch (e) { return []; }
+  // v3.11.x：只收 dataURL 表情——选中后会拼进评论/正文文本（data:image 正则识别），
+  // 链接导入的 http(s) 表情拼进去只显示 URL 文字，先过滤掉
+  const onlyData = (groups) => (groups || [])
+    .map(([n, a]) => [n, (a || []).filter(s => typeof s === 'string' && s.indexOf('data:') === 0)])
+    .filter(([, a]) => a.length);
+  if (comStickerTab === 'ta') return onlyData((window.getMediaGroups && window.getMediaGroups('sticker')) || []);
+  // v3.12.x：我的表情包改全局键（与聊天面板同源，各桌面互通）
+  try {
+    const v = JSON.parse(window.xyStore('xy-home-v2').get('my-emoji-groups') || 'null');
+    return Array.isArray(v) ? onlyData(v) : [];
+  } catch (e) { return []; }
 }
 function openComStickerPanel() {
   const host = document.getElementById('feed-comment-panel');
@@ -758,6 +981,8 @@ function openComStickerPanel() {
       comStickerPanel.querySelectorAll('[data-cs-tab]').forEach(x => x.classList.toggle('sel', x === tb));
       renderComStickerBar();
       renderComStickerList();
+      // v3.12.x：点完即失焦——部分安卓浏览器对聚焦按钮画虚线框（与聊天面板同修）
+      try { tb.blur(); } catch (err) {}
     }));
   }
   function renderComStickerBar() {
@@ -823,9 +1048,16 @@ function openComStickerPanel() {
     });
     list.appendChild(grid);
   }
-  comStickerTab = 'ta';
+  // v3.12.x：每次打开按「隐藏联系人的表情包」开关（聊天设置，全局键 hide-ta-sticker）
+  // 决定默认 tab——开启时隐藏 TA 的表情包 tab、只显示我的表情包（与聊天面板同口径）
+  let htsHide = false;
+  try { if (window.xyStore) htsHide = window.xyStore('xy-home-v2').get('hide-ta-sticker') === '1'; } catch (e) {}
+  const taTabBtn = comStickerPanel.querySelector('[data-cs-tab="ta"]');
+  if (taTabBtn) taTabBtn.hidden = htsHide;
+  const defTab = htsHide ? 'mine' : 'ta';
+  comStickerTab = defTab;
   comStickerCur = '';
-  comStickerPanel.querySelectorAll('[data-cs-tab]').forEach(x => x.classList.toggle('sel', x.getAttribute('data-cs-tab') === 'ta'));
+  comStickerPanel.querySelectorAll('[data-cs-tab]').forEach(x => x.classList.toggle('sel', x.getAttribute('data-cs-tab') === defTab));
   renderComStickerBar();
   renderComStickerList();
   comStickerPanel.hidden = false;
@@ -880,17 +1112,25 @@ function submitComment() {
   if (comReplyTarget && p.comments && p.comments[comReplyTarget.ci]) {
     const tc = p.comments[comReplyTarget.ci];
     tc.replies = tc.replies || [];
-    tc.replies.push(stampAuthor({ content: content, ts: Date.now() }, activeMe()));
+    // v3.7.x：多桌面——回应用「被回复评论作者」的桌面身份/字卡/设置（评论可能是
+    // 其他桌面联系人的 TA 发的，不能再一律用动态所属桌面）
+    const tcOwner = (tc && tc.owner) || p.owner || 'default';
+    // v3.14.x：记录被回复人昵称快照 to——ri 指定楼内某条回复时对那位作者，否则原评论
+    // 作者；渲染「A 回复 B」的 B 不再永远等于原评论作者（修复 TA 回应我的回复显示成
+    // 「TA 回复 TA」），旧数据无 to 由渲染端按发言轮次推断兜底
+    let toName = tc.authorName || (((tc.role || tc.by) === 'me') ? feedUserName() : taFeedNameFor(tcOwner));
+    if (comReplyTarget.ri != null) {
+      const tr = tc.replies[comReplyTarget.ri];
+      if (tr) toName = tr.authorName || ((((tr.role || tr.by) === 'me') ? feedUserName() : taFeedNameFor(tr.owner || tcOwner)));
+    }
+    tc.replies.push(stampAuthor({ content: content, ts: Date.now(), to: toName }, activeMe()));
     save(list);
     // v3.5.130：调度定时器前捕获回复下标——hideCommentBar 会把 comReplyTarget 置 null，
     // 回调里再读必现 TypeError（TA 回应回复 100% 失效）
     const replyCi = comReplyTarget.ci;
     hideCommentBar();
-    renderVisible();
+    refreshPostCard(pid);
     // TA 有概率回应我的回复（写回复区 + 消息提醒）
-    // v3.7.x：多桌面——回应用「被回复评论作者」的桌面身份/字卡/设置（评论可能是
-    // 其他桌面联系人的 TA 发的，不能再一律用动态所属桌面）
-    const tcOwner = (tc && tc.owner) || p.owner || 'default';
     const tcfg = feedCfgFor(tcOwner);
     if (Math.random() * 100 < tcfg.replyProb) {
       const cfg = tcfg;
@@ -900,10 +1140,19 @@ function submitComment() {
         if (!p2 || !p2.comments || !p2.comments[replyCi]) return;
         p2.comments[replyCi].replies = p2.comments[replyCi].replies || [];
         const replyText = pickReplyContent(cfg, tcOwner);
-        p2.comments[replyCi].replies.push(stampAuthor({ content: replyText, ts: Date.now() }, taAuthorOfCid(tcOwner)));
+        const replies = p2.comments[replyCi].replies;
+        // v3.14.x：TA 回应的目标是我——to 取本楼最后一条我的回复的昵称快照，
+        // 不再缺省渲染成「TA 回复 TA」（回应对象=被回复评论作者的老 bug）
+        let myToName = feedUserName();
+        for (let i = replies.length - 1; i >= 0; i--) {
+          const x = replies[i];
+          if ((x.role || x.by) === 'me') { myToName = x.authorName || myToName; break; }
+        }
+        replies.push(stampAuthor({ content: replyText, ts: Date.now(), to: myToName }, taAuthorOfCid(tcOwner)));
         save(list2);
-        renderVisible();
-        addNotice('comment', p2.id, taFeedNameFor(tcOwner) + ' 回复了你：' + noticeTextClean(replyText), tcOwner);
+        refreshPostCard(pid);
+        // v3.11.x：通知带评论/回复定位（点击直接闪到这条回复）
+        addNotice('comment', p2.id, taFeedNameFor(tcOwner) + ' 回复了你：' + noticeTextClean(replyText), tcOwner, { ci: replyCi, ri: replies.length - 1 });
       }, (cfg.replySpeedMin + Math.random() * Math.max(1, cfg.replySpeedMax - cfg.replySpeedMin)) * 1000);
     }
     return;
@@ -916,7 +1165,7 @@ function submitComment() {
   p.comments.push(stampAuthor({ content: content, ts: Date.now(), replies: [] }, activeMe()));
   save(list);
   hideCommentBar();
-  renderVisible();
+  refreshPostCard(pid);
   // TA 有概率评论回应
   if (Math.random() * 100 < pcfg.commentProb) {
     const cfg = pcfg;
@@ -925,10 +1174,18 @@ function submitComment() {
       const p2 = list2.find(x => x.id === pid);
       if (!p2) return;
       p2.comments = p2.comments || [];
-      p2.comments.push(stampAuthor({ content: pickReplyContent(cfg, p2.owner || 'default'), ts: Date.now(), replies: [] }, taAuthorOf(p2)));
+      const taText = pickReplyContent(cfg, p2.owner || 'default');
+      p2.comments.push(stampAuthor({ content: taText, ts: Date.now(), replies: [] }, taAuthorOf(p2)));
       save(list2);
-      renderVisible();
-      if ((p2.role || p2.by) === 'me') addNotice('comment', p2.id, (p2.taName || taFeedNameFor(p2.owner || 'default')) + ' 评论了你的动态', p2.owner || 'default');
+      refreshPostCard(pid);
+      // v3.11.x：修复「评论联系人的朋友圈，联系人回复没有提醒」——原实现只在
+      // 动态是自己的（role==='me'）时才发通知，评论 TA 的动态后 TA 回你评论完全无感知。
+      // 改为两种情况都通知：我的动态→「评论了你的动态」；TA 的动态→「回复了你的评论」，
+      // 并带上内容预览与定位（点击通知直接闪到那条评论）。
+      const taName2 = p2.taName || taFeedNameFor(p2.owner || 'default');
+      const loc = { ci: p2.comments.length - 1 };
+      if ((p2.role || p2.by) === 'me') addNotice('comment', p2.id, taName2 + ' 评论了你的动态：' + noticeTextClean(taText), p2.owner || 'default', loc);
+      else addNotice('comment', p2.id, taName2 + ' 回复了你的评论：' + noticeTextClean(taText), p2.owner || 'default', loc);
     }, (cfg.commentSpeedMin + Math.random() * Math.max(1, cfg.commentSpeedMax - cfg.commentSpeedMin)) * 1000);
   }
 }
@@ -959,9 +1216,14 @@ if (comInput) comInput.addEventListener('keydown', (e) => { if (e.key === 'Enter
   }
   // v3.7.x：owner 参数=动态所属联系人（跨桌面通知弹窗/列表头像按发布者取，
   // 不再一律显示当前桌面的 TA 头像/昵称）
-  function addNotice(type, pid, text, owner) {
+  // v3.11.x：loc={ci, ri} 评论/回复定位——通知点击直接滚动闪烁到具体评论/回复，
+  // 列表项按 loc 从当前动态数据实时取首图渲染缩略图（不额外存储，动态删了就不显示）
+  function addNotice(type, pid, text, owner, loc) {
     const list = notices();
-    list.unshift({ type: type, pid: pid, text: text, ts: Date.now(), read: false, owner: owner || '' });
+    const item = { type: type, pid: pid, text: text, ts: Date.now(), read: false, owner: owner || '' };
+    if (loc && loc.ci != null) item.ci = loc.ci;
+    if (loc && loc.ri != null) item.ri = loc.ri;
+    list.unshift(item);
     if (list.length > 100) list.length = 100;
     saveNotices(list);
     // v3.5.100：通知新增 → 桌面「朋友圈」图标未读数 +1
@@ -971,7 +1233,14 @@ if (comInput) comInput.addEventListener('keydown', (e) => { if (e.key === 'Enter
     if (window.showDeskPopup && !feedPageVisible()) {
       // v3.7.x：弹窗头像带发布者 TA 头像（跨桌面动态弹窗不显示当前桌面 TA 头像）
       const av = owner ? taAvFor(owner) : '';
-      window.showDeskPopup({ name: '朋友圈', text: noticeTextClean(text), av: av, onClick: openFeedPage, isHidden: document.visibilityState === 'hidden' });
+      window.showDeskPopup({ name: '朋友圈', text: (window.taFit ? window.taFit(noticeTextClean(text), owner) : noticeTextClean(text)), av: av, onClick: openFeedPage, isHidden: document.visibilityState === 'hidden' });
+    } else if (feedPageVisible() && document.visibilityState !== 'hidden') {
+      // v3.13.x：人在朋友圈页内时顶部横幅按设计不弹（v3.5.107，防遮挡）——但 TA
+      // 评论/回复/点赞到达毫无感知（用户反馈：联系人回复我朋友圈评论没有提示，
+      // 页内只有小角标太隐蔽）。补一条页内轻提示（cc-toast），文案与通知一致。
+      let nt = noticeTextClean(text);
+      if (nt.length > 40) nt = nt.slice(0, 40) + '…';
+      toast(nt);
     }
   }
   function unreadCount() { return notices().filter(n => !n.read).length; }
@@ -989,25 +1258,55 @@ if (comInput) comInput.addEventListener('keydown', (e) => { if (e.key === 'Enter
       b.textContent = n > 99 ? '99+' : String(n);
     }
     // v3.5.100：桌面「朋友圈」图标同步未读提醒（进入朋友圈清零见入口）
-    const ab = document.getElementById('feed-app-badge');
-    if (ab) {
-      const n = feedAppUnread();
-      ab.hidden = n === 0;
-      ab.textContent = n > 99 ? '99+' : String(n);
+    const appN = feedAppUnread();
+    if (window.setDeskBadge) { window.setDeskBadge('feed', appN); }
+    else {
+      const ab = document.getElementById('feed-app-badge');
+      if (ab) {
+        ab.hidden = appN === 0;
+        ab.textContent = appN > 99 ? '99+' : String(appN);
+      }
     }
   }
-  function jumpToPost(pid) {
+  function jumpToPost(pid, ci, ri) {
     const el = document.getElementById('feed-post-' + pid);
     if (!el) return;
-    el.scrollIntoView({ behavior: 'smooth', block: 'center' });
-    el.classList.remove('feed-flash');
-    void el.offsetWidth;
-    el.classList.add('feed-flash');
+    // v3.11.x：带评论/回复定位——优先滚动闪烁到具体那条评论/回复（找不到回退整条动态）
+    let target = el;
+    if (ci != null && ci !== '') {
+      const cEl = el.querySelector('.feed-comment[data-ci="' + ci + '"]');
+      if (cEl) {
+        const rEl = (ri != null && ri !== '') ? cEl.querySelector('.feed-reply[data-ri="' + ri + '"]') : null;
+        target = rEl || cEl;
+      }
+    }
+    target.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    target.classList.remove('feed-flash');
+    void target.offsetWidth;
+    target.classList.add('feed-flash');
+  }
+  // v3.11.x：通知项缩略图——按 ci/ri 从动态数据实时取内容里的首张图
+  //（不落盘存储，避免撑大通知键；动态已删/无图返回空）
+  // posts 由调用方传入（renderNotices 每次 render 只 load() 一次，
+  // 逐条调用会把全量动态 JSON.parse 上百次）
+  function noticeThumbOf(n, posts) {
+    try {
+      if (!n || n.type !== 'comment' || n.ci == null) return '';
+      const p = (posts || []).find(x => x.id === n.pid);
+      if (!p || !p.comments || !p.comments[n.ci]) return '';
+      const src = (n.ri != null && Array.isArray(p.comments[n.ci].replies) && p.comments[n.ci].replies[n.ri])
+        ? p.comments[n.ci].replies[n.ri].content
+        : p.comments[n.ci].content;
+      const m = /data:image\/[a-zA-Z0-9.+-]+;base64,[A-Za-z0-9+/=]+/.exec(String(src || ''));
+      return m ? m[0] : '';
+    } catch (e) { return ''; }
   }
   function renderNotices() {
     const listEl = document.getElementById('feed-notice-list');
     if (!listEl) return;
     const list = notices();
+    // v3.11.x：整次渲染只 load() 一次，供缩略图查动态数据（防逐条全量解析）
+    const postsForThumbs = load();
     // v3.5.59：每条提醒显示联系人头像
     // v3.7.x：跨桌面——通知头像按通知记录里的 owner（动态发布者）取，旧通知无 owner 回退当前桌面
     const avFor = (n) => { try { const v = n && n.owner ? taAvFor(n.owner) : partnerAv(); return v || ''; } catch (e) { return ''; } };
@@ -1021,12 +1320,23 @@ if (comInput) comInput.addEventListener('keydown', (e) => { if (e.key === 'Enter
             : n.type === 'comment'
               ? '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" style="width:14px;height:14px"><path d="M21 11.5a8.38 8.38 0 01-.9 3.8 8.5 8.5 0 01-7.6 4.7 8.38 8.38 0 01-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 01-.9-3.8 8.5 8.5 0 014.7-7.6 8.38 8.38 0 013.8-.9h.5a8.48 8.48 0 018 8v.5z"/></svg>'
               : '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" style="width:14px;height:14px"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M3 7l9 6 9-6"/></svg>';
-          return '<div class="feed-notice-item' + (n.read ? '' : ' new') + '" data-pid="' + n.pid + '">' + avHtml(avFor(n)) + '<span class="fn-ico">' + ico + '</span><span class="fn-text">' + noticeTextClean(n.text) + '</span><span class="fn-time">' + fmtDT(n.ts) + '</span></div>';
+          // v3.11.x：评论类通知带内容首图缩略图——回复的是表情包/图片时直接可见，
+          // 不再只显示「[表情包]」占位字（用户反馈"回复了图片但只有两个字不知道是啥"）
+          const thumb = noticeThumbOf(n, postsForThumbs);
+          const thumbHtml = thumb ? '<img class="fn-thumb" src="' + attrEsc(thumb) + '" alt="">' : '';
+          return '<div class="feed-notice-item' + (n.read ? '' : ' new') + '" data-pid="' + n.pid + '" data-ci="' + (n.ci != null ? n.ci : '') + '" data-ri="' + (n.ri != null ? n.ri : '') + '">' + avHtml(avFor(n)) + '<span class="fn-ico">' + ico + '</span><span class="fn-text">' + (window.taFit ? window.taFit(noticeTextClean(n.text), n.owner) : noticeTextClean(n.text)) + '</span>' + thumbHtml + '<span class="fn-time">' + fmtDT(n.ts) + '</span></div>';
         }).join('')
       : '<div class="ta-empty">暂时没有新的提醒</div>';
     listEl.querySelectorAll('.feed-notice-item').forEach(it => it.addEventListener('click', () => {
       document.getElementById('feed-notice-panel').hidden = true;
-      jumpToPost(it.dataset.pid);
+      const ci = it.dataset.ci === '' ? null : Number(it.dataset.ci);
+      const ri = it.dataset.ri === '' ? null : Number(it.dataset.ri);
+      jumpToPost(it.dataset.pid, ci, ri);
+    }));
+    // v3.11.x：点缩略图直接看大图（不触发跳转）
+    listEl.querySelectorAll('.fn-thumb').forEach(t => t.addEventListener('click', (e) => {
+      e.stopPropagation();
+      if (window.viewChatImage) window.viewChatImage(t.src);
     }));
   }
   // 发布框：添加多张图片（每张压缩后存 dataURL，与文字混排进正文，同一张图片即 1 个字卡）
@@ -1211,7 +1521,7 @@ if (comInput) comInput.addEventListener('keydown', (e) => { if (e.key === 'Enter
           const nm = taFeedNameFor(cid);
           if (p2.likes.indexOf(nm) < 0) p2.likes.push(nm);
           save(list2);
-          renderVisible();
+          refreshPostCard(id);
           addNotice('like', p2.id, nm + ' 赞了你的动态', cid);
         }, (ccfg.likeSpeedMin + Math.random() * Math.max(1, ccfg.likeSpeedMax - ccfg.likeSpeedMin)) * 1000);
       }
@@ -1224,7 +1534,7 @@ if (comInput) comInput.addEventListener('keydown', (e) => { if (e.key === 'Enter
           p2.comments = p2.comments || [];
           p2.comments.push(stampAuthor({ content: pickReplyContent(ccfg, cid), ts: Date.now(), replies: [] }, taAuthorOfCid(cid)));
           save(list2);
-          renderVisible();
+          refreshPostCard(id);
           addNotice('comment', p2.id, taFeedNameFor(cid) + ' 评论了你的动态', cid);
         }, (ccfg.commentSpeedMin + Math.random() * Math.max(1, ccfg.commentSpeedMax - ccfg.commentSpeedMin)) * 1000);
       }
@@ -1239,7 +1549,7 @@ if (comInput) comInput.addEventListener('keydown', (e) => { if (e.key === 'Enter
         const p2 = list2.find(x => x.id === id);
         if (!p2) return;
         if (window.addTaFavItem({ kind: 'feed', text: p2.content || '', imgs: (p2.imgs || []).slice(), ts: Date.now() })) {
-          toast('TA 收藏了你的朋友圈动态');
+          toast(window.taFit ? window.taFit('TA 收藏了你的朋友圈动态') : 'TA 收藏了你的朋友圈动态');
         }
       }, (cfg.likeSpeedMin + Math.random() * Math.max(1, cfg.likeSpeedMax - cfg.likeSpeedMin)) * 1000);
     }
@@ -1313,19 +1623,9 @@ if (comInput) comInput.addEventListener('keydown', (e) => { if (e.key === 'Enter
       if (window.chatAddSystem) window.chatAddSystem(taName + ' 发布了一条朋友圈动态');
       return;
     }
-    const prefix = 'xy-home-v2:' + cid;
-    try {
-      if (window.idbGet && window.idbSet) {
-        window.idbGet(prefix + ':chat-msgs').then(v => {
-          let arr = [];
-          try { arr = Array.isArray(v) ? v : JSON.parse(v || '[]'); } catch (e) { arr = []; }
-          if (!Array.isArray(arr)) arr = [];
-          arr.push({ side: 'in', special: 'poke', text: taName + ' 发布了一条朋友圈动态', ts: Date.now() });
-          try { window.idbSet(prefix + ':chat-msgs', JSON.stringify(arr)); } catch (e) {}
-          try { localStorage.setItem(prefix + ':chat-msgs', JSON.stringify(arr)); } catch (e) {}
-        }).catch(() => {});
-      }
-    } catch (e) {}
+    // v3.14.x：改走 chat.js 统一安全追加——原「idbGet→push→整包写回」在读取
+    // 超时（返回 undefined）时会把该桌面全部聊天记录覆盖成 [这一条]
+    if (window.chatAppendToDeskMsg) { window.chatAppendToDeskMsg(cid, taName + ' 发布了一条朋友圈动态'); }
   }
   // 单个联系人的 TA 自动发动态（用该联系人自己的字卡 + TA 身份）
   function maybeAutoPostFor(cid) {
@@ -1410,6 +1710,28 @@ if (comInput) comInput.addEventListener('keydown', (e) => { if (e.key === 'Enter
   // v3.7.x：全部朋友圈页渲染（从 openFeedAll 拆出，供点赞/评论/回复后局部刷新——
   // 原实现渲染只绑删除/图片，页面上没有评论按钮、点评论也无回复绑定，用户在该页
   // 无法评论/回复（跨桌面查看联系人动态时最常见的操作路径）
+  // v3.10.x：单张动态卡片 HTML（全部朋友圈页模板）——renderFeedAll 与局部刷新共用
+  function postCardHtmlAll(p) {
+    const isMine = (p.role || p.by) === 'me';
+    // v3.8.x：'me' 动态作者/头像也读朋友圈独立身份
+    const author = p.authorName || (isMine ? feedUserNameFor(feedAllCid) : taFeedNameFor(feedAllCid));
+    // v3.7.x：头像按动态所属桌面取（该页动态 owner===feedAllCid，直接取该桌面）
+    const av = p.authorAv || (isMine ? feedUserAvFor(feedAllCid) : taAvFor(feedAllCid));
+    const likes = p.likes && p.likes.length
+      ? '<div class="feed-likes" style="font-size:11px;color:var(--muted);padding:6px 2px">' + esc(p.likes.join('、')) + ' 觉得很赞</div>'
+      : '';
+    const liked = p.likes && p.likes.some(l => l === feedUserName());
+    // v3.7.x：与主列表一致的点赞/评论入口（原全部朋友圈页缺这两个按钮）
+    return '<div class="feed-post" id="feed-post-' + p.id + '"><div class="feed-head">' + avHtml(av) +
+      '<div class="feed-who"><div class="feed-name">' + esc(author) + '</div><div class="feed-time">' + fmtDT(p.ts) + '</div></div>' +
+      '<button class="feed-del" data-id="' + p.id + '" title="删除"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:14px;height:14px"><path d="M3 6h18M8 6V4a1 1 0 011-1h6a1 1 0 011 1v2"/><path d="M6 6l1 14a2 2 0 002 2h6a2 2 0 002-2l1-14"/></svg></button></div>' +
+      '<div class="feed-content">' + contentHtmlFor(p) + '</div>' +
+      '<div class="feed-actions">' +
+      '<button class="feed-act' + (liked ? ' liked' : '') + '" data-like="' + p.id + '"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:15px;height:15px;vertical-align:-3px;margin-right:4px"><path d="M12 21s-7.5-4.7-9.3-9A5.3 5.3 0 0112 6.4a5.3 5.3 0 019.3 5.6c-1.8 4.3-9.3 9-9.3 9z"/></svg>赞</button>' +
+      '<button class="feed-act" data-comment="' + p.id + '"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:15px;height:15px;vertical-align:-3px;margin-right:4px"><path d="M21 11.5a8.38 8.38 0 01-.9 3.8 8.5 8.5 0 01-7.6 4.7 8.38 8.38 0 01-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 01-.9-3.8 8.5 8.5 0 014.7-7.6 8.38 8.38 0 018 8v.5z"/></svg>评论</button>' +
+      '</div>' + likes +
+      commentsHtmlFor(p, author) + '</div>';
+  }
   function renderFeedAll() {
     const listEl = document.getElementById('feed-all-list');
     if (!listEl) return;
@@ -1417,28 +1739,11 @@ if (comInput) comInput.addEventListener('keydown', (e) => { if (e.key === 'Enter
     const title = document.getElementById('feed-all-title');
     if (title) title.textContent = (c.name || feedAllCid) + ' 的全部朋友圈';
     const posts = load().filter(p => (p.owner || 'default') === feedAllCid).sort((a, b) => b.ts - a.ts);
+    // v3.12.x：与主列表同口径窗口化（FEED_RENDER_MAX + 查看更早），防整页全量位图解码
+    feedShownAll = Math.min(posts.length, FEED_RENDER_MAX);
     listEl.innerHTML = posts.length
-      ? posts.map(p => {
-          const isMine = (p.role || p.by) === 'me';
-          // v3.8.x：'me' 动态作者/头像也读朋友圈独立身份
-          const author = p.authorName || (isMine ? feedUserNameFor(feedAllCid) : taFeedNameFor(feedAllCid));
-          // v3.7.x：头像按动态所属桌面取（该页动态 owner===feedAllCid，直接取该桌面）
-          const av = p.authorAv || (isMine ? feedUserAvFor(feedAllCid) : taAvFor(feedAllCid));
-          const likes = p.likes && p.likes.length
-            ? '<div class="feed-likes" style="font-size:11px;color:var(--muted);padding:6px 2px">' + esc(p.likes.join('、')) + ' 觉得很赞</div>'
-            : '';
-          const liked = p.likes && p.likes.some(l => l === feedUserName());
-          // v3.7.x：与主列表一致的点赞/评论入口（原全部朋友圈页缺这两个按钮）
-          return '<div class="feed-post" id="feed-post-' + p.id + '"><div class="feed-head">' + avHtml(av) +
-            '<div class="feed-who"><div class="feed-name">' + esc(author) + '</div><div class="feed-time">' + fmtDT(p.ts) + '</div></div>' +
-            '<button class="feed-del" data-id="' + p.id + '" title="删除"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:14px;height:14px"><path d="M3 6h18M8 6V4a1 1 0 011-1h6a1 1 0 011 1v2"/><path d="M6 6l1 14a2 2 0 002 2h6a2 2 0 002-2l1-14"/></svg></button></div>' +
-            '<div class="feed-content">' + contentHtmlFor(p) + '</div>' +
-            '<div class="feed-actions">' +
-            '<button class="feed-act' + (liked ? ' liked' : '') + '" data-like="' + p.id + '"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:15px;height:15px;vertical-align:-3px;margin-right:4px"><path d="M12 21s-7.5-4.7-9.3-9A5.3 5.3 0 0112 6.4a5.3 5.3 0 019.3 5.6c-1.8 4.3-9.3 9-9.3 9z"/></svg>赞</button>' +
-            '<button class="feed-act" data-comment="' + p.id + '"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:15px;height:15px;vertical-align:-3px;margin-right:4px"><path d="M21 11.5a8.38 8.38 0 01-.9 3.8 8.5 8.5 0 01-7.6 4.7 8.38 8.38 0 01-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 01-.9-3.8 8.5 8.5 0 014.7-7.6 8.38 8.38 0 013.8-.9h.5a8.48 8.48 0 018 8v.5z"/></svg>评论</button>' +
-            '</div>' + likes +
-            commentsHtmlFor(p, author) + '</div>';
-        }).join('')
+      ? posts.slice(0, feedShownAll).map(p => postCardHtmlAll(p)).join('') +
+        (posts.length > feedShownAll ? feedMoreBtnHtml(posts.length - feedShownAll) : '')
       : '<div class="ta-empty">还没有动态</div>';
     // v3.7.x：全部朋友圈页与主列表共用事件绑定——点赞/评论/回复/删除/图片放大全可用
     //（bindEvents 里的 .feed-head-av 该页无此元素，自动跳过）
@@ -1867,4 +2172,18 @@ if (comInput) comInput.addEventListener('keydown', (e) => { if (e.key === 'Enter
   });
   // v3.5.100：页面加载时恢复桌面「朋友圈」通知未读提醒
   renderNoticeBadge();
+  // v3.12.x：只读探针——TA 动态/评论素材池（公用+该联系人桌面专属+按其桌面开关的
+  // 默认字卡），供回归测试与素材来源诊断；hasIn 查某张卡是否在指定分类桶里
+  window.feedPoolFor = function (cid) {
+    try {
+      const p = cardPool(cid);
+      return { textN: p.text.length, kaoN: p.kaomoji.length, emojiN: p.emoji.length, stickerN: (p.sticker || []).length, imageN: (p.image || []).length };
+    } catch (e) { return null; }
+  };
+  window.feedPoolHas = function (cid, s) {
+    try {
+      const p = cardPool(cid);
+      return { text: p.text.indexOf(s) >= 0, kaomoji: p.kaomoji.indexOf(s) >= 0, emoji: p.emoji.indexOf(s) >= 0 };
+    } catch (e) { return null; }
+  };
 })();

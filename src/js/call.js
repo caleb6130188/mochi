@@ -42,41 +42,70 @@
     if (val) val.textContent = bg ? '已设置' : '默认';
     const rm = document.getElementById('call-bg-remove');
     if (rm) rm.hidden = !bg;
+    // v3.12.x：聊天页「更多功能→通话」半框里的背景行同步回显（设置页与半框两处入口共用状态）
+    const evalVal = document.getElementById('call-bg-edit-val');
+    if (evalVal) evalVal.textContent = bg ? '已设置' : '默认';
+    const rmEdit = document.getElementById('call-bg-edit-remove');
+    if (rmEdit) rmEdit.hidden = !bg;
+  }
+  // v3.12.x：上传逻辑抽成 pickCallBg()——设置页 #call-bg-row 与通话半框 #call-bg-edit-row 两个入口共用
+  function pickCallBg() {
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.accept = 'image/*';
+    input.onchange = () => {
+      const f = input.files && input.files[0];
+      if (!f) return;
+      const reader = new FileReader();
+      reader.onload = () => {
+        const img = new Image();
+        img.onload = () => {
+          try {
+            const scale = Math.min(1, 600 / Math.max(img.width, img.height));
+            const c = document.createElement('canvas');
+            c.width = Math.max(1, Math.round(img.width * scale));
+            c.height = Math.max(1, Math.round(img.height * scale));
+            c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
+            const data = c.toDataURL('image/jpeg', 0.85);
+            store.set(CALL_BG_KEY, data);
+            applyCallBg();
+            toast('通话背景已设置');
+          } catch (e) {
+            toast('图片处理失败');
+          }
+        };
+        img.onerror = () => toast('图片读取失败');
+        img.src = reader.result;
+      };
+      reader.onerror = () => toast('图片读取失败');
+      reader.readAsDataURL(f);
+    };
+    input.click();
+    return input;
   }
   const callBgRow = document.getElementById('call-bg-row');
-  if (callBgRow) {
-    callBgRow.addEventListener('click', () => {
-      const input = document.createElement('input');
-      input.type = 'file';
-      input.accept = 'image/*';
-      input.onchange = () => {
-        const f = input.files && input.files[0];
-        if (!f) return;
-        const reader = new FileReader();
-        reader.onload = () => {
-          const img = new Image();
-          img.onload = () => {
-            try {
-              const scale = Math.min(1, 600 / Math.max(img.width, img.height));
-              const c = document.createElement('canvas');
-              c.width = Math.max(1, Math.round(img.width * scale));
-              c.height = Math.max(1, Math.round(img.height * scale));
-              c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
-              const data = c.toDataURL('image/jpeg', 0.85);
-              store.set(CALL_BG_KEY, data);
-              applyCallBg();
-              toast('通话背景已设置');
-            } catch (e) {
-              toast('图片处理失败');
-            }
-          };
-          img.onerror = () => toast('图片读取失败');
-          img.src = reader.result;
-        };
-        reader.onerror = () => toast('图片读取失败');
-        reader.readAsDataURL(f);
-      };
-      input.click();
+  if (callBgRow) callBgRow.addEventListener('click', pickCallBg);
+  // v3.12.x：聊天页「更多功能→通话」半框内直接修改联系人头像 / 通话卡片背景图片
+  //   - 联系人头像行 → 收起通话半框，打开「头像互动」半框（上传/点选即换，写 cs-avatar-partner）
+  //   - 通话背景图片行 → 与设置页同款上传流程
+  //   - 移除行 → 恢复默认背景（无背景时隐藏，随 applyCallBg 同步显隐）
+  const callAvEditRow = document.getElementById('call-av-edit-row');
+  if (callAvEditRow) {
+    callAvEditRow.addEventListener('click', () => {
+      const cp = document.getElementById('chat-call-panel');
+      if (cp) cp.hidden = true;
+      if (window.openAvlib) window.openAvlib();
+      else toast('头像库暂不可用');
+    });
+  }
+  const callBgEditRow = document.getElementById('call-bg-edit-row');
+  if (callBgEditRow) callBgEditRow.addEventListener('click', pickCallBg);
+  const callBgEditRm = document.getElementById('call-bg-edit-remove');
+  if (callBgEditRm) {
+    callBgEditRm.addEventListener('click', () => {
+      store.remove(CALL_BG_KEY);
+      applyCallBg();
+      toast('已恢复默认通话背景');
     });
   }
   const callBgRm = document.getElementById('call-bg-remove');
@@ -176,8 +205,10 @@
     miniPos = null;
   }
 
-  function partnerName() { return store.get('lbl-partner') || 'TA'; }
-  function partnerAv() { return store.get('avatar-partner') || ''; }
+  function partnerName() { return store.get('lbl-partner') || (window.taWord ? window.taWord() : 'TA'); }
+  // v3.12.x：通话头像跟随聊天域——优先读聊天专用键 cs-avatar-partner（头像互动半框/换头像写的就是它），
+  // 未设置时回退桌面键 avatar-partner；此前只读桌面键，导致通话面板不跟随换头像
+  function partnerAv() { return store.get('cs-avatar-partner') || store.get('avatar-partner') || ''; }
   // v3.6.x：通话绑定归属桌面（cid + 昵称 + 头像）——通话中切换到其他联系人桌面再挂断时，
   // 文案与记录仍归属发起通话的桌面，不会显示成当前桌面的联系人
   function bindCall(callObj) {
@@ -208,7 +239,8 @@
     let av = '';
     try {
       const s = (window.storeFor && window.storeFor(currentCall.cid)) || store;
-      av = s.get('avatar-partner') || '';
+      // v3.12.x：同 partnerAv——先读聊天专用键再回退桌面键（按归属桌面读，跨桌面通话仍显示正确的 TA）
+      av = s.get('cs-avatar-partner') || s.get('avatar-partner') || '';
     } catch (e) { av = currentCall.av || partnerAv(); }
     if (av === shownAv) return;
     shownAv = av;
@@ -260,7 +292,10 @@
   }
   function updateDur() {
     if (!currentCall) return;
-    const sec = Math.floor((Date.now() - currentCall.startTime) / 1000);
+    // v3.13.x：计时基准用「接听时刻」而非「响铃/拨出时刻」——
+    // 此前用 startTime 会把响铃等待时长计入通话，响铃末尾接听时时长会从 0 直接蹦到 30 秒
+    const base = currentCall.connectedTime || currentCall.startTime;
+    const sec = Math.floor((Date.now() - base) / 1000);
     if (durEl) durEl.textContent = fmtDur(sec);
     if (miniTime) miniTime.textContent = fmtDur(sec);
   }
@@ -268,6 +303,7 @@
   function startCallDuration() {
     stopTimers();
     currentCall.connectedTime = Date.now();
+    updateDur(); // v3.13.x：接通立即刷新显示，避免接通瞬间仍停留「00:00」卡一下
     let checkCount = 0;
     durationTimer = setInterval(() => {
       updateDur();
@@ -301,19 +337,9 @@
       if (window.addCallRecord) window.addCallRecord(recType, recText);
       return;
     }
-    const prefix = 'xy-home-v2:' + cid;
-    try {
-      if (window.idbGet && window.idbSet) {
-        window.idbGet(prefix + ':chat-msgs').then(v => {
-          let arr = [];
-          try { arr = Array.isArray(v) ? v : JSON.parse(v || '[]'); } catch (e) { arr = []; }
-          if (!Array.isArray(arr)) arr = [];
-          arr.push({ side: 'in', special: 'poke', text: sysHtml, ts: Date.now() });
-          try { window.idbSet(prefix + ':chat-msgs', JSON.stringify(arr)); } catch (e) {}
-          try { localStorage.setItem(prefix + ':chat-msgs', JSON.stringify(arr)); } catch (e) {}
-        }).catch(() => {});
-      }
-    } catch (e) {}
+    // v3.14.x：改走 chat.js 统一安全追加——原「idbGet→push→整包写回」在读取
+    // 超时（返回 undefined）时会把该桌面全部聊天记录覆盖成 [这一条]
+    if (window.chatAppendToDeskMsg) { window.chatAppendToDeskMsg(cid, sysHtml); }
     try {
       const s = (window.storeFor && window.storeFor(cid)) || store;
       let list = [];
@@ -324,7 +350,7 @@
     } catch (e) {}
   }
   // 结束通话：清界面 + 聊天系统消息（接通过必带时长）+ 记录
-  // v3.5.51：真实时长从 startTime 计算（覆盖对方挂断/不明原因中断路径）；
+  // v3.5.51：真实时长从接听时刻计算（覆盖对方挂断/不明原因中断路径）；
   //   接通后结束 → 系统消息明确「通话已挂断 / 对方已挂断 · 时长 xx」
   function endCall(text) {
     // v3.5.127：所有结束路径（超时/拒绝/挂断/对方挂断）统一停铃声
@@ -336,7 +362,7 @@
     if (mini) mini.hidden = true;
     if (cdEl) cdEl.hidden = true;
     if (currentCall) {
-      // 真实通话时长：durationSec（接通后已计时）兜底用 startTime 计算
+      // 真实通话时长：durationSec（接通后已计时）兜底用 connectedTime 计算
       const dur = currentCall.durationSec || (currentCall.connectedTime ? Math.max(0, Math.floor((Date.now() - currentCall.connectedTime) / 1000)) : 0);
       const dir = currentCall.direction;
       // v3.6.x：姓名用通话绑定的桌面（通话中切桌面后挂断不显示成当前联系人）
@@ -458,7 +484,8 @@
     if (!currentCall) return;
     if (currentCall.status === 'ringing') { currentCall.status = 'ended'; endCall('已取消'); return; }
     // v3.6.x：未接通（呼叫中取消）不算时长——endCall 只在 connectedTime 存在时才标注时长
-    if (currentCall.connectedTime) currentCall.durationSec = Math.floor((Date.now() - currentCall.startTime) / 1000);
+    // v3.13.x：真实时长按接听时刻 connectedTime 计算（与 updateDur 基准一致，不含响铃/拨出等待）
+    if (currentCall.connectedTime) currentCall.durationSec = Math.floor((Date.now() - currentCall.connectedTime) / 1000);
     currentCall.status = 'ended';
     endCall('已挂断');
   }

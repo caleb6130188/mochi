@@ -107,9 +107,11 @@
   // v3.5.99：桌面「信箱」图标未读角标——有新来信（未读）时显示数字，进入信箱或打开信件后清除
   function updateBadge() {
     const badge = document.getElementById('mail-badge');
-    if (!badge) return;
+    if (!badge && !window.setDeskBadge) return;
     try {
       const unread = load().filter(l => l.type === 'received' && !l.read && !l.myReply).length;
+      if (window.setDeskBadge) { window.setDeskBadge('mail', unread); return; }
+      if (!badge) return;
       if (unread > 0) {
         badge.textContent = unread > 99 ? '99+' : String(unread);
         badge.hidden = false;
@@ -127,6 +129,7 @@
     });
   }
   // 打开信箱页（渲染 + 清角标），供信箱图标点击与弹窗点击共用
+  // v3.10.x：暴露给 chat.js——聊天里的信件通知（写了一封信/给你回了信等）可点击直达
   function openMailPage() {
     // v3.9.x：打开信箱立即补查到期回信/来信——iOS 短会话里 60s 定时器往往没机会跑，
     // 用户「点开信箱」这一刻正是最该看到 TA 回信的时刻
@@ -137,40 +140,48 @@
     const mp = document.getElementById('page-mail');
     if (mp) mp.hidden = false;
   }
+  window.openMailPage = openMailPage;
   // 写信纸 HTML（简约卡片：标题 + 寄信人/时间 + 正文）
   // 正文支持字卡库图片（dataURL）直接显示；图片/表情包都是字卡，统一渲染为
   // 同尺寸缩略图（sticker:/image: 前缀仅作历史类型标记，不再区分显示大小）
   // v3.6.x：完整 HTML 转义（只转 < 可被 `&lt;…&gt;` 实体绕过注入）
   function escHtml(s) { return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;'); }
-  function renderBody(content) {
+  // v3.x.x：称呼跟随——TA 写的信在显示层替换 TA/他（fit 参数，我写的信保持原文）
+  function renderBody(content, fit) {
     const s = String(content || '');
     let html = '';
     const re = /((?:sticker|image):)?(data:image\/[a-zA-Z0-9.+-]+;base64,[A-Za-z0-9+/=]+)/g;
     let last = 0, m;
+    const seg = (t) => {
+      t = escHtml(t);
+      return (fit && window.taFit) ? window.taFit(t) : t;
+    };
     while ((m = re.exec(s))) {
-      html += escHtml(s.slice(last, m.index));
+      html += seg(s.slice(last, m.index));
       html += '<img class="mail-body-img" src="' + m[2] + '" alt="表情"> ';
       last = m.index + m[0].length;
     }
-    html += escHtml(s.slice(last));
+    html += seg(s.slice(last));
     return html;
   }
   // 信箱列表摘要：剔除图片/表情包 dataURL（含标记前缀），避免显示超长 base64 乱码
   // v3.9.x：补 HTML 转义——shortDesc 结果直接拼 innerHTML（render 列表项），未转义
   //   可被含 < > 的信件内容注入 HTML（导入恶意备份 XSS）
-  function shortDesc(s) {
+  function shortDesc(s, fit) {
     const str = String(s || '');
     const cleaned = str
       .replace(/(?:sticker|image):data:image\/[a-zA-Z0-9.+-]+;base64,[A-Za-z0-9+/=]+/g, '')
       .replace(/data:image\/[a-zA-Z0-9.+-]+;base64,[A-Za-z0-9+/=]+/g, '')
       .replace(/\s+/g, ' ').trim();
-    return escHtml((cleaned || '（图片）').slice(0, 30));
+    let out = escHtml((cleaned || '（图片）').slice(0, 30));
+    if (fit && window.taFit) out = window.taFit(out);
+    return out;
   }
-  function letterPaper(title, content, date, author) {
+  function letterPaper(title, content, date, author, fit) {
     return '<div class="mail-paper">' +
       '<div class="mail-paper-head"><span class="mail-paper-author">' + escHtml(author) + '</span><span class="mail-paper-date">' + date + '</span></div>' +
       (title ? '<div class="mail-paper-title">' + escHtml(title) + '</div>' : '') +
-      '<div class="mail-paper-body">' + renderBody(content) + '</div>' +
+      '<div class="mail-paper-body">' + renderBody(content, fit) + '</div>' +
       '</div>';
   }
   // 信纸图片可点击查看大图（复用聊天大图查看器 viewChatImage）
@@ -200,13 +211,13 @@
     let html = '';
     // 收到的信 / 寄出的信 都完整显示（含标题）
     if (l.type === 'received' || l.fromMe) {
-      html += letterPaper(l.tt || '来信', l.content, fmtDT(l.tm), l.fromMe ? myName : name);
+      html += letterPaper(l.tt || '来信', l.content, fmtDT(l.tm), l.fromMe ? myName : name, !l.fromMe);
     } else if (l.type === 'sent') {
-      html += letterPaper(l.tt || '寄出的信', l.content, fmtDT(l.tm), myName);
+      html += letterPaper(l.tt || '寄出的信', l.content, fmtDT(l.tm), myName, false);
     }
     // 我的回信（寄出的信内容已在上方完整展示，不再重复）
-    if (l.myReply && l.type !== 'sent') html += letterPaper('我的回信', l.myReply.content, fmtDT(l.myReply.tm), myName);
-    if (l.partnerReply) html += letterPaper('对方的回信', l.partnerReply.content, fmtDT(l.partnerReply.tm), name);
+    if (l.myReply && l.type !== 'sent') html += letterPaper('我的回信', l.myReply.content, fmtDT(l.myReply.tm), myName, false);
+    if (l.partnerReply) html += letterPaper('对方的回信', l.partnerReply.content, fmtDT(l.partnerReply.tm), name, true);
     // 底部按钮：收到的信且未回信 → 提笔回信（打开独立回信页）；任意信可删除
     // v3.10.x：收到的来信可收藏到【我的收藏】→ 信件分类
     const canFav = l.type === 'received';
@@ -225,7 +236,26 @@
     } else {
       footer = '<div class="mail-actions"><button class="cc-tool cc-tool-danger" id="mail-del-btn">删除</button><button class="cc-tool" id="mail-close2">关闭</button></div>';
     }
-    if (window.openTCPanel) window.openTCPanel('信件', html + footer);
+    // v3.10.x：详情弹层兜底——openTCPanel 定义在 ta-ask.js 模块尾部，该模块若在某设备
+    // 顶层抛错（文件级 try/catch 只保证后续模块能跑，本模块剩余部分仍中断），
+    // window.openTCPanel 会缺失 → 点信件静默无反应。这里检测打开失败时退回全站
+    // openModal 纯文本展示（personalize.js 早于 ta-ask 加载，可用性高得多），
+    // 保证信件永远有地方看。
+    let panelOpened = false;
+    try {
+      if (window.openTCPanel) {
+        window.openTCPanel('信件', html + footer);
+        const mk = document.getElementById('tc-mask');
+        panelOpened = !!(mk && !mk.hidden);
+      }
+    } catch (e) {}
+    if (!panelOpened && window.openModal) {
+      const stripImg = (s) => String(s == null ? '' : s).replace(/(?:sticker|image:)?data:image\/[a-zA-Z0-9.+-]+;base64,[A-Za-z0-9+/=]+/g, '［图片］');
+      let txt = (l.tt ? '【' + l.tt + '】\n' : '') + stripImg(l.content);
+      if (l.myReply && l.type !== 'sent') txt += '\n\n—— 我的回信 ——\n' + stripImg(l.myReply.content);
+      if (l.partnerReply) txt += '\n\n—— 对方的回信 ——\n' + stripImg(l.partnerReply.content);
+      window.openModal(l.fromMe ? '寄出的信' : '信件', '', () => {}, { noInput: true, staticText: txt });
+    }
     bindLetterImgClicks(document.getElementById('tc-body'));
     const close2 = document.getElementById('mail-close2');
     if (close2) close2.addEventListener('click', () => { document.getElementById('tc-mask').hidden = true; viewLetter = null; });
@@ -253,7 +283,7 @@
     const name = partnerName();
     const origEl = document.getElementById('mail-reply-original');
     if (origEl) {
-      origEl.innerHTML = letterPaper(l.tt || '来信', l.content, fmtDT(l.tm), name);
+      origEl.innerHTML = letterPaper(l.tt || '来信', l.content, fmtDT(l.tm), name, true);
       bindLetterImgClicks(origEl);
     }
     const toEl = document.getElementById('mail-reply-to');
@@ -267,7 +297,8 @@
     const l = viewLetter;
     if (!l) return;
     // v3.6.x：保留 sticker:/image: 标记前缀（区分图片/表情包类型），不再剥掉
-    const val = document.getElementById('mail-reply-input').value.trim();
+    // v3.10.x：读值走 readMailVal（安卓 ce-box 代理读空兜底）
+    const val = readMailVal(document.getElementById('mail-reply-input')).trim();
     if (!val) { toast('回信内容不能为空'); return; }
     const name = partnerName();
     const list = load();
@@ -290,13 +321,14 @@
       render();
       updateBadge();
       showPage('page-mail');
-      if (window.chatAddSystem) window.chatAddSystem('你给 ' + name + ' 回了一封信');
+      // v3.10.x：mailNotice=true → 聊天里该系统消息可点击直达信箱
+      if (window.chatAddSystem) window.chatAddSystem('你给 ' + name + ' 回了一封信', { mailNotice: true });
       toast('回信已寄出');
       // v3.6.x：TA 收藏我的回信（概率可调，与聊天消息收藏一致）
       // v3.7.x：概率由收藏设置页控制，默认 30%
       if (Math.random() * 100 < (window.favCfg ? window.favCfg().taMail : 30) && window.addTaFavItem) {
         window.addTaFavItem({ kind: 'mail', title: l.tt || '', text: val, ts: Date.now() });
-        setTimeout(() => toast('TA 收藏了你的回信'), 1200);
+        setTimeout(() => toast(window.taFit ? window.taFit('TA 收藏了你的回信') : 'TA 收藏了你的回信'), 1200);
       }
     }
   }
@@ -311,25 +343,16 @@
   // v3.7.x：信件系统消息写入「信件所属桌面」的聊天——与 feed.js notifyFeedPostToChat
   //   同模式：当前桌面走内存链路（chatAddSystem 实时渲染）；非当前桌面直接写该桌面
   //   IDB 聊天记录 + LS 快照（该桌面 msgs 在 contact-switched 时重置，下次进入由 loadMsgs 读回）
-  function notifyMailToChat(cid, text) {
+  function notifyMailToChat(cid, text, opts) {
     const cur = window.__activeCid || 'default';
     if (cid === cur) {
-      if (window.chatAddSystem) window.chatAddSystem(text);
+      // v3.10.x：opts.mailNotice → 聊天通知可点击打开信箱
+      if (window.chatAddSystem) window.chatAddSystem(text, { mailNotice: !!(opts && opts.mailNotice) });
       return;
     }
-    const prefix = 'xy-home-v2:' + cid;
-    try {
-      if (window.idbGet && window.idbSet) {
-        window.idbGet(prefix + ':chat-msgs').then(v => {
-          let arr = [];
-          try { arr = Array.isArray(v) ? v : JSON.parse(v || '[]'); } catch (e) { arr = []; }
-          if (!Array.isArray(arr)) arr = [];
-          arr.push({ side: 'in', special: 'poke', text: text, ts: Date.now() });
-          try { window.idbSet(prefix + ':chat-msgs', JSON.stringify(arr)); } catch (e) {}
-          try { localStorage.setItem(prefix + ':chat-msgs', JSON.stringify(arr)); } catch (e) {}
-        }).catch(() => {});
-      }
-    } catch (e) {}
+    // v3.14.x：改走 chat.js 统一安全追加——原「idbGet→push→整包写回」在读取
+    // 超时（返回 undefined）时会把该桌面全部聊天记录覆盖成 [这一条]
+    if (window.chatAppendToDeskMsg) { window.chatAppendToDeskMsg(cid, text, { mailNotice: !!(opts && opts.mailNotice) }); }
   }
   // 该联系人桌面的 TA 昵称（lbl-partner，回退 contacts.name，再回退 'TA'）
   function partnerNameFor(cid) {
@@ -370,7 +393,7 @@
         // 到期：落地 TA 回信
         list[idx].partnerReply = { content: p.content, tm: now };
         save(list, cid);
-        notifyMailToChat(cid, name + ' 给你回了信');
+        notifyMailToChat(cid, name + ' 给你回了信', { mailNotice: true });
         // v3.5.107：TA 回信且不在信箱页 → 前台桌面弹窗（仅当前激活桌面才弹，用户能看到）
         if (cid === (window.__activeCid || 'default') && window.showDeskPopup && !mailPageVisible()) {
           window.showDeskPopup({ name: '信箱', text: '给你回了一封信：' + p.content, onClick: openMailPage, isHidden: document.visibilityState === 'hidden' });
@@ -398,9 +421,9 @@
         ? inList.map(l => '<div class="mail-item" data-id="' + l.id + '"><div class="mail-item-av"><svg viewBox="0 0 24 24" fill="none" stroke="#888" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M3 7l9 6 9-6"/></svg></div>' +
             '<div class="mail-item-body"><div class="mail-item-title">来自 ' + name +
               (l.myReply ? ' <span class="mail-tag">已回信</span>' : (l.read ? '' : ' <span class="mail-tag new">新来信</span>')) + '</div>' +
-            '<div class="mail-item-desc">' + shortDesc(l.content) + '</div></div>' +
+            '<div class="mail-item-desc">' + shortDesc(l.content, true) + '</div></div>' +
             '<div class="mail-item-time">' + fmtDT(l.tm) + '</div></div>').join('')
-        : '<div class="ta-empty">还没有收到信，等等 TA 吧</div>';
+        : '<div class="ta-empty">' + (window.taFit ? window.taFit('还没有收到信，等等 TA 吧') : '还没有收到信，等等 TA 吧') + '</div>';
       inEl.querySelectorAll('.mail-item').forEach(it => it.addEventListener('click', () => {
         const l = list.find(x => x.id === it.dataset.id);
         if (l) openLetter(l);
@@ -428,7 +451,8 @@
   function sendLetter() {
     const input = document.getElementById('mail-input');
     // v3.6.x：保留 sticker:/image: 标记前缀（区分图片/表情包类型），不再剥掉
-    const content = input ? input.value.trim() : '';
+    // v3.10.x：读值走 readMailVal（安卓 ce-box 代理读空兜底，防「信没寄出去」）
+    const content = input ? readMailVal(input).trim() : '';
     if (!content) { toast('信件内容不能为空'); return; }
     const name = partnerName();
     const title = TITLES[Math.floor(Math.random() * TITLES.length)];
@@ -450,9 +474,15 @@
       replyPendingSave(pending);
     }
     if (input) input.value = '';
-    if (window.chatAddSystem) window.chatAddSystem('你给 ' + name + ' 写了一封信');
+    if (input && input.__ceBox) input.__ceBox.textContent = '';
+    // v3.10.x：信件通知可点击（chat.js 渲染 mail-notice 类，点击打开信箱）
+    if (window.chatAddSystem) window.chatAddSystem('你给 ' + name + ' 写了一封信', { mailNotice: true });
     toast('信件已寄出');
     render();
+    // v3.10.x：寄出后自动回到信箱页并切到「寄出的信」——原实现停在写信页，
+    // 用户返回后看到的还是写信卡片，以为信没寄出去/找不到在哪看
+    showPage('page-mail');
+    selectMailTab('out');
   }
   // ================= TA 主动来信（定时机制，概率可在回复设置-信箱调整） =================
   const TA_LETTERS = [
@@ -486,6 +516,40 @@
       stickerEn: c['ml-sticker-en'] !== undefined ? c['ml-sticker-en'] : 1
     };
   }
+  // v3.12.x：按「指定联系人桌面」读信箱回复设置（ml-*）——多桌面下每个联系人 TA
+  //   写信（概率/间隔/每天最多来信等）应使用各自桌面的设置值。原实现 maybeIncomingLetterFor
+  //   遍历所有联系人时统一调 mailCfg()=当前激活桌面的值：用户停在 A 桌面，B 桌面设的
+  //   「每天最多写信」等从不生效（与朋友圈 feedCfgFor 同款问题）。以 mailCfg() 为基底
+  //   （保留默认值/坏数据兜底），再用该联系人命名空间的 reply-ml-* 覆盖；
+  //   当前桌面直接复用 mailCfg() 不重复读。概率 0/负不覆盖（同 prob() 兜底口径，
+  //   防 TA 永不写信的旧坏数据）。
+  function mailCfgFor(cid) {
+    const cfg = mailCfg();
+    if (!cid || cid === (window.__activeCid || 'default')) return cfg;
+    try {
+      const s = window.storeFor(cid);
+      [['ml-min-cards', 'minCards'], ['ml-max-cards', 'maxCards'],
+       ['ml-write-prob', 'writeProb'], ['ml-write-min', 'writeMin'], ['ml-write-max', 'writeMax'],
+       ['ml-write-daily-max', 'dailyMax'], ['ml-reply-prob', 'replyProb'],
+       ['ml-reply-min', 'replyMin'], ['ml-reply-max', 'replyMax'],
+       ['ml-kaomoji-en', 'kaomojiEn'], ['ml-emoji-en', 'emojiEn'], ['ml-sticker-en', 'stickerEn']
+      ].forEach(pair => {
+        try {
+          const v = s.get('reply-' + pair[0]);
+          if (v === null || v === undefined || v === '') return;
+          const n = Number(v);
+          if (isNaN(n)) return;
+          if ((pair[0] === 'ml-write-prob' || pair[0] === 'ml-reply-prob') && n <= 0) return;
+          cfg[pair[1]] = n;
+        } catch (e) {}
+      });
+    } catch (e) {}
+    return cfg;
+  }
+  // 只读探针：该联系人桌面的信箱触发配置（供回归测试与来源诊断）
+  window.mailCfgForProbe = function (cid) {
+    try { const c = mailCfgFor(cid); return JSON.parse(JSON.stringify(c)); } catch (e) { return null; }
+  };
   // 字卡库分类（与聊天/朋友圈同一套规则）：文字 / 颜文字 / emoji / 表情包(图片)
   // v3.6.x：用户未添加自定义字卡时（内置预设已移除）用系统默认字卡补池——
   //   否则信件只能从 5 条固定文案里抽，内容单一且条数上限超过池子时爆重复
@@ -503,9 +567,13 @@
     const defText = [], defKaomoji = [], defEmoji = [];
     const pushDefault = () => {
       try {
-        if (window.defaultCardUse && !window.defaultCardUse('mail')) return;
-        const isOff = window.isDefaultCardOff || null;
-        const catOn = window.defaultCardCat || (() => true);
+        // v3.12.x：开关按【该联系人桌面】读（同群聊/朋友圈口径）——某联系人桌面
+        // 关「信箱使用」→ 只有这个联系人的来信不用默认字卡
+        const st = (cid && window.storeFor) ? window.storeFor(cid) : null;
+        const a = (window.defaultCardApiFor && st) ? window.defaultCardApiFor(st) : null;
+        if (a ? !a.use('mail') : (window.defaultCardUse && !window.defaultCardUse('mail'))) return;
+        const isOff = a ? a.isOff : (window.isDefaultCardOff || null);
+        const catOn = a ? a.cat : (window.defaultCardCat || (() => true));
         if (catOn('main') && !defText.length) {
           const dg = (window.getDefaultCardGroups && window.getDefaultCardGroups('main')) || [];
           dg.forEach(g => (g[1] || []).forEach(c => { if (isOff && isOff('main', c)) return; if (typeof c === 'string' && c) defText.push(c); }));
@@ -550,15 +618,18 @@
   }
   // 按「整体概率 + 分类占比」从默认字卡池抽一张（main/kaomoji/emoji；拍一拍不进信件）；
   // 未命中/池空返回 ''——与聊天 getDefaultCards 同语义，不含拍一拍分类
-  function pickDefaultMailCard(pool) {
+  function pickDefaultMailCard(pool, cid) {
     try {
-      const dcfg = (window.defaultCardCfg && window.defaultCardCfg()) || {};
+      // v3.12.x：概率/占比/分类开关按【该联系人桌面】读（同 pushDefault 口径）
+      const st = (cid && window.storeFor) ? window.storeFor(cid) : null;
+      const a = (window.defaultCardApiFor && st) ? window.defaultCardApiFor(st) : null;
+      const dcfg = a ? a.cfg() : ((window.defaultCardCfg && window.defaultCardCfg()) || {});
       if (dcfg.enabled === false) return '';
       const overall = (dcfg.overall === undefined || dcfg.overall === null) ? 30 : dcfg.overall;
       if (Math.random() * 100 >= overall) return '';
       const keys = ['main', 'kaomoji', 'emoji'];
       const pools = { main: pool.defText, kaomoji: pool.defKaomoji, emoji: pool.defEmoji };
-      const catOn = window.defaultCardCat || (() => true);
+      const catOn = a ? a.cat : (window.defaultCardCat || (() => true));
       const weights = keys.map(k => (catOn(k) ? Math.max(0, (dcfg.probs && dcfg.probs[k]) || 0) : 0));
       const total = weights.reduce((a, b) => a + b, 0);
       if (total <= 0) return '';
@@ -574,6 +645,14 @@
     } catch (e) {}
     return '';
   }
+  // v3.12.x：只读探针——TA 写信素材池（自定义 + 按该联系人桌面开关的默认字卡子池），
+  // 供回归测试与来源诊断
+  window.mailPoolFor = function (cid) {
+    try {
+      const p = mailCardPool(cid);
+      return { textN: p.text.length, defTextN: p.defText.length, defKaoN: p.defKaomoji.length, defEmojiN: p.defEmoji.length };
+    } catch (e) { return null; }
+  };
   // TA 写信内容：多个字卡（空格分隔）+ 概率加颜文字/emoji/表情包
   function taLetterContent(cfg, cid) {
     const pool = mailCardPool(cid);
@@ -592,7 +671,7 @@
       // v3.8.x：有自定义字卡时，每张卡按 dc-overall 概率混入默认字卡（自定义+默认一起用）；
       //   无自定义时正文整体已是默认字卡池，不再重复混入
       if (hasCustom) {
-        const d = pickDefaultMailCard(pool);
+        const d = pickDefaultMailCard(pool, cid);
         if (d) { parts.push(d); continue; }
       }
       parts.push(words[Math.floor(Math.random() * words.length)]);
@@ -603,7 +682,9 @@
     const ep = pool.emoji.length ? pool.emoji : pool.defEmoji;
     if (cfg.kaomojiEn && kp.length && Math.random() * 100 < 30) t += ' ' + kp[Math.floor(Math.random() * kp.length)];
     if (cfg.emojiEn && ep.length && Math.random() * 100 < 15) t += ' ' + ep[Math.floor(Math.random() * ep.length)];
-    const st = pool.sticker.concat(pool.image);
+    // v3.11.x：只收 dataURL 媒体——信件正文按 sticker:/data:image 正则识别内联图片，
+    // 链接导入的 http(s) 字卡拼进信纸只会显示成一段 URL 文字，先过滤掉
+    const st = pool.sticker.concat(pool.image).filter(s => typeof s === 'string' && s.indexOf('data:') === 0);
     if (cfg.stickerEn && st.length && Math.random() * 100 < 20) t += ' ' + st[Math.floor(Math.random() * st.length)];
     return t;
   }
@@ -638,7 +719,8 @@
       if (cid === (window.__activeCid || 'default') && !mailDbReady) return;
       const cs = csFor(cid);
       const now = Date.now();
-      const cfg = mailCfg();
+      // v3.12.x：按该联系人桌面读设置（每天最多写信/概率/间隔各自独立生效）
+      const cfg = mailCfgFor(cid);
       let last = letterLast(cid), next = letterNext(cid);
       if (last > now || last < 0 || isNaN(last)) { last = 0; next = 0; }
       if ((now - last) / 60000 < next) return;
@@ -658,7 +740,7 @@
       cs.set('mail-letter-last', String(now));
       cs.set('mail-letter-next', String(cfg.writeMin + Math.random() * Math.max(1, cfg.writeMax - cfg.writeMin)));
       letterDayAdd(cid);
-      notifyMailToChat(cid, '<svg class="st-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M3 7l9 6 9-6"/></svg>' + name + ' 给你寄来了一封信');
+      notifyMailToChat(cid, '<svg class="st-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M3 7l9 6 9-6"/></svg>' + name + ' 给你寄来了一封信', { mailNotice: true });
       // 前台弹窗 + 角标刷新仅当前激活桌面（用户能看到）；非当前桌面下次切回时 load 自然显示
       if (cid === (window.__activeCid || 'default')) {
         updateBadge();
@@ -673,6 +755,90 @@
     const list = (window.getContacts && window.getContacts()) || [{ id: 'default' }];
     list.forEach(c => maybeIncomingLetterFor(c.id));
   }
+
+  // ================= v3.13.x：每周摸鱼小结（周日 18 点后生成；周一~周三补上周的） =================
+  // 数据源：该联系人桌面命名空间的 fish-day-add / work-day-add（每日新增记录，与日历同源）。
+  // 以 TA 口吻寄一封「本周摸鱼小结」进信箱；标记键 fish-week-report:<M-D>（周日日期）防重发。
+  function fishWeekReportFor(cid) {
+    // 当前桌面权威加载（mailDbReady）完成前不写——同 maybeIncomingLetterFor 守卫，
+    // 防止把剥图快照当全量列表写回覆盖 IDB 带图信件
+    if (cid === (window.__activeCid || 'default') && !mailDbReady) return;
+    const cs = csFor(cid);
+    const now = window.__fishWeekNowOverride ? window.__fishWeekNowOverride() : new Date(); // 测试钩子：生产为 null
+    const day = now.getDay(); // 0=日
+    const cur = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    let sun; // 小结所属周的周日（周一~周日算一周）
+    if (day === 0 && now.getHours() >= 18) {
+      sun = cur;
+    } else {
+      const back = ((day + 6) % 7) + 1; // 距上一个周日 1~7 天（周一=2 … 周六=7）
+      if (back < 2 || back > 4) return; // 只补最近一周：周一~周三内补发
+      sun = new Date(cur.getFullYear(), cur.getMonth(), cur.getDate() - back);
+    }
+    const markKey = 'fish-week-report:' + (sun.getMonth() + 1) + '-' + sun.getDate();
+    if (cs.get(markKey)) return;
+    cs.set(markKey, '1');
+    const start = new Date(sun.getFullYear(), sun.getMonth(), sun.getDate() - 6);
+    const startTs = start.getTime();
+    const endTs = new Date(sun.getFullYear(), sun.getMonth(), sun.getDate() + 1).getTime();
+    // fishDayKey 日期格式 YYYY-M-D 不补零（iOS 解析需先补零——calendar/personalize 同款口径）
+    const parseDay = (s) => {
+      const m = /^(\d{4})-(\d{1,2})-(\d{1,2})$/.exec(String(s || ''));
+      if (!m) return NaN;
+      return Date.parse(m[1] + '-' + ('0' + m[2]).slice(-2) + '-' + ('0' + m[3]).slice(-2) + 'T00:00:00');
+    };
+    let fm = 0, ft = 0, wm = 0, wt = 0;
+    const wdSum = [0, 0, 0, 0, 0, 0, 0]; // 周一..周日 各日双方摸鱼合计
+    try {
+      JSON.parse(cs.get('fish-day-add') || '[]').forEach(x => {
+        const ts = parseDay(x && x.date);
+        if (isNaN(ts) || ts < startTs || ts >= endTs) return;
+        const m2 = x.mine || 0, t2 = x.ta || 0;
+        fm += m2; ft += t2;
+        wdSum[(new Date(ts).getDay() + 6) % 7] += m2 + t2;
+      });
+    } catch (e) {}
+    try {
+      JSON.parse(cs.get('work-day-add') || '[]').forEach(x => {
+        const ts = parseDay(x && x.date);
+        if (isNaN(ts) || ts < startTs || ts >= endTs) return;
+        wm += x.mine || 0; wt += x.ta || 0;
+      });
+    } catch (e) {}
+    let myName = '我';
+    try { myName = cs.get('lbl-user') || '我'; } catch (e) {}
+    const name = partnerNameFor(cid);
+    let bestIdx = 0;
+    for (let i = 1; i < 7; i++) if (wdSum[i] > wdSum[bestIdx]) bestIdx = i;
+    const wdNames = ['周一', '周二', '周三', '周四', '周五', '周六', '周日'];
+    const totalFish = fm + ft;
+    const lines = [
+      '本周（' + (start.getMonth() + 1) + '月' + start.getDate() + '日 - ' + (sun.getMonth() + 1) + '月' + sun.getDate() + '日）小结',
+      '',
+      '你俩一共摸鱼 ' + totalFish + ' 点（' + myName + ' +' + fm + ' · ' + name + ' +' + ft + '）。',
+      totalFish > 0 ? '最会摸的一天是' + wdNames[bestIdx] + '，加了 ' + wdSum[bestIdx] + ' 点。' : '这一周还没怎么摸鱼呀，都在认真打工吗？',
+      '工作值也一起攒了 ' + (wm + wt) + ' 点（' + myName + ' +' + wm + ' · ' + name + ' +' + wt + '）。',
+      '',
+      '下周也偷偷一起加油呀。'
+    ];
+    const letter = { id: 'l_' + Date.now() + '_' + cid + '_wk', type: 'received', tt: '本周摸鱼小结', content: lines.join('\n'), tm: Date.now() };
+    const list = load(cid);
+    list.unshift(letter);
+    save(list, cid);
+    notifyMailToChat(cid, '<svg class="st-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M3 7l9 6 9-6"/></svg>' + name + ' 寄来一份本周摸鱼小结', { mailNotice: true });
+    if (cid === (window.__activeCid || 'default')) {
+      updateBadge();
+      render();
+      if (window.showDeskPopup && !mailPageVisible()) {
+        window.showDeskPopup({ name: '信箱', text: '寄来了一份本周摸鱼小结', onClick: openMailPage, isHidden: document.visibilityState === 'hidden' });
+      }
+    }
+  }
+  function fishWeekTick() {
+    const list = (window.getContacts && window.getContacts()) || [{ id: 'default' }];
+    list.forEach(c => { try { fishWeekReportFor(c.id); } catch (e) {} });
+  }
+  window.fishWeekTick = fishWeekTick; // v3.13.x：暴露给专项验证脚本（生产内部定时器同样调它）
   // v3.9.x 修复（iOS 信箱 TA 回信永不触发）：原实现 checkPendingReply 只在
   //   「启动后 20~60s 随机延迟 + 每 60s 定时器」里跑。iOS 后台/锁屏会冻结全部
   //   页面定时器、主屏独立 PWA 很快被系统回收，用户会话经常短于 20~60s 首查延迟
@@ -684,8 +850,9 @@
   //   每日上限守卫，跟随补查只会更及时不会刷屏。
   checkPendingReply(); // 启动立即补查（当前桌面未就绪由内部守卫跳过，就绪后回调再补）
   setTimeout(() => {
-    setInterval(() => { maybeIncomingLetter(); checkPendingReply(); }, 60000);
+    setInterval(() => { maybeIncomingLetter(); checkPendingReply(); fishWeekTick(); }, 60000);
     maybeIncomingLetter();
+    fishWeekTick();
   }, (20 + Math.random() * 40) * 1000);
   // 前台恢复补查（节流 5s）：visibilitychange 覆盖 iOS 切后台/锁屏回前台；
   // pageshow(persisted) 覆盖 bfcache 恢复（期间定时器被冻结）；focus 覆盖
@@ -697,6 +864,7 @@
     lastEagerCheck = now;
     maybeIncomingLetter();
     checkPendingReply();
+    fishWeekTick();
   }
   document.addEventListener('visibilitychange', function () {
     if (document.visibilityState === 'visible') eagerCheck();
@@ -705,6 +873,22 @@
   window.addEventListener('focus', eagerCheck);
 
   // ================= 入口与交互 =================
+  // v3.10.x：写信/回信内容读取兜底——安卓 mobile-adapt 把输入框转成 ce-box 后值走
+  // value 代理，个别内核（vivo/OPPO 系实测先例）代理读空 → sendLetter 拿到空串
+  // 直接「信件内容不能为空」返回，信根本没寄出去（列表自然无信可点、也永远等不到
+  // 回信）。这里对齐 period.js readInpVal / music-player readCeInput：读空再从
+  // __ceBox 取 innerText 兜底。
+  function readMailVal(el) {
+    if (!el) return '';
+    let v;
+    try { v = el.value; } catch (e) {}
+    if (v !== undefined && v !== null && String(v).trim()) return String(v);
+    try {
+      const box = el.__ceBox || (el.parentNode && el.parentNode.querySelector('.ce-box[data-for="' + (el.id || '') + '"]'));
+      if (box) return (box.innerText !== undefined ? box.innerText : box.textContent) || '';
+    } catch (e) {}
+    return v === undefined || v === null ? '' : String(v);
+  }
   const mailApp = document.querySelector('.app[data-app="mail"]');
   const mailPage = document.getElementById('page-mail');
   if (mailApp && mailPage) {
@@ -738,13 +922,14 @@
   if (mailReplyBack) mailReplyBack.addEventListener('click', () => { if (window.closeEmojiPanel) window.closeEmojiPanel(); viewLetter = null; showPage('page-mail'); });
   const mailReplySend = document.getElementById('mail-reply-send');
   if (mailReplySend) mailReplySend.addEventListener('click', submitReply);
-  // tab 切换
+  // tab 切换（v3.10.x 抽成函数：寄信成功后自动跳「寄出的信」复用）
+  function selectMailTab(name) {
+    mtab = name;
+    document.querySelectorAll('#page-mail .fav-tab').forEach(x => x.classList.toggle('sel', x.dataset.mtab === name));
+    document.querySelectorAll('#page-mail .cal-card').forEach(c => { c.hidden = c.dataset.mpanel !== name; });
+  }
   document.querySelectorAll('#page-mail .fav-tab').forEach(tab => {
-    tab.addEventListener('click', () => {
-      mtab = tab.dataset.mtab;
-      document.querySelectorAll('#page-mail .fav-tab').forEach(x => x.classList.toggle('sel', x === tab));
-      document.querySelectorAll('#page-mail .cal-card').forEach(c => { c.hidden = c.dataset.mpanel !== mtab; });
-    });
+    tab.addEventListener('click', () => selectMailTab(tab.dataset.mtab));
   });
 
   // ================= 写信/回信：表情包 / 图片 工具栏（v3.6.x 只留这两个按钮） =================
@@ -997,12 +1182,17 @@
         const idbArr = JSON.parse(v);
         if (Array.isArray(idbArr)) base = idbArr;
       }
-      let cur = null;
-      if (mailDbReady || !base.length) {
-        // 保险丝已就绪：store 里已含暂存信件，并集保留；IDB 空：保留本地旧信
-        try { cur = JSON.parse(csFor(cid).get(KEY) || '[]'); } catch (e) { cur = []; }
-      }
-      const merged = mergeLists(base, mergeLists(cur || [], pending));
+      // v3.13.x：无论 IDB 是否有数据，始终把当前持久层（localStorage 主键/快照）合进并集——
+      // 原实现仅在「权威已就绪 或 IDB 为空」时读 cur，IDB 非空且未就绪时直接跳过本地：
+      // 在 vivo/OPPO/真我 Edge 等 IDB 写入失败或挂起的设备上，新信（周报小结/寄出的信/
+      // 收到的信）只写进 localStorage+内存缓存没进 IDB，下次启动权威合并以【旧 IDB】为
+      // 基准，新信被整体丢弃 → 弹窗提示「寄来了一份本周摸鱼小结」信箱里却看不到。
+      // 与 feed.js feedMergeFromIdb 同口径：基准 = IDB，并集保留本地独有数据（按 id 覆盖，
+      // 本地优先），不重演旧的「save([]) 覆盖 IDB」问题。
+      let cur = [];
+      try { cur = JSON.parse(csFor(cid).get(KEY) || '[]'); } catch (e) { cur = []; }
+      if (!cur.length) { try { cur = loadSnap(cid); } catch (e) {} }
+      const merged = mergeLists(base, mergeLists(cur, pending));
       if (merged.length) { csFor(cid).set(KEY, JSON.stringify(merged)); writeSnap(merged, cid); }
     } catch (e) { /* 解析失败：仍置就绪，避免下次启动重复合并 */ }
   }

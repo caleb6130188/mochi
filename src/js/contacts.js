@@ -5,6 +5,17 @@
 (function () {
   const G = 'xy-home-v2';
   const EXCLUDE = ['contacts', 'active-contact', 'feed-posts', 'migrated-v1', 'js-errors', 'theme-mode', 'accent-color',
+    // v3.16.x：摸鱼天数 fish-log 是全局根键（v3.9.x 起跨所有联系人按自然日去重累计，
+    // personalize.js logFish 走 gStore / migrateFishLogGlobal 从各联系人合并进全局）。
+    // 此前漏排除，migrateLegacy 每次刷新把全局 fish-log 迁进 default 并删全局键——
+    // 幂等检查命中 default 已有旧值时不迁移直接删全局新值 → 天数永久回退到 default
+    // 旧值（用户反馈：玩 4 天桌面「已摸鱼」显示第 2 天）。fish-log-global-migrated 为
+    // 合并幂等标记键，同为全局根键。二者都不随联系人隔离，绝不能迁移。
+    'fish-log', 'fish-log-global-migrated',
+    // v3.12.x：group-chat-msgs（群聊消息，v3.8 起全局存储于根命名空间）——同 bg-* 道理，
+    // 不是旧顶层业务键。此前漏排除导致每次刷新 migrateLegacy 把群聊记录搬进 default:
+    // 并删根键，群聊页读根键为空 → 历史看似清空（数据滞留 default: 副本）+ 迁移循环空转。
+    'group-chat-msgs',
     // v3.9.x：全局系统键——后台保活/通知（bg-*）、群聊回复设置（reply-gc-*）、
     // 备份/引导内部标记（__*）。这些键本就存 xy-home-v2 根命名空间（bg-keep.js
     // gSet 用 xyStore(GNS)、reply-settings.js gcWrite 用 xyStore('xy-home-v2')），
@@ -12,6 +23,9 @@
     // migrateLegacy 把 bg-keepalive/bg-notify 迁进 default 并删全局键，非 default
     // 桌面刷新后开关读不到全局值自动变关（用户反馈「后台保活/后台弹窗自己关了」）。
     'bg-keepalive', 'bg-notify',
+    // v3.15.x：心意币全局一本账（根键 gift-wallet）与其一次性迁移标记——
+    // 红包/市集/游戏/花园共用，跨桌面不隔离；漏排除会被 migrateLegacy 搬进 default 并删根键
+    'gift-wallet', 'wallet-global-migrated',
     // v3.9.x：群聊全局设置——回复设置（reply-gc-*）与成员群聊形象（gc-profiles）、
     // 群聊美化（gc-beauty）、开启开关（group-chat-enabled）都是群聊（全局功能）的
     // 根命名空间键，绝不能迁移进 default 桌面（否则切换桌面后设置读不到全局值、仿佛"丢失"）
@@ -20,13 +34,64 @@
     // v3.10.x：经期记录改全局共享（本人生理数据，所有联系人桌面共用一份），
     // 键 xy-home-v2:period-* 走根命名空间，绝不能被 migrateLegacy 迁进 default 桌面
     // （否则非 default 桌面读全局键读不到，经期记录"消失"）。period-migrated 为迁移幂等标记。
-    'period-records', 'period-cfg', 'period-daily', 'period-notify', 'period-migrated'];
+    'period-records', 'period-cfg', 'period-daily', 'period-notify', 'period-migrated',
+    // v3.11.x：字卡库公用字卡改全局共享——xy-home-v2:cc-groups-public 存所有桌面联系人
+    // 共用的自定义字卡（chatcard.js），cc-scope-migrated 为存量归属迁移幂等标记。
+    // 都是根命名空间键，绝不能被 migrateLegacy 迁进 default 桌面（否则公用字卡"消失"）
+    'cc-groups-public', 'cc-scope-migrated',
+    // v3.11.x：字卡库公用/专属变动一次性提醒的已读标记（chatcard.js 弹窗），同为全局根键
+    'cc-scope-notice-done',
+    // v3.12.x：我的表情包改全局共享（chat.js）——键 xy-home-v2:my-emoji-groups 走根命名
+    // 空间，所有联系人桌面共用一份；mye-global-migrated 为存量桌面数据合并迁移的幂等标记。
+    // 都是全局根键，绝不能被 migrateLegacy 当旧顶层业务键迁进 default 桌面
+    // （否则全局键被搬走/删除：表情包"消失"+ 迁移标记丢失每次重跑）
+    'my-emoji-groups', 'mye-global-migrated',
+    // v3.11.x：存钱罐改全局共享（两人共同金库，p2-features.js）——键 xy-home-v2:piggy-*
+    // 走根命名空间，绝不能被 migrateLegacy 迁进 default 桌面（否则非 default 桌面余额读空）
+    'piggy-log', 'piggy-goal-name', 'piggy-goal-amt', 'piggy-cards', 'piggy-last-visit',
+    'piggy-goals', 'piggy-goal-cur',
+    // v3.10.x：心意市集自定义商品改全局共享（所有桌面互通一份商品库，gift-shop.js）——
+    // 键 xy-home-v2:market-custom 走根命名空间，绝不能被 migrateLegacy 迁进 default 桌面
+    // （否则非 default 桌面读不到全局商品库，自定义商品"消失"）。market-migrated 为迁移幂等标记
+    'market-custom', 'market-migrated',
+    // v3.10.x：扩库救援标记（gift-shop.js rescueNewDefaults，v2 新默认商品误删恢复），同为全局根键
+    // v3.13.x：扩库救援标记 v3（gift-shop.js rescueBatch，「两个世界」+「饮品」新分类与日常扩容 222 件），同上
+    'market-migrated-v2', 'market-migrated-v3',
+    // v3.13.x：此间（梦角世界时间与在场感知，cjian.js）——梦角名单/状态/初始化标记
+    // 走根命名空间全局共享，不随联系人隔离，绝不能被 migrateLegacy 迁进 default 桌面
+    // （否则切换桌面后梦角名单/状态"消失"）
+    // v3.14.x：cjian-rehome-v1 为错放梦角一次性存量纠偏标记（cjian.js rehomeMisfiled），
+    // 同为根键——被迁进 default 会导致纠偏每次启动重跑，把用户后来手动放在别桌面的
+    // 同名梦角也搬走
+    'cjian-roster', 'cjian-state', 'cjian-seeded', 'cjian-rehome-v1',
+    // v3.13.x：朋友圈根命名空间键（feed.js 全部走 xy-home-v2 根 store，是现行设计不是
+    // 旧顶层业务键）——此前漏排除，每次启动 migrateLegacy 把它们当旧键迁进 default:
+    // 并删根键（default 已有陈旧副本时连迁移都不做直接删）→ 朋友圈通知列表/未读角标/
+    // 双方朋友圈昵称头像/封面/TA发帖调度每次刷新全丢（用户反馈：联系人回复我朋友圈
+    // 评论没有提示——提示数据刷新即被清）。feed-posts 本就在排除清单。
+    'feed-notices', 'feed-app-unread', 'feed-cover-bg', 'feed-ta-cover',
+    'feed-ta-name', 'feed-ta-avatar', 'feed-user-name', 'feed-user-avatar',
+    'feed-last', 'feed-next', 'feed-day-count',
+    // v3.15.x：离线消息提醒（Periodic Background Sync，bg-keep.js psync 段）——
+    // 快照/队列走 IDB+LS 根键、开关是全局根键，均不随联系人隔离，防 migrateLegacy 迁走
+    'psync-snap', 'psync-queue', 'psync-en',
+    // v3.14.x：帮我决定/多人决定改全局共享（decision.js / group-decision.js）——
+    // 历史/成员/设置走根命名空间 xy-home-v2:decision-* 与 gdec-*，所有桌面互通一份，
+    // 绝不能被 migrateLegacy 当旧顶层业务键迁进 default 桌面（否则其他桌面读不到=「消失」）。
+    // dec-global-migrated / gdec-global-migrated 为存量各桌面数据合并进根键的一次性幂等标记。
+    'decision-history', 'decision-settings', 'dec-global-migrated',
+    'gdec-members', 'gdec-history', 'gdec-settings', 'gdec-global-migrated'];
   function isExcluded(k) {
     const r = k.slice(G.length + 1);
     if (EXCLUDE.indexOf(r) >= 0) return true;
     // v3.9.x：reply-gc-* 群聊全局设置键同样不能迁移（无冒号，原逻辑会误判为旧业务键）
     if (r.indexOf('reply-gc-') === 0) return true;
     if (r.indexOf('music-file:') === 0) return true;
+    // 梦角档案：narc-* 走根命名空间（全局共享，memo-arc.js），绝不能当旧顶层业务键迁移
+    // （否则切换桌面后档案/当前梦角读全局键读不到，"消失"）。narc-cur 亦不例外。
+    if (r.indexOf('narc-') === 0) return true;
+    // 我的档案：myarc 根键（全局唯一 JSON，my-arc.js）同理不可迁移
+    if (r.indexOf('myarc') === 0) return true;
     // v3.6.x：命名空间键（default:* / <cid>:*）不是"旧顶层键"，绝不能迁移——
     // 否则会把 xy-home-v2:default:avatar-user 再迁成 xy-home-v2:default:default:avatar-user
     // 并删除原键（刷新后头像/壁纸/聊天壁纸丢失 + default:default: 双重前缀垃圾键）。
@@ -100,6 +165,39 @@
 
   // 任意联系人的存储（供朋友圈后台遍历各联系人生成 TA 动态/评论）
   window.storeFor = function (cid) { return window.xyStore(G + ':' + cid); };
+
+  // ---- 联系人性别 / TA 称呼跟随 ----
+  // 存储键：<cid>:partner-gender = 'he' | 'she' | ''（未设置 → 默认「TA」），随联系人命名空间隔离。
+  // 各模块在【显示层】调 window.taFit(text[, cid]) 把指代联系人的「他/TA」替换为「他/她/TA」；
+  // 只改显示不改存储原文，历史消息重新渲染即自动跟随。
+  window.partnerGenderFor = function (cid) {
+    try { return window.xyStore(G + ':' + (cid || 'default')).get('partner-gender') || ''; } catch (e) { return ''; }
+  };
+  window.taWordFor = function (cid) {
+    const g = window.partnerGenderFor(cid);
+    if (g === 'he') return '他';
+    if (g === 'she') return '她';
+    return 'TA';
+  };
+  window.taWord = function () { return window.taWordFor(window.__activeCid || 'default'); };
+  // 人称替换：TA/他 → 性别称呼。保护「其他」（非人称）、base64 段（dataURL 不能动，
+  // 大写 TA 可能出现在 base64 字符里）与 <svg>…</svg> 图标段（系统消息带图标前缀）；
+  // 不用正则 lookbehind（旧版 iOS Safari 不支持）。
+  window.taFit = function (text, cid) {
+    if (text === null || text === undefined) return text;
+    const s = String(text);
+    if (s.indexOf('他') < 0 && s.indexOf('TA') < 0) return s;
+    const w = window.taWordFor(cid || window.__activeCid || 'default');
+    const segs = s.split(/(<svg[\s\S]*?<\/svg>)/);
+    for (let i = 0; i < segs.length; i += 2) {
+      const parts = segs[i].split(/(data:[a-zA-Z0-9.+-]+\/[a-zA-Z0-9.+-]+;base64,[A-Za-z0-9+/=]+)/);
+      for (let j = 0; j < parts.length; j += 2) {
+        parts[j] = parts[j].split('其他').join('\u0001').split('TA').join(w).split('他').join(w).split('\u0001').join('其他');
+      }
+      segs[i] = parts.join('');
+    }
+    return segs.join('');
+  };
 
   // ---- 联系人注册表（全局，不随某个联系人隔离） ----
   function regStore() { return window.xyStore(G); }
@@ -364,15 +462,18 @@
     const m = ensureModal();
     m.innerHTML = '';
     const box = el('div');
-    box.style.cssText = 'width:min(92vw,420px);max-height:80vh;display:flex;flex-direction:column;background:#fff;border-radius:16px;padding:18px;box-shadow:0 8px 30px rgba(0,0,0,.2)';
-    box.appendChild(el('div', '', '<div style="font-size:16px;font-weight:600;margin-bottom:4px">联系人 / 桌面</div><div style="font-size:12px;color:#888;margin-bottom:12px">每个联系人数据独立；仅朋友圈互通</div>'));
+    // v3.11.x：颜色改主题变量（内联硬编码浅色在深色模式下白底白字不可见）
+    box.style.cssText = 'width:min(92vw,420px);max-height:80vh;display:flex;flex-direction:column;background:var(--card-bg,#fff);color:var(--ink,#111);border-radius:16px;padding:18px;box-shadow:0 8px 30px rgba(0,0,0,.2)';
+    box.appendChild(el('div', '', '<div style="font-size:16px;font-weight:600;margin-bottom:4px">联系人 / 桌面</div><div style="font-size:12px;color:var(--muted,#888);margin-bottom:12px">每个联系人数据独立；仅朋友圈互通<br>「称呼」可设置消息里 TA 的性别叫法（他 / 她 / 不设置）</div>'));
     const list = el('div'); list.style.cssText = 'display:flex;flex-direction:column;gap:8px;margin-bottom:12px;overflow-y:auto;overflow-x:hidden;-webkit-overflow-scrolling:touch;flex:1;min-height:0';
     getContacts().forEach(c => {
       const row = el('div');
-      row.style.cssText = 'display:flex;align-items:center;gap:10px;padding:10px;border:1px solid #eee;border-radius:10px';
+      row.style.cssText = 'display:flex;align-items:center;gap:10px;padding:10px;border:1px solid var(--card-border,#eee);border-radius:10px';
       const dot = el('div');
-      dot.style.cssText = 'width:10px;height:10px;border-radius:50%;background:' + (c.id === window.__activeCid ? '#111' : '#ccc');
-      const nm = el('div', '', '<div style="font-size:14px;font-weight:500">' + (c.name || c.id) + '</div><div style="font-size:11px;color:#999">' + (c.id === window.__activeCid ? '当前桌面' : '点击切换') + '</div>');
+      dot.style.cssText = 'width:10px;height:10px;border-radius:50%;background:' + (c.id === window.__activeCid ? 'var(--ink,#111)' : '#ccc');
+      const gw = window.taWordFor(c.id);
+      const gLabel = gw === 'TA' ? '' : (' · 称呼：' + gw);
+      const nm = el('div', '', '<div style="font-size:14px;font-weight:500">' + (c.name || c.id) + '</div><div style="font-size:11px;color:var(--muted,#999)">' + (c.id === window.__activeCid ? '当前桌面' : '点击切换') + gLabel + '</div>');
       nm.style.flex = '1';
       row.appendChild(dot); row.appendChild(nm);
       if (c.id !== window.__activeCid) {
@@ -380,8 +481,15 @@
         row.addEventListener('click', () => { window.setActiveContact(c.id); hideContactModal(m); });
       }
       const acts = el('div'); acts.style.cssText = 'display:flex;gap:6px';
+      const gen = el('button', '', '称呼');
+      gen.style.cssText = 'font-size:12px;padding:4px 8px;border:1px solid var(--pill-border,#ddd);border-radius:8px;background:var(--static-bg,#fafafa);color:var(--ink,#111)';
+      gen.addEventListener('click', (e) => {
+        e.stopPropagation();
+        openGenderModal(c, m);
+      });
+      acts.appendChild(gen);
       const ren = el('button', '', '改名');
-      ren.style.cssText = 'font-size:12px;padding:4px 8px;border:1px solid #ddd;border-radius:8px;background:#fafafa';
+      ren.style.cssText = 'font-size:12px;padding:4px 8px;border:1px solid var(--pill-border,#ddd);border-radius:8px;background:var(--static-bg,#fafafa);color:var(--ink,#111)';
       ren.addEventListener('click', (e) => {
         e.stopPropagation();
         if (window.openModal) window.openModal('改名', c.name || '', (v) => { if (v && v.trim()) { window.renameContact(c.id, v.trim()); window.openContactManager(); } });
@@ -389,7 +497,7 @@
       acts.appendChild(ren);
       if (c.id !== 'default') {
         const del = el('button', '', '删除');
-        del.style.cssText = 'font-size:12px;padding:4px 8px;border:1px solid #f3c0c0;border-radius:8px;background:#fff5f5;color:#a32';
+        del.style.cssText = 'font-size:12px;padding:4px 8px;border:1px solid rgba(163,45,45,.35);border-radius:8px;background:var(--danger-soft,#fff5f5);color:var(--danger-ink,#a32d2d)';
         del.addEventListener('click', (e) => { e.stopPropagation(); confirmDelete(c, m); });
         acts.appendChild(del);
       }
@@ -398,7 +506,7 @@
     });
     box.appendChild(list);
     const add = el('button', '', '+ 添加联系人 / 桌面');
-    add.style.cssText = 'width:100%;padding:12px;border:none;border-radius:10px;background:#111;color:#fff;font-size:14px;font-weight:600';
+    add.style.cssText = 'width:100%;padding:12px;border:none;border-radius:10px;background:var(--ink,#111);color:var(--bg-b,#fff);font-size:14px;font-weight:600';
     add.addEventListener('click', () => {
       if (window.openModal) window.openModal('新建联系人', '', (v) => {
         const name = (v || '').trim(); if (!name) return;
@@ -407,24 +515,46 @@
     });
     box.appendChild(add);
     const close = el('button', '', '关闭');
-    close.style.cssText = 'width:100%;margin-top:8px;padding:10px;border:1px solid #eee;border-radius:10px;background:#fafafa';
+    close.style.cssText = 'width:100%;margin-top:8px;padding:10px;border:1px solid var(--card-border,#eee);border-radius:10px;background:var(--btn-cancel-bg,#fafafa);color:var(--btn-cancel-ink,#555)';
     close.addEventListener('click', () => { hideContactModal(m); });
     box.appendChild(close);
     m.appendChild(box);
     showContactModal(m);
   };
+  // 称呼（性别）设置弹窗：他 / 她 / 不设置（默认 TA）
+  function openGenderModal(c, m) {
+    if (!window.openModal) return;
+    const cur = window.partnerGenderFor(c.id);
+    window.openModal('称呼设置 · ' + (c.name || c.id), '', function (v) {
+      if (v !== 'he' && v !== 'she' && v !== '') return;
+      try { window.xyStore(G + ':' + c.id).set('partner-gender', v); } catch (e) {}
+      try { document.dispatchEvent(new CustomEvent('ta-word-changed', { detail: { id: c.id } })); } catch (e) {}
+      if ((window.__activeCid || 'default') === c.id && window.refreshActiveContactUI) window.refreshActiveContactUI();
+      hideContactModal(m);
+    }, {
+      noInput: true,
+      pill: cur,
+      staticText: '小字说明：设置后，桌面浮字、聊天、朋友圈、信箱等消息里的「TA／他」会跟随显示为「他」或「她」；选「不设置」则保持默认「TA」。该设置为每个联系人独立保存，只改显示方式，不会改动已保存的消息原文。',
+      pills: [
+        { label: '他（男生）', value: 'he' },
+        { label: '她（女生）', value: 'she' },
+        { label: '不设置（默认 TA）', value: '' }
+      ]
+    });
+  }
+
   function confirmDelete(c, m) {
     const m2 = ensureModal();
     m2.innerHTML = '';
     const box = el('div');
-    box.style.cssText = 'width:min(88vw,340px);background:#fff;border-radius:16px;padding:18px;text-align:center';
-    box.appendChild(el('div', '', '<div style="font-size:15px;font-weight:600;margin-bottom:6px">删除「' + (c.name || c.id) + '」？</div><div style="font-size:12px;color:#a32;margin-bottom:14px">该联系人的全部数据将清空，且不可恢复</div>'));
+    box.style.cssText = 'width:min(88vw,340px);background:var(--card-bg,#fff);color:var(--ink,#111);border-radius:16px;padding:18px;text-align:center';
+    box.appendChild(el('div', '', '<div style="font-size:15px;font-weight:600;margin-bottom:6px">删除「' + (c.name || c.id) + '」？</div><div style="font-size:12px;color:var(--danger-ink,#a32d2d);margin-bottom:14px">该联系人的全部数据将清空，且不可恢复</div>'));
     const row = el('div'); row.style.cssText = 'display:flex;gap:10px';
     const ok = el('button', '', '删除');
     ok.style.cssText = 'flex:1;padding:10px;border:none;border-radius:10px;background:#a32d2d;color:#fff;font-weight:600';
     ok.addEventListener('click', () => { window.deleteContact(c.id); hideContactModal(m2); hideContactModal(m); window.openContactManager(); });
     const no = el('button', '', '取消');
-    no.style.cssText = 'flex:1;padding:10px;border:1px solid #eee;border-radius:10px;background:#fafafa';
+    no.style.cssText = 'flex:1;padding:10px;border:1px solid var(--card-border,#eee);border-radius:10px;background:var(--btn-cancel-bg,#fafafa);color:var(--btn-cancel-ink,#555)';
     no.addEventListener('click', () => { hideContactModal(m2); });
     row.appendChild(ok); row.appendChild(no); box.appendChild(row);
     m2.appendChild(box); showContactModal(m2);

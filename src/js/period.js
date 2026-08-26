@@ -27,28 +27,23 @@
   var KEY_CARE = 'period-care-lines';
 
   // ---- 经期专属关心语（梦角触发，配合 ta-ask care 题库）----
-  var PERIOD_CARE_LINES = [
+  // v3.14.x：预设语单一数据源迁至 default-cards-data.js 的 DEFAULT_CARD_DATA.period
+  //   （字卡库【系统预设字卡】「经期关心」tab 同源展示/逐张开关 dc-off-period:*，
+  //   构建顺序保证其先于本文件加载）；此处仅留精简兜底防数据文件缺失。
+  var PERIOD_CARE_FALLBACK = [
     '今天经期第几天了？肚子还痛不痛，要不要帮你揉揉',
     '记得喝点红糖水，别碰凉的，听话',
     '经期别太累了，早点躺下休息，我陪你',
-    '肚子还难受吗？抱抱你，暖暖的',
-    '今天经量多不多？记得勤换，别着凉',
     '经期情绪低落是正常的，不是你的错，我在',
-    '别碰凉水，别吃辣的，乖，听话',
-    '要不要给你捂个热水袋？隔着衣服贴肚子上',
-    '经期别熬夜，早点睡，明天会舒服一点',
-    '今天有没有好好吃饭？经期要吃热乎的',
-    '腰酸不酸？帮你捶捶背好不好',
-    '经期别太拼了，今天的事明天再做，先休息',
-    '心情不好就发出来，别憋着，我接着',
-    '今天经痛厉害吗？厉害就吃颗布洛芬，别硬扛',
-    '经期第几天了？快过去了吧，再忍忍',
-    '别喝冰的！听话，喝温的，肚子会舒服',
-    '今天有没有为自己留点时间？经期要对自己好一点',
-    '肚子凉不凉？多穿点，别让肚子受风',
-    '经期情绪起伏大是激素的事，不是你矫情',
     '抱抱，今天什么都不做也行，就躺着'
   ];
+  var PERIOD_CARE_LINES = (function () {
+    try {
+      var g = window.DEFAULT_CARD_DATA && window.DEFAULT_CARD_DATA.period;
+      if (g && g[0] && Array.isArray(g[0][1]) && g[0][1].length) return g[0][1];
+    } catch (e) {}
+    return PERIOD_CARE_FALLBACK;
+  })();
   function loadCareLines() {
     try { var a = JSON.parse(store.get(KEY_CARE) || 'null'); if (Array.isArray(a)) return a; } catch (e) {}
     return PERIOD_CARE_LINES.slice();
@@ -61,6 +56,14 @@
   }
   function isCareOff(line) { return store.get('period-care-off:' + line) === '1'; }
   function setCareOff(line, off) { store.set('period-care-off:' + line, off ? '1' : '0'); }
+  // v3.14.x：字卡库【经期关心】tab 的逐张开关（dc-off-period:<文案>）同样参与过滤——
+  //   库内关掉某张 → 实际抽取也不再用它；与经期页「关心语管理」的旧开关（period-care-off:*）
+  //   任一关闭即视为关闭（两处入口语义一致）
+  function careLineBlocked(l) {
+    if (isCareOff(l)) return true;
+    try { if (window.isDefaultCardOff && window.isDefaultCardOff('period', l)) return true; } catch (e) {}
+    return false;
+  }
 
   function loadRecs() { try { return JSON.parse(store.get(KEY_REC) || '[]'); } catch (e) { return []; } }
   function saveRecs(list) {
@@ -244,6 +247,39 @@
     return { label: '不规律', cls: 'reg-bad' };
   }
 
+  // ---- PMS 经前综合征指数：基于黄体期症状记录 ----
+  function pmsLevel() {
+    var st = status();
+    // 只在黄体期算（排卵后、下次经期前）
+    if (st.inPeriod || !st.dayOfCycle || !st.ovulationDay || st.dayOfCycle <= st.ovulationDay) return null;
+    recs = normalize(recs);
+    var last = recs[recs.length - 1];
+    if (!last) return null;
+    var ovuDate = addDays(last.start, st.ovulationDay - 1);
+    var today = todayStr();
+    var score = 0, days = 0;
+    for (var ds in daily) {
+      if (ds < ovuDate || ds > today) continue;
+      var info = daily[ds];
+      if (!info) continue;
+      var hasSym = info.symptoms && info.symptoms.length;
+      if (hasSym) {
+        days++;
+        info.symptoms.forEach(function (s) {
+          if (s === 'moodlow' || s === 'irritable') score += 2;
+          else if (s === 'breast' || s === 'headache' || s === 'fatigue' || s === 'insomnia' || s === 'acne' || s === 'appetite') score += 1;
+        });
+      }
+      if (info.mood && info.mood <= 2) score += 2;
+    }
+    var label, cls, tip;
+    if (score >= 8) { label = 'PMS 重度'; cls = 'pms-heavy'; tip = '经前综合征较重，提前调整作息心情'; }
+    else if (score >= 4) { label = 'PMS 中度'; cls = 'pms-mid'; tip = '经前反应明显，照顾好自己'; }
+    else if (score >= 1) { label = 'PMS 轻微'; cls = 'pms-light'; tip = '经前反应轻，状态不错'; }
+    else { return { score: 0, label: 'PMS 不明显', cls: 'pms-none', tip: '', days: 0 }; }
+    return { score: score, label: label, cls: cls, tip: tip, days: days };
+  }
+
   // ---- 当前状态 ----
   function status() {
     recs = normalize(recs);
@@ -318,6 +354,27 @@
   // ---- 暴露给外部模块（mood-reply-cards 经期情绪联动 / calendar 经期着色）----
   window.periodStatus = status;
   window.periodDayPhase = dayPhase;
+
+  // ---- 梦角经期聊天语态：经期中 TA 的文字回复更温柔 ----
+  var WARM_PREFIX = ['乖，', '傻瓜，', '我在呢。', '嘘…', '宝贝，', '嗯，'];
+  var WARM_SUFFIX = [
+    '（把你往怀里带了带）', '（轻轻抵着你额头）', '（握紧你的手）',
+    '（摸了摸你发顶）', '（语气柔下来）', '（把热牛奶推到你手边）'
+  ];
+  function warmText(text) {
+    if (typeof text !== 'string' || !text) return text;
+    try {
+      if (!status().inPeriod) return text;
+      if (Math.random() * 100 >= 25) return text;
+      var p = WARM_PREFIX[Math.floor(Math.random() * WARM_PREFIX.length)];
+      var s = WARM_SUFFIX[Math.floor(Math.random() * WARM_SUFFIX.length)];
+      var r = Math.random();
+      if (r < 0.45) return p + text;
+      if (r < 0.8) return text + s;
+      return p + text + s;
+    } catch (e) { return text; }
+  }
+  window.periodWarmText = warmText;
 
   // ---- 预测置信度（方案 3）：距预测开始日越近越深，高斯衰减 ----
   function predictConfidence(ds) {
@@ -415,6 +472,24 @@
         if (toOvu > 0) ovuLine.textContent = '距排卵约 ' + toOvu + ' 天';
         else if (toOvu === 0) ovuLine.textContent = '今天约为排卵日';
         else ovuLine.textContent = '距下次排卵约 ' + (st.cycleLen - st.dayOfCycle + st.ovulationDay) + ' 天';
+      }
+    }
+    // PMS 经前综合征指数行（仅黄体期显示）
+    var pmsLine = document.getElementById('period-pms-line');
+    if (!pmsLine) {
+      pmsLine = document.createElement('div');
+      pmsLine.id = 'period-pms-line';
+      pmsLine.className = 'period-pms-line';
+      if (ovuLine && ovuLine.parentNode) ovuLine.parentNode.insertBefore(pmsLine, ovuLine.nextSibling);
+      else if (bar && bar.parentNode) bar.parentNode.insertBefore(pmsLine, bar.nextSibling);
+    }
+    if (pmsLine) {
+      var pms = pmsLevel();
+      if (!pms) { pmsLine.hidden = true; }
+      else {
+        pmsLine.hidden = false;
+        pmsLine.innerHTML = '<span class="pms-badge ' + pms.cls + '">' + pms.label + '</span>' +
+          (pms.tip ? '<span class="pms-tip">' + pms.tip + '</span>' : '');
       }
     }
     var startBtn = document.getElementById('period-mark-start');
@@ -543,15 +618,20 @@
       var pad = 2;
       var lo = Math.min(minV, mean) - pad, hi = Math.max(maxV, mean) + pad;
       if (hi <= lo) hi = lo + 1;
-      var W = 280, H = 90, pl = 24, pr = 8, pt = 8, pb = 16;
+      var W = 280, H = 90, pl = 26, pr = 10, pt = 8, pb = 16;
       var xStep = (W - pl - pr) / Math.max(1, diffs.length - 1);
       var yOf = function (v) { return pt + (H - pt - pb) * (1 - (v - lo) / (hi - lo)); };
       var pts = diffs.map(function (v, i) { return (pl + i * xStep).toFixed(1) + ',' + yOf(v).toFixed(1); });
       var meanY = yOf(mean);
+      // v3.14.x：均值文字标签从图形区移到标题下方的说明行（原来画在均值线上方、
+      //   常与折线/数据点重叠）；左侧留白改画 y 轴上下界刻度（此前 pl 空占无内容）
+      function fN(v) { return String(Number(v.toFixed(1))); }
       trendHtml = '<div class="ps-title">周期长度趋势（近 ' + diffs.length + ' 次）</div>' +
+        '<div class="ps-trend-cap">— — 均值 ' + mean.toFixed(1) + ' 天 · 区间 ' + fN(minV) + '～' + fN(maxV) + ' 天</div>' +
         '<svg viewBox="0 0 ' + W + ' ' + H + '" class="ps-trend" preserveAspectRatio="xMidYMid meet">' +
+          '<text x="' + (pl - 4) + '" y="' + (pt + 4).toFixed(1) + '" fill="#aaa" font-size="8" text-anchor="end">' + fN(hi) + '</text>' +
+          '<text x="' + (pl - 4) + '" y="' + (H - pb + 3).toFixed(1) + '" fill="#aaa" font-size="8" text-anchor="end">' + fN(lo) + '</text>' +
           '<line x1="' + pl + '" y1="' + meanY.toFixed(1) + '" x2="' + (W - pr) + '" y2="' + meanY.toFixed(1) + '" stroke="#f5a623" stroke-dasharray="3 3" stroke-width="1"/>' +
-          '<text x="' + (W - pr) + '" y="' + (meanY - 3).toFixed(1) + '" fill="#f5a623" font-size="9" text-anchor="end">均值 ' + mean.toFixed(1) + '</text>' +
           '<polyline points="' + pts.join(' ') + '" fill="none" stroke="#e85a8f" stroke-width="2"/>' +
           diffs.map(function (v, i) { return '<circle cx="' + (pl + i * xStep).toFixed(1) + '" cy="' + yOf(v).toFixed(1) + '" r="2.5" fill="#e85a8f"/>'; }).join('') +
         '</svg>';
@@ -593,7 +673,8 @@
       });
       if (phaseRows) phaseHtml = '<div class="ps-title">症状↔周期天分布</div><div class="ps-phase">' + phaseRows + '</div>';
     }
-    card.innerHTML = '<div class="period-card-title">统计<button class="period-report-btn">月度报告</button></div>' + symHtml + trendHtml + phaseHtml;
+    card.innerHTML = '<div class="period-card-title">统计<button class="period-report-btn">月度报告</button></div>' +
+      '<div class="ps-insight">' + periodInsight() + '</div>' + symHtml + trendHtml + phaseHtml;
     var reportBtn = card.querySelector('.period-report-btn');
     if (reportBtn) reportBtn.addEventListener('click', openReportPop);
     var histCardEl = scroll.querySelector('#period-history');
@@ -602,7 +683,145 @@
     else scroll.appendChild(card);
   }
 
-  function render() { try { renderStatus(); } catch (e) {} try { renderGrid(); } catch (e) {} try { renderHistory(); } catch (e) {} try { renderStats(); } catch (e) {} try { renderDeskWidget(); } catch (e) {} }
+  // ---- 每日健康小贴士（按周期阶段取池，梦角口吻）----
+  var PERIOD_TIPS = {
+    period: [
+      { main: '经期注意保暖，少碰冷饮凉食，小腹可以用暖水袋热敷。', mochi: '暖好自己，比什么都重要。' },
+      { main: '喝点温红糖姜茶，多吃含铁的红枣、瘦肉，别让手脚发凉。', mochi: '我记得你说过手凉。' },
+      { main: '经期激素波动容易累，想发脾气就发，我在呢。', mochi: '不用撑着，哭一场也没关系。' }
+    ],
+    follicular: [
+      { main: '经期结束后适当活动，散步或拉伸，帮身体找回节奏。', mochi: '我陪你走那段路。' },
+      { main: '补充蛋白质和膳食纤维，休息充足，精力会慢慢回来。', mochi: '你恢复的样子最好看。' }
+    ],
+    ovulatory: [
+      { main: '排卵期代谢加快，多吃深色蔬菜和豆类，补充叶酸。', mochi: '好好吃饭，我才放心。' },
+      { main: '这个阶段睡眠质量很重要，尽量别熬夜。', mochi: '别熬了，睡吧，我守着你。' }
+    ],
+    luteal: [
+      { main: '经前期容易烦躁或低落，这是正常的，给自己多点耐心。', mochi: '靠近一点，我抱抱你。' },
+      { main: '经前期少吃盐、多喝水，能缓解水肿和胀气。', mochi: '我给你留了温水。' }
+    ],
+    unknown: [
+      { main: '连续记录几次经期后，我可以帮你预测周期和排卵窗口。', mochi: '从今天开始记一点点，好吗？' }
+    ]
+  };
+  function tipsPool(st) {
+    if (st.inPeriod) return PERIOD_TIPS.period;
+    if (st.phase === 'fertile') return PERIOD_TIPS.ovulatory;
+    if (!st.dayOfCycle) return PERIOD_TIPS.unknown;
+    if (st.ovulationDay && st.dayOfCycle > st.ovulationDay) return PERIOD_TIPS.luteal;
+    if (st.ovulationDay && st.dayOfCycle < st.ovulationDay) return PERIOD_TIPS.follicular;
+    return PERIOD_TIPS.unknown;
+  }
+  function dayOfYear() {
+    var n = new Date();
+    return Math.floor((n - new Date(n.getFullYear(), 0, 0)) / 86400000);
+  }
+  function renderTips() {
+    var scroll = document.querySelector('#page-period .period-scroll');
+    if (!scroll) return;
+    var old = document.getElementById('period-tips-card');
+    if (old) old.remove();
+    var st = status();
+    var pool = tipsPool(st);
+    var tip = pool[dayOfYear() % pool.length];
+    var card = document.createElement('div');
+    card.className = 'period-card glass';
+    card.id = 'period-tips-card';
+    card.innerHTML = '<div class="period-card-title">健康小贴士</div>' +
+      '<div class="pt-main">' + tip.main + '</div>' +
+      '<div class="pt-mochi">梦角 · ' + tip.mochi + '</div>';
+    var statsCard = document.getElementById('period-stats-card');
+    if (statsCard && statsCard.nextSibling) statsCard.parentNode.insertBefore(card, statsCard.nextSibling);
+    else scroll.appendChild(card);
+  }
+
+  // ---- 症状缓解建议（按已记录症状，配梦角口吻）----
+  var REMEDY_MAP = {
+    cramp: { title: '痛经', main: '热敷小腹、喝温红糖姜茶，尝试侧卧蜷缩能减轻张力。', mochi: '疼得厉害就告诉我，别自己扛。' },
+    headache: { title: '头痛', main: '到安静处遮光休息一会，轻按太阳穴，暂别浓茶咖啡。', mochi: '闭会儿眼，我在这儿。' },
+    backache: { title: '腰酸', main: '热敷腰后、别久坐久站，做几下轻柔伸展。', mochi: '坐久了就站起来动动。' },
+    breast: { title: '乳房胀', main: '穿宽松内衣、少点咖啡因、温敷能缓解胀感。', mochi: '这几天都顺着你。' },
+    acne: { title: '痤疮', main: '温和洁面、少甜食油腻，别再用手挤。', mochi: '别挤它，我心疼。' },
+    fatigue: { title: '疲劳', main: '早点睡或午后小憩片刻，别逞强硬撑。', mochi: '歇一歇，好不好。' },
+    insomnia: { title: '失眠', main: '睡前一小时放下手机、泡脚放松，忌浓茶咖啡。', mochi: '睡不着就想想我，聊会天。' },
+    moodlow: { title: '情绪低落', main: '晒晒太阳、找人说说，允许自己慢半拍。', mochi: '我陪着你。' },
+    irritable: { title: '易怒', main: '深呼吸几次，给自己一个出口，别急着回应。', mochi: '愣一下，嗯？' },
+    appetite: { title: '食欲增加', main: '备点健康零嘴，正餐规律些，别苛责自己。', mochi: '想吃就吃，别自责。' },
+    ovulation: { title: '排卵症状', main: '轻微腹痛坠胀正常，多喝温水多休息。', mochi: '这几天我都记着。' }
+  };
+  function renderRemedies() {
+    var scroll = document.querySelector('#page-period .period-scroll');
+    if (!scroll) return;
+    var old = document.getElementById('period-remedy-card');
+    if (old) old.remove();
+    // 找最近一条带症状记录的每日详情（今天优先）
+    var latest = daily[todayStr()];
+    var ds = todayStr();
+    if (!latest || !latest.symptoms || !latest.symptoms.length) {
+      var keys = Object.keys(daily);
+      for (var i = keys.length - 1; i >= 0; i--) {
+        var info = daily[keys[i]];
+        if (info && info.symptoms && info.symptoms.length) { ds = keys[i]; latest = info; break; }
+      }
+    }
+    if (!latest) {
+      var card = document.createElement('div');
+      card.className = 'period-card glass';
+      card.id = 'period-card';
+      card.innerHTML = '<div class="period-card-title">症状缓解建议</div>' +
+        '<div class="pr-empty">记录症状后，这里会给针对性缓解建议。</div>';
+      var stats = document.getElementById('period-stats-card');
+      if (stats && stats.nextSibling) stats.parentNode.insertBefore(card, stats.nextSibling);
+      else scroll.appendChild(card);
+      return;
+    }
+    var html = '';
+    latest.symptoms.forEach(function (k) {
+      var r = REMEDY_MAP[k];
+      if (!r) return;
+      html += '<div class="pr-row"><span class="pr-sym">' + r.title + '</span><span class="pr-main">' + r.main + '</span><span class="pr-mochi">梦角 · ' + r.mochi + '</span></div>';
+    });
+    if (!html) return;
+    var card = document.createElement('div');
+    card.className = 'period-card glass';
+    card.id = 'period-card';
+    card.innerHTML = '<div class="period-card-title">症状缓解建议</div>' + html;
+    var stats = document.getElementById('period-stats-card');
+    if (stats && stats.nextSibling) stats.parentNode.insertBefore(card, stats.nextSibling);
+    else scroll.appendChild(card);
+  }
+
+  // ---- 周期数据洞察：一句文本 ----
+  function periodInsight() {
+    var st = cycleStats();
+    if (st.n < 2) return '继续记录几次经期后，这里会有周期洞察。';
+    var mean = st.mean, med = st.median, n = st.diffs.length;
+    var txt = '近 ' + n + ' 次周期平均 ' + (mean.toFixed(0)) + ' 天 · 中位 ' + med + ' 天';
+    // 经期平均天数
+    var lens = [];
+    recs = normalize(recs);
+    for (var i = 0; i < recs.length; i++) {
+      var r = recs[i];
+      lens.push(diffDays(r.start, r.end || addDays(r.start, cfg.periodLen - 1)) + 1);
+    }
+    if (lens.length) txt += ' · 经期平均 ' + (lens.reduce(function (a, b) { return a + b; }, 0) / lens.length).toFixed(1) + ' 天';
+    // 近3次 vs 更早：周期长度变化趋势
+    var ds = st.diffs;
+    if (ds.length >= 4) {
+      var rec3 = ds.slice(-3).reduce(function (a, b) { return a + b; }, 0) / 3;
+      var earlyArr = ds.slice(0, -3);
+      var early = earlyArr.reduce(function (a, b) { return a + b; }, 0) / earlyArr.length;
+      var delta = rec3 - early;
+      var trend = Math.abs(delta) < 1 ? '周期稳定' : (delta > 0 ? '周期较前期延长 ' + delta.toFixed(1) + ' 天' : '周期较前期缩短 ' + Math.abs(delta).toFixed(1) + ' 天');
+      txt += ' · ' + trend;
+    }
+    var reg = regularity();
+    if (reg) txt += ' · ' + reg.label;
+    return txt;
+  }
+  function render() { try { renderStatus(); } catch (e) {} try { renderGrid(); } catch (e) {} try { renderHistory(); } catch (e) {} try { renderStats(); } catch (e) {} try { renderTips(); } catch (e) {} try { renderRemedies(); } catch (e) {} try { renderDeskWidget(); } catch (e) {} }
 
   // ---- 操作 ----
   function markStart() {
@@ -674,6 +893,33 @@
     clearTimeout(t._timer); t._timer = setTimeout(function () { t.className = 'cc-toast'; }, 2000);
   }
 
+  // v3.12.x：浮层挂到 .phone 内（原挂 body）——配合 .period-day-pop fixed→absolute：
+  // 手机端键盘弹出时 mobile-adapt 收缩 .phone 停靠键盘上方，挂 body 的 fixed 浮层
+  // 仍相对整屏定位 → 底部面板沉到键盘后面（备注/体温/关心语输入和保存按钮被盖住）。
+  // 挂 .phone 后 absolute 锚定手机框，面板始终停靠在可视区底部。
+  function appendPop(pop) {
+    var host = document.querySelector('.phone');
+    (host || document.body).appendChild(pop);
+  }
+
+  // v3.10.x：安卓 ce-box 转换器读值兜底——mobile-adapt.js 把 input/textarea 转成
+  // contenteditable div（.ce-box）且插在原输入框**前面**、继承同名 class，浮层里
+  // querySelector('.dp-note') 这类按 class 选会先命中 div（无 value 属性），备注
+  // 读 .value.trim() 直接抛 TypeError、保存回调整体中断——vivo Edge 实测「记录今天
+  // 点了保存不保存」。固定按标签选回原 input/textarea（value 已被代理到 ce-box），
+  // 个别内核代理读空时再从 __ceBox 取文本兜底（同 music-player readCeInput 先例）。
+  function readInpVal(el) {
+    if (!el) return '';
+    var v;
+    try { v = el.value; } catch (e) {}
+    if (v !== undefined && v !== null && String(v).trim()) return String(v);
+    try {
+      var box = el.__ceBox || (el.parentNode && el.parentNode.querySelector('.ce-box[data-for="' + (el.id || '') + '"]'));
+      if (box) return (box.innerText !== undefined ? box.innerText : box.textContent) || '';
+    } catch (e) {}
+    return v === undefined || v === null ? '' : String(v);
+  }
+
   // ---- 每日详情浮层（方案 4）----
   function openDayPop(ds) {
     var existing = document.getElementById('period-day-pop');
@@ -685,6 +931,11 @@
     var flowHtml = FLOWS.map(function (f) {
       return '<button class="dp-flow' + (info.flow === f.k ? ' on' : '') + '" data-flow="' + f.k + '">' + f.label + '</button>';
     }).join('');
+    // v3.10.x：显式「生理期」开关——原来把某天标成经期（红色）只有长按日格一条路，
+    // 用户在编辑浮层里填完点保存自然期待变红，却永远不变（浮层只存经量/症状）；
+    // OPPO Reno16 反馈「编辑完确定也不会变红」。现在浮层顶部给开关：开=该日标为经期，
+    // 关=取消（走 toggleDay 同一套合并逻辑），保存时与当前状态比对后一次性生效。
+    var isPeriodNow = dayPhase(ds) === 'period';
     var symHtml = SYMPTOMS.map(function (s) {
       var on = info.symptoms && info.symptoms.indexOf(s.k) >= 0;
       return '<button class="dp-sym' + (on ? ' on' : '') + '" data-sym="' + s.k + '">' + s.label + '</button>';
@@ -696,6 +947,7 @@
       '<div class="dp-mask"></div>' +
       '<div class="dp-sheet">' +
         '<div class="dp-head"><span class="dp-date">' + ds + '</span><button class="dp-close" aria-label="关闭">×</button></div>' +
+        '<div class="dp-section"><div class="dp-label">生理期</div><button class="dp-sym dp-period' + (isPeriodNow ? ' on' : '') + '">' + (isPeriodNow ? '已标记为生理期（点此取消）' : '标记这天为生理期') + '</button></div>' +
         '<div class="dp-section"><div class="dp-label">经量</div><div class="dp-flow-row">' + flowHtml + '</div></div>' +
         '<div class="dp-section"><div class="dp-label">症状</div><div class="dp-sym-grid">' + symHtml + '</div></div>' +
         '<div class="dp-section"><div class="dp-label">基础体温（℃）</div><input class="dp-temp" type="number" step="0.1" min="35" max="38" value="' + (info.temp || '') + '" placeholder="36.5"/></div>' +
@@ -703,7 +955,7 @@
         '<div class="dp-section"><div class="dp-label">备注</div><textarea class="dp-note" placeholder="今天的感觉…">' + (info.note || '') + '</textarea></div>' +
         '<div class="dp-actions"><button class="dp-del">删除</button><button class="dp-save period-btn primary">保存</button></div>' +
       '</div>';
-    document.body.appendChild(pop);
+    appendPop(pop);
     document.body.classList.add('scroll-lock');
     pop.querySelector('.dp-mask').addEventListener('click', closeDayPop);
     pop.querySelector('.dp-close').addEventListener('click', closeDayPop);
@@ -713,8 +965,13 @@
         b.classList.add('on');
       });
     });
-    pop.querySelectorAll('.dp-sym').forEach(function (b) {
+    pop.querySelectorAll('.dp-sym[data-sym]').forEach(function (b) {
       b.addEventListener('click', function () { b.classList.toggle('on'); });
+    });
+    var perBtn = pop.querySelector('.dp-period');
+    if (perBtn) perBtn.addEventListener('click', function () {
+      var on = perBtn.classList.toggle('on');
+      perBtn.textContent = on ? '已标记为生理期（点此取消）' : '标记这天为生理期';
     });
     pop.querySelectorAll('.dp-mood').forEach(function (b) {
       b.addEventListener('click', function () {
@@ -726,10 +983,12 @@
       var flowBtn = pop.querySelector('.dp-flow.on');
       var moodBtn = pop.querySelector('.dp-mood.on');
       var syms = [];
-      pop.querySelectorAll('.dp-sym.on').forEach(function (b) { syms.push(b.getAttribute('data-sym')); });
-      var temp = parseFloat(pop.querySelector('.dp-temp').value);
+      pop.querySelectorAll('.dp-sym.on[data-sym]').forEach(function (b) { syms.push(b.getAttribute('data-sym')); });
+      // v3.10.x：按标签选原输入框——.dp-temp/.dp-note 在安卓 ce-box 转换后先匹配到
+      // 继承同类的 div（无 value），备注读值抛错导致保存中断（vivo Edge 实测）
+      var temp = parseFloat(readInpVal(pop.querySelector('input.dp-temp')));
       var mood = moodBtn ? parseInt(moodBtn.getAttribute('data-mood'), 10) : 0;
-      var note = pop.querySelector('.dp-note').value.trim();
+      var note = readInpVal(pop.querySelector('textarea.dp-note')).trim();
       var obj = {};
       if (flowBtn) obj.flow = flowBtn.getAttribute('data-flow');
       if (syms.length) obj.symptoms = syms;
@@ -738,6 +997,12 @@
       if (note) obj.note = note;
       if (Object.keys(obj).length) daily[ds] = obj; else delete daily[ds];
       saveDaily(daily);
+      // v3.10.x：生理期开关落地——与打开浮层时的实际状态比对，变化才 toggle 一次
+      //（toggleDay 内部已含 normalize + saveRecs + render；无变化不动数据）
+      if (perBtn) {
+        var wantPeriod = perBtn.classList.contains('on');
+        if (wantPeriod !== (dayPhase(ds) === 'period')) toggleDay(ds);
+      }
       closeDayPop();
       render();
       toast('已保存');
@@ -808,15 +1073,10 @@
     if (fired) saveNotify(notifyCfg);
   }
 
-  // ---- 梦角关心触发（经期专属，概率连续衰减 + 同日冷却）----
-  // 触发时机：经期前 advanceDays + 当天 + 经期中每天 + 延迟≥5天
-  // 概率：首日 70% → 连发 4+ 降到 20%（参考 mood-reply-cards emotionStreak 衰减）
-  // 内容：80% 经期专属语 + 20% ta-ask care 题库；入口 window.chatAddIn
-  var careStreak = 0;
-  var careLastTs = 0;
+  // ---- 关心语抽取（80% 经期专属语 + 20% ta-ask care 题库）----
   function pickCareLine() {
-    var lines = loadCareLines().filter(function (l) { return l && !isCareOff(l); });
-    if (!lines.length) lines = PERIOD_CARE_LINES.slice();
+    var lines = loadCareLines().filter(function (l) { return l && !careLineBlocked(l); });
+    if (!lines.length) lines = PERIOD_CARE_LINES.filter(function (l) { return l && !careLineBlocked(l); });
     if (Math.random() * 100 < 80) {
       return lines[Math.floor(Math.random() * lines.length)];
     }
@@ -828,6 +1088,14 @@
     }
     return lines[Math.floor(Math.random() * lines.length)];
   }
+  // ---- 梦角关心触发（经期专属，每天最多一条）----
+  // 触发时机：启动后 + 联系人每条文字回复后（chat.js）；经期中每天 + 经期前
+  //   advanceDays 提醒日 + 推迟≥5天
+  // v3.14.x 概率重设计——旧版三层门控叠加（chat 回复路径预掷 20% × 连发衰减至 20%
+  //   × 当日基数），第 2 天起单次触发率跌到约 12%、第 5 天起仅 ~4%，体感就是
+  //   「只有第一天会来关心」。现在：去掉连发衰减与 chat 预掷，只保留「同一天最多
+  //   一条」冷却；进入判定后按当天基数掷一次——经期第1-2天 90%、第3-4天 70%、
+  //   第5+天 55%；经期前提醒/推迟预警 75%。防刷屏由每日一条上限兜底。
   function checkCare() {
     if (!notifyCfg.careEnabled) return;
     if (!window.chatAddIn) return;
@@ -848,27 +1116,19 @@
     notifyCfg.fired = notifyCfg.fired || {};
     var careKey = today + '_care_' + ctx;
     if (notifyCfg.fired[careKey]) return;
-    // 6 小时间隔重置 streak（避免会话内永久低概率）
-    if (careLastTs && Date.now() - careLastTs > 6 * 3600000) careStreak = 0;
-    // 经期中按天数差异化：第1-2天 85%、第3-4天 60%、第5+天 35%；非经期 70%
-    var baseProb = 70;
+    var baseProb = 75;
     if (st.inPeriod) {
       var doc = st.dayOfCycle || 1;
-      if (doc <= 2) baseProb = 85;
-      else if (doc <= 4) baseProb = 60;
-      else baseProb = 35;
+      if (doc <= 2) baseProb = 90;
+      else if (doc <= 4) baseProb = 70;
+      else baseProb = 55;
     }
-    var prob = baseProb;
-    if (careStreak >= 4) prob = Math.min(prob, 20);
-    else if (careStreak >= 3) prob = Math.min(prob, 30);
-    else if (careStreak >= 2) prob = Math.min(prob, 45);
-    else if (careStreak >= 1) prob = Math.min(prob, 60);
-    if (Math.random() * 100 > prob) return;
+    if (Math.random() * 100 > baseProb) return;
     var line = pickCareLine();
     if (!line) return;
-    try { window.chatAddIn(line); } catch (e) {}
-    careStreak++;
-    careLastTs = Date.now();
+    // v3.14.x：带「经期关心」标签 chip 发进聊天（addIn opts.tag → rec.mood），
+    // 用户能看出这条消息是经期功能触发的关心，不再是没头没尾的普通气泡
+    try { window.chatAddIn(line, { tag: '经期关心' }); } catch (e) {}
     notifyCfg.fired[careKey] = 1;
     var cut = addDays(today, -30);
     Object.keys(notifyCfg.fired).forEach(function (k) { if (k < cut) delete notifyCfg.fired[k]; });
@@ -903,14 +1163,16 @@
         '<div class="dp-section"><div class="dp-label">已有关心语（点开关启停，×删除）</div><div class="care-list">' + renderList() + '</div></div>' +
         '<div class="dp-tip">经期触发时从开启的关心语里随机抽一条推到聊天。关闭的不会被抽中。</div>' +
       '</div>';
-    document.body.appendChild(pop);
+    appendPop(pop);
     document.body.classList.add('scroll-lock');
     pop.querySelector('.dp-mask').addEventListener('click', closeCarePop);
     pop.querySelector('.dp-close').addEventListener('click', closeCarePop);
-    var input = pop.querySelector('.dp-care-input');
+    // v3.10.x：同上——按标签选原 input，读值走 readInpVal（ce-box 转换后 .dp-care-input
+    // 先命中 div，添加关心语在安卓上静默失效）
+    var input = pop.querySelector('input.dp-care-input');
     var listEl = pop.querySelector('.care-list');
     function addLine() {
-      var v = (input.value || '').trim();
+      var v = readInpVal(input).trim();
       if (v && lines.indexOf(v) < 0) {
         lines.push(v); saveCareLines(lines);
         input.value = '';
@@ -1000,7 +1262,7 @@
         '<div class="dp-section"><div class="dp-label">记录天数</div><div class="dp-val">' + recordDays + ' 天</div></div>' +
         '<div class="dp-actions"><button class="dp-save period-btn primary" id="period-report-share">分享到朋友圈</button></div>' +
       '</div>';
-    document.body.appendChild(pop);
+    appendPop(pop);
     document.body.classList.add('scroll-lock');
     pop.querySelector('.dp-mask').addEventListener('click', closeReportPop);
     pop.querySelector('.dp-close').addEventListener('click', closeReportPop);
@@ -1049,7 +1311,7 @@
         '<div class="dp-tip">周期长度=两次经期开始间隔；经期天数=每次持续天数；黄体期=排卵后到下次经期的天数。每个人不同，按自己情况设。</div>' +
         '<div class="dp-actions"><button class="dp-save period-btn primary">保存</button></div>' +
       '</div>';
-    document.body.appendChild(pop);
+    appendPop(pop);
     document.body.classList.add('scroll-lock');
     pop.querySelector('.dp-mask').addEventListener('click', closeSettingsPop);
     pop.querySelector('.dp-close').addEventListener('click', closeSettingsPop);
@@ -1113,7 +1375,7 @@
         '<div class="dp-tip">提醒在打开应用时检查并推送；后台通知需浏览器支持。</div>' +
         '<div class="dp-actions"><button class="dp-save period-btn primary">保存</button></div>' +
       '</div>';
-    document.body.appendChild(pop);
+    appendPop(pop);
     document.body.classList.add('scroll-lock');
     pop.querySelector('.dp-mask').addEventListener('click', closeNotifyPop);
     pop.querySelector('.dp-close').addEventListener('click', closeNotifyPop);
@@ -1141,7 +1403,8 @@
       var advs = [];
       pop.querySelectorAll('.adv.on').forEach(function (b) { advs.push(parseInt(b.getAttribute('data-adv'), 10)); });
       if (!advs.length) advs = [3, 1, 0];
-      var h = parseInt(pop.querySelector('.dp-hour').value, 10);
+      // v3.10.x：同上——.dp-hour 转换后先命中 div 读 undefined，提醒小时静默重置 9 点
+      var h = parseInt(readInpVal(pop.querySelector('input.dp-hour')), 10);
       notifyCfg.advanceDays = advs;
       notifyCfg.hour = isNaN(h) ? 9 : Math.min(23, Math.max(0, h));
       saveNotify(notifyCfg);
@@ -1202,6 +1465,13 @@
       var cell = e.target.closest('.pc-cell');
       if (!cell || cell.classList.contains('blank')) return;
       e.preventDefault();
+      // v3.10.x：长按双触发去重——安卓长按日格时 contextmenu 与 touchstart 的 500ms
+      // 定时器几乎同时各调一次 toggleDay = 标红又立刻取消（OPPO Reno16 Edge/Via
+      // 实测「没办法设置成生理期」）。谁先到谁生效：定时器已触发（longPressed）则
+      // 跳过；contextmenu 先到则取消定时器，保证只 toggle 一次。longPressed 不在
+      // 这里复位——它还要供 click 处理器吞掉长按后的合成点击。
+      if (longPressed) return;
+      if (pressTimer) { clearTimeout(pressTimer); pressTimer = null; }
       toggleDay(cell.getAttribute('data-date'));
     });
     grid.addEventListener('touchstart', function (e) {

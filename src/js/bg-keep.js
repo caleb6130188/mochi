@@ -37,6 +37,144 @@
   let keepEnabled = false;
   let wakeSentinel = null; // v3.5.131：模块级，供 stopKeepAlive 释放
 
+  // v3.13.x：保活补播改指数退避——原来每 5 秒无条件 play() 抢回播放权，但安卓上网页
+  // 音频与其他 App 共用系统音频焦点：被抢暂停后每 5 秒抢一次＝与对方无限拉锯（用户实测：
+  // 开保活后别的 App 声音一直被打断；音乐播放器因补播带退避反而显得"能共存"）。
+  // 新节奏：外部打断（pause 事件）按连击退避排期 5s→10s→20s→…→60s 封顶，被音频自己
+  // 打断且连续 N 次时同样退避；补播失败自动翻倍续期。稳定播放够久才复位连击。回前台
+  // 自愈立即清零。测试可覆盖 window.__kaRetryBaseMs / __kaRetryMaxMs / __kaStableMs。
+  let kaTimer = null;     // 排中的退避补播定时器
+  let kaDelay = 0;        // 下一次补播间隔 ms；0=不在退避轨道
+  let kaPauseStreak = 0;  // 连续被打断次数（稳定播放一段时间后清零）
+  let kaLastPlayAt = 0;   // 最近一次 play() 被接受的时间（音频跑起来后刷新）
+  let kaPlayFailStreak = 0; // 连续 play() 被拒次数（补播一直失败时翻倍退避，不无限撞墙）
+  function kaCfg() {
+    let base = 5000, max = 60000;
+    try { if (typeof window.__kaRetryBaseMs === 'number') base = Math.max(1, window.__kaRetryBaseMs); } catch (e) {}
+    try { if (typeof window.__kaRetryMaxMs === 'number') max = Math.max(1, window.__kaRetryMaxMs); } catch (e) {}
+    return { base: base, max: Math.max(base, max) };
+  }
+  function kaStableMs() {
+    try { if (typeof window.__kaStableMs === 'number') return Math.max(1, window.__kaStableMs); } catch (e) {}
+    return 90000;
+  }
+  // 排一次退避补播。delayMs 缺省按连击次数指数化（1st=base, 2nd=2*base…封顶 max）。
+  // 已有排程不重复排。测试探针：window.__kaNextDelayMs 返回当前将用的间隔。
+  function kaSchedule(delayMs) {
+    if (!keepEnabled || kaTimer) return;
+    const cfg = kaCfg();
+    if (!delayMs) {
+      kaPauseStreak++;
+      delayMs = Math.min(cfg.base * Math.pow(2, Math.min(kaPauseStreak - 1, 10)), cfg.max);
+    }
+    kaDelay = delayMs;
+    window.__kaNextDelayMs = delayMs; // 回归探针
+    kaTimer = setTimeout(function () {
+      kaTimer = null;
+      if (!keepEnabled || !keepAudio || !keepAudio.el || musicNowPlaying()) { kaDelay = 0; return; }
+      if (!keepAudio.el.paused) { kaDelay = 0; return; }
+      const p = keepAudio.el.play();
+      const after = function () {
+        // 补播后仍在暂停（play 被拒/又被按住）→ 翻倍排下一次，封顶 max
+        if (keepEnabled && keepAudio && keepAudio.el && keepAudio.el.paused && !musicNowPlaying()) {
+          const c2 = kaCfg();
+          kaSchedule(Math.min((kaDelay || c2.base) * 2, c2.max));
+        }
+      };
+      if (p && p.then) p.then(after, after); else after();
+    }, kaDelay);
+  }
+  function kaStopTimer() { if (kaTimer) { clearTimeout(kaTimer); kaTimer = null; } kaDelay = 0; }
+  function kaResetBackoff() { kaStopTimer(); kaPauseStreak = 0; kaPlayFailStreak = 0; }
+  function kaMarkPlayed() { kaLastPlayAt = Date.now(); }
+
+  // v3.10.x：与音乐播放器共存（修复「音乐+保活音频同时出声导致音乐卡顿」）——
+  // 手机端两个 <audio> 同时持续输出时，混音/音频焦点互相争抢；保活音频每 5 秒的
+  // 补播重试还会与 music-player 自身的防暂停补播形成拉锯，表现为音乐周期性卡顿。
+  // 策略：音乐播放期间（window.__musicPlaying=true）保活音频主动让位暂停——
+  // 音乐自带活跃媒体会话（playbackState=playing），后台同样不被冻结，保活目的不丢；
+  // 音乐停止/暂停后自动把保活音频拉回来。
+  function musicNowPlaying() { try { return !!window.__musicPlaying; } catch (e) { return false; } }
+  function syncKeepForMusic() {
+    if (!keepAudio || !keepAudio.el) return;
+    try {
+      if (musicNowPlaying()) {
+        if (!keepAudio.el.paused) keepAudio.el.pause(); // 让位：音乐在播，保活音频暂停
+      } else if (keepEnabled && keepAudio.el.paused) {
+        // 音乐停止，收回保活音频：已在退避轨道就让排程接管；否则立即试播
+        if (kaTimer || kaDelay) return;
+        const p = keepAudio.el.play();
+        if (p && p.catch) p.catch(function () {});
+        // v3.17.x：音乐停止/暂停后把媒体条接管回「Mochi 后台保活」——
+        // 音乐暂停瞬间保活音频拉回，但媒体条 metadata 仍是歌曲（title=歌名），
+        // 通知栏媒体条显示"已暂停的歌曲"甚至消失；这里立即重设保活条
+        setKeepMediaSession();
+      }
+    } catch (e) {}
+  }
+  // 监听 music-player 对 __musicPlaying 的写入（onplay/onpause/updateMediaSession 维护，
+  // 该文件先于本模块加载、只在播放事件时写）——音乐起播瞬间立即让位、停止瞬间立即收回，
+  // 不等下一个 5 秒轮询。getter/setter 透传，对其他读取方完全透明。
+  (function installMusicPlayingWatcher() {
+    try {
+      let v = !!window.__musicPlaying;
+      Object.defineProperty(window, '__musicPlaying', {
+        configurable: true,
+        get: function () { return v; },
+        set: function (nv) {
+          nv = !!nv;
+          if (nv === v) return;
+          v = nv;
+          setTimeout(syncKeepForMusic, 0);
+        }
+      });
+    } catch (e) {}
+  })();
+
+  // v3.5.160：保活音频 dataURL——用 <audio> 元素循环播放（不是 Web Audio 振荡器）。
+  // 关键机制：Chrome 安卓的媒体通知条（通知栏"正在播放"）绑定到 HTMLMediaElement
+  // （<audio>/<video>），Web Audio 的 AudioContext 振荡器【不触发媒体条】——这正是
+  // 之前"音乐能显示媒体条、保活看不到"的原因。改用 <audio> 后媒体条正常显示、
+  // 后台不冻结。合成 1 秒极轻正弦波 WAV（220Hz）。
+  // v3.15.x：幅度按平台自适应——原固定幅度 0.02 × volume 0.05 ≈ -60dBFS，是按安卓
+  // Chrome「近零音量会被无声检测节流」调的下限；但 iPhone 扬声器灵敏、夜间环境安静，
+  // 实听是明显的周期性「嘟嘟嘟嘟」（1 秒 loop 接缝 + 持续低频纯音），用户报修
+  // 「不是静音音频」。iOS 无安卓那套无声节流，保活只要求「有非零样本在播」：
+  // iOS 把幅度降到 ±3 LSB 级（0.002 × 0.05 ≈ -80dBFS，任何扬声器物理不可闻，
+  // 但样本非零不构成数字静音）；安卓保持原值不动，防回归无声节流。
+  let KEEP_AUDIO_DATAURL = '';
+  function kaIsIOS() {
+    try {
+      const ua = navigator.userAgent || '';
+      if (/iphone|ipad|ipod/i.test(ua) && !/android/i.test(ua)) return true;
+      if (/Macintosh/i.test(ua) && (navigator.maxTouchPoints || 0) > 1) return true; // iPadOS 桌面 UA
+    } catch (e) {}
+    return false;
+  }
+  function ensureKeepAudioDataUrl() {
+    if (KEEP_AUDIO_DATAURL) return KEEP_AUDIO_DATAURL;
+    try {
+      const sr = 44100, sec = 1, n = sr * sec;
+      const amp = kaIsIOS() ? 0.002 : 0.02;
+      const buf = new ArrayBuffer(44 + n * 2);
+      const dv = new DataView(buf);
+      const ws = function (o, s) { for (let i = 0; i < s.length; i++) dv.setUint8(o + i, s.charCodeAt(i)); };
+      ws(0, 'RIFF'); dv.setUint32(4, 36 + n * 2, true); ws(8, 'WAVE');
+      ws(12, 'fmt '); dv.setUint32(16, 16, true); dv.setUint16(20, 1, true); dv.setUint16(22, 1, true);
+      dv.setUint32(24, sr, true); dv.setUint32(28, sr * 2, true); dv.setUint16(32, 2, true); dv.setUint16(34, 16, true);
+      ws(36, 'data'); dv.setUint32(40, n * 2, true);
+      for (let i = 0; i < n; i++) {
+        const v = Math.sin(2 * Math.PI * 220 * (i / sr)) * amp;
+        dv.setInt16(44 + i * 2, Math.round(v * 32767), true);
+      }
+      const bytes = new Uint8Array(buf);
+      let bin = '';
+      for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+      KEEP_AUDIO_DATAURL = 'data:audio/wav;base64,' + btoa(bin);
+    } catch (e) { KEEP_AUDIO_DATAURL = ''; }
+    return KEEP_AUDIO_DATAURL;
+  }
+
   // v3.9.x：设置"后台保活"媒体会话条。音乐播放时（__musicPlaying）让位给 music-player
   // 的歌曲 metadata + 控制 handler，避免通知栏按钮空响应无法控制音乐。
   function setKeepMediaSession() {
@@ -48,6 +186,9 @@
         artist: 'mochi',
         album: '后台消息提醒运行中'
       });
+      // v3.5.159：声明 playbackState='playing'——Chrome 安卓判定"页面正在播放媒体"
+      // 必须 playbackState=playing + 音频实际输出，否则媒体会话不激活、后台照常冻结
+      try { navigator.mediaSession.playbackState = 'playing'; } catch (e) {}
       try {
         navigator.mediaSession.setActionHandler('play', function () {});
         navigator.mediaSession.setActionHandler('pause', function () {});
@@ -58,16 +199,29 @@
   function startKeepAlive(showToast) {
     if (keepAudio) return;
     try {
-      const ctx = new (window.AudioContext || window.webkitAudioContext)();
-      const osc = ctx.createOscillator();
-      const gain = ctx.createGain();
-      osc.connect(gain);
-      gain.connect(ctx.destination);
-      osc.type = 'sine';
-      osc.frequency.value = 1;      // 1Hz，人耳基本听不见
-      gain.gain.value = 0.0001;     // 近零音量
-      osc.start();
-      keepAudio = { ctx: ctx, osc: osc, gain: gain };
+      // v3.5.160：保活音频改用 <audio> 元素循环播放极轻正弦波——媒体通知条才会显示
+      const src = ensureKeepAudioDataUrl();
+      if (!src) { if (showToast) toast('后台保活启动失败（无法生成保活音频）'); return; }
+      const keepEl = document.createElement('audio');
+      keepEl.loop = true;
+      keepEl.volume = 0.05;          // 低但非静音（近零音量会被 Chrome 无声节流）
+      keepEl.src = src;
+      keepEl.setAttribute('playsinline', '');
+      // v3.13.x：play/pause 事件跟踪——play 成功刷新"最近播过"，外部打断（pause）
+      // 进入退避排程；主动让位（音乐在播）不算打断
+      keepEl.addEventListener('play', function () { kaMarkPlayed(); });
+      keepEl.addEventListener('pause', function () {
+        if (!keepEnabled || !keepAudio || !keepAudio.el || musicNowPlaying()) return;
+        if (kaTimer) return; // 已在退避轨道
+        kaSchedule(); // 连击计数由 kaSchedule 内部递增
+      });
+      const playIt = function () {
+        if (musicNowPlaying()) return; // v3.10.x：音乐在播，让位不抢音频（由 syncKeepForMusic 收回）
+        const p = keepEl.play();
+        if (p && p.catch) p.catch(function () {});
+      };
+      playIt();
+      keepAudio = { el: keepEl };
 
       // v3.5.155：媒体会话标记——Chrome 安卓把「有活跃媒体会话 + 音频输出」的页面
       // 视为"正在播放媒体"，后台几乎不冻结（Youtube 网页版后台持续播放即此原理）。
@@ -78,21 +232,40 @@
       // 这里不覆盖（否则通知栏变成"后台保活"且按钮空响应，无法控制音乐）
       setKeepMediaSession();
 
-      // 用户首次交互时恢复 AudioContext（浏览器自动播放策略要求）
-      if (ctx.state === 'suspended') {
-        const resumeOnInteraction = function () {
-          if (keepAudio && keepAudio.ctx && keepAudio.ctx.state === 'suspended') {
-            keepAudio.ctx.resume().catch(function () {});
-          }
-        };
-        document.addEventListener('click', resumeOnInteraction, { once: true });
-        document.addEventListener('touchstart', resumeOnInteraction, { once: true });
-        document.addEventListener('keydown', resumeOnInteraction, { once: true });
-      }
-      // 每 5 秒尝试恢复（防止休眠导致 AudioContext 挂起）
+      // 用户首次交互时恢复播放（浏览器自动播放策略要求）
+      const resumeOnInteraction = function () {
+        if (musicNowPlaying()) return; // v3.10.x：音乐在播，让位
+        if (keepAudio && keepAudio.el && keepAudio.el.paused) {
+          const p = keepAudio.el.play();
+          if (p && p.catch) p.catch(function () {});
+        }
+      };
+      document.addEventListener('click', resumeOnInteraction, { once: true });
+      document.addEventListener('touchstart', resumeOnInteraction, { once: true });
+      document.addEventListener('keydown', resumeOnInteraction, { once: true });
+      // v3.13.x：轻心跳（原每 5 秒无条件补播）——不再主动抢播，只做三件事：
+      //   ① 音乐在播→保持让位；② 音频在跑→维持 mediaSession='playing'，稳定够久复位退避；
+      //   ③ 音频被外部打断暂停→排一次退避补播（间隔由 kaSchedule 按连击指数化）。
+      // 补播节奏明显放缓后，与其他 App 抢音频焦点的拉锯大幅减轻。
       keepInterval = setInterval(function () {
-        if (keepAudio && keepAudio.ctx && keepAudio.ctx.state === 'suspended') {
-          keepAudio.ctx.resume().catch(function () {});
+        if (keepAudio && keepAudio.el) {
+          try {
+            if (musicNowPlaying()) {
+              // v3.10.x：音乐在播——保活音频保持让位暂停，不重试补播；媒体条由
+              // music-player 管理，不再强设 playbackState（音乐暂停时会被误标）
+              if (!keepAudio.el.paused) keepAudio.el.pause();
+              return;
+            }
+            if (!keepAudio.el.paused) {
+              // 音频在跑就持续声明"正在播放"，维持媒体会话活跃
+              try { if (navigator.mediaSession) navigator.mediaSession.playbackState = 'playing'; } catch (e) {}
+              // 稳定播放够久 → 复位退避连击（下次打断从头 5s 起退避）
+              if (kaPauseStreak && Date.now() - kaLastPlayAt > kaStableMs()) kaPauseStreak = 0;
+              return;
+            }
+            // 音频暂停且不在退避轨道（启动被拒/媒体条丢失等漏网场景）→ 排退避补播
+            if (!kaTimer) kaSchedule();
+          } catch (e) {}
         }
       }, 5000);
 
@@ -134,7 +307,8 @@
     } catch (e) {}
   }
   function stopKeepAlive(showToast) {
-    try { if (keepAudio) { keepAudio.osc.stop(); keepAudio.ctx.close(); } } catch (e) {}
+    // v3.5.160：停掉 <audio> 保活音频（原来 stop osc/close ctx）
+    try { if (keepAudio && keepAudio.el) { keepAudio.el.pause(); keepAudio.el.src = ''; } } catch (e) {}
     // v3.5.155：清除媒体会话标记（通知栏媒体条消失）
     // v3.9.x：音乐播放时不清除——music-player 正在用 MediaSession 控制音乐
     if (!window.__musicPlaying) {
@@ -149,6 +323,10 @@
     // v3.5.131：释放屏幕常亮（原实现从不 release——关闭保活后屏幕持续不熄）
     try { if (wakeSentinel) { wakeSentinel.release(); } } catch (e) {}
     wakeSentinel = null;
+    // v3.13.x：清掉排中的退避补播与连击计数
+    kaStopTimer();
+    kaPauseStreak = 0;
+    kaPlayFailStreak = 0;
     clearInterval(keepInterval);
     keepAudio = null;
     keepInterval = null;
@@ -161,15 +339,20 @@
   // wakeLock 一并恢复，保证下一次后台会话依旧保活。
   function healKeepAlive() {
     if (!keepEnabled) return;
+    // v3.13.x：回前台立即清零退避轨道——用户切回来了，补播不再退避，马上恢复
+    kaResetBackoff();
     // 1) 恢复被挂起的保活音频（回前台瞬间可能仍被浏览器阻塞，延迟再试几次）
-    if (keepAudio && keepAudio.ctx && keepAudio.ctx.state === 'suspended') {
-      keepAudio.ctx.resume().catch(function () {});
+    //    v3.10.x：音乐在播时跳过——保活音频让位中，不抢音频
+    if (!musicNowPlaying() && keepAudio && keepAudio.el && keepAudio.el.paused) {
+      const p = keepAudio.el.play();
+      if (p && p.catch) p.catch(function () {});
     }
     [0, 600, 1800].forEach(function (d) {
       setTimeout(function () {
-        if (!keepEnabled) return;
-        if (keepAudio && keepAudio.ctx && keepAudio.ctx.state === 'suspended') {
-          keepAudio.ctx.resume().catch(function () {});
+        if (!keepEnabled || musicNowPlaying()) return; // v3.10.x：音乐在播，让位
+        if (keepAudio && keepAudio.el && keepAudio.el.paused) {
+          const p = keepAudio.el.play();
+          if (p && p.catch) p.catch(function () {});
         }
       }, d);
     });
@@ -189,17 +372,24 @@
       }
     } catch (e) {}
   }
+  // v3.14.x：回前台统一信号——healKeepAlive + dispatch mochi-fg-resume 事件，
+  // ta-ask 等模块监听后补触发主动消息 + 补弹后台新卡片（安卓后台 setInterval 被节流，
+  // 回前台不等下一个 tick 立即检查；小米MIX4 Edge 收不到后台消息修复）
+  function _onFgVisible() {
+    healKeepAlive();
+    try { document.dispatchEvent(new Event('mochi-fg-resume')); } catch (e) {}
+  }
   document.addEventListener('visibilitychange', function () {
-    if (document.visibilityState === 'visible') healKeepAlive();
+    if (document.visibilityState === 'visible') _onFgVisible();
   });
   // v3.9.x：窗口重新聚焦 / bfcache 恢复（pageshow persisted）同样自愈——
   // 有些浏览器从后台切回只触发 focus 不触发 visibilitychange；bfcache 恢复时
   // 定时器已暂停，恢复后保活音频也一并拉回
   document.addEventListener('focus', function () {
-    if (document.visibilityState === 'visible') healKeepAlive();
+    if (document.visibilityState === 'visible') _onFgVisible();
   });
   window.addEventListener('pageshow', function (e) {
-    if (e.persisted || document.visibilityState === 'visible') healKeepAlive();
+    if (e.persisted || document.visibilityState === 'visible') _onFgVisible();
   });
   function requestWakeLockTop() {
     try {
@@ -212,8 +402,10 @@
   }
   // v3.9.x：音乐停止后（music-media-release）恢复"后台保活"媒体条——
   // music-player 播放时覆盖了保活 metadata，停止后这里重新设回，保活后台存活率不降
+  // v3.10.x：音乐完全停止后同时收回让位中的保活音频（正常路径由 __musicPlaying=false
+  // 的 watcher 收回，这里对 teardown 直接跳过 onpause 等边缘路径双保险）
   document.addEventListener('music-media-release', function () {
-    if (keepEnabled) setKeepMediaSession();
+    if (keepEnabled) { setKeepMediaSession(); syncKeepForMusic(); }
   });
   const kaBtn = document.getElementById('bg-keepalive');
   function syncKeepUI() { if (kaBtn) kaBtn.checked = keepEnabled; }
@@ -246,11 +438,89 @@
   const NOTIFY_ICON = (function () {
     try { return new URL('./icon-512.png', location.href).href; } catch (e) { return ''; }
   })();
+  // v3.13.x：badge（通知左侧小图标）专用单色透明图——icon-512.png 是全不透明白底黑字
+  // 大图，直接放 badge 位不符合 Android small icon 规范（要求 alpha 蒙版单色图），
+  // 部分系统/浏览器（OPPO ColorOS + Edge 等）会渲染成白块或不显示。这里用 canvas
+  // 把白底变透明、内容变白色剪影，生成 96px 透明底单色 PNG dataURL，供 badge 使用。
+  let BADGE_DATAURL = '';
+  let badgeReady = false;
+  let badgeQueue = null;
+  function getBadgeUrl(cb) {
+    cb = cb || function () {};
+    if (badgeReady) { cb(BADGE_DATAURL); return; }
+    if (badgeQueue) { badgeQueue.push(cb); return; }
+    badgeQueue = [cb];
+    if (!NOTIFY_ICON) { badgeReady = true; BADGE_DATAURL = ''; const q = badgeQueue; badgeQueue = null; for (let i = 0; i < q.length; i++) q[i](''); return; }
+    const img = new Image();
+    img.onload = function () {
+      try {
+        const s = 96;
+        const c = document.createElement('canvas');
+        c.width = s; c.height = s;
+        const ctx = c.getContext('2d');
+        ctx.drawImage(img, 0, 0, s, s);
+        const d = ctx.getImageData(0, 0, s, s);
+        const px = d.data;
+        for (let i = 0; i < px.length; i += 4) {
+          const r = px[i], g = px[i + 1], b = px[i + 2];
+          if (r > 248 && g > 248 && b > 248) px[i + 3] = 0;   // 白底 → 透明
+          else { px[i] = 255; px[i + 1] = 255; px[i + 2] = 255; px[i + 3] = 255; } // 内容 → 白色不透明
+        }
+        ctx.putImageData(d, 0, 0);
+        BADGE_DATAURL = c.toDataURL('image/png');
+      } catch (e) { BADGE_DATAURL = ''; }
+      badgeReady = true;
+      const q = badgeQueue; badgeQueue = null;
+      for (let i = 0; i < q.length; i++) { try { q[i](BADGE_DATAURL); } catch (e2) {} }
+    };
+    img.onerror = function () { badgeReady = true; BADGE_DATAURL = ''; const q = badgeQueue; badgeQueue = null; for (let i = 0; i < q.length; i++) { try { q[i](''); } catch (e) {} } };
+    img.src = NOTIFY_ICON;
+  }
   // v3.5.135：统一走 Service Worker 显示通知——Chrome Android 规范：页面在后台（隐藏）
   //   时，页面脚本直接 new Notification() 会被静默抑制（通知不弹也不报错），
   //   标准做法是 navigator.serviceWorker.ready → reg.showNotification()（SW 独立于页面，
   //   隐藏时允许显示）。此辅助函数统一封装：优先 SW，失败回退页面 Notification。
   //   返回 Promise<boolean>：true=已提交显示（能否真正显示仍由系统通知权限决定）
+  // v3.14.x：media 全部 Blob 直传——此前头像/图片先转成 blob: URL 再交给 SW，但 blob URL
+  //   由页面进程持有：页面切后台被冻结/回收后，系统通知进程按 URL 取不到图 → 图标空置，
+  //   系统回退浏览器默认图标（用户反馈：后台弹窗左边一直不是 mochi 字母图标）。
+  //   改为把 dataURL 就地转成 Blob 对象放进 NotificationOptions（规范允许
+  //   icon/badge/image 为 (DOMString or Blob)），位图随通知序列化、不依赖页面存活；
+  //   顺带删掉 createObjectURL + 延迟 revoke 的泄漏面。
+  function dataUrlToBlob(dataUrl, cb) {
+    try {
+      fetch(dataUrl).then(function (r) { return r.blob(); }).then(function (b) {
+        cb(b && b.size ? b : null);
+      }, function () { cb(null); });
+    } catch (e) { cb(null); }
+  }
+  // 把 target 里 data: 形式的 icon/badge/image 原地换成 blob: URL 字符串；
+  // http(s)/blob URL 原样保留，单个转换失败仅删该字段（宁缺图，不缺整条通知）
+  // v3.18.x：修复「右侧无头像 + 有时通知发不出」——此前把 Blob 对象直接赋给
+  // icon/badge/image 传给 showNotification，而 NotificationOptions 这些字段规范要求
+  // URL 字符串（USVString），Chrome 收到 Blob 对象会失败/忽略 → 触发降级链剥掉图标
+  // （右侧无头像），降级重发仍带 Blob 对象字段反复失败（有时整条通知发不出）。
+  // 改用 URL.createObjectURL(blob) 生成 blob: URL 字符串，是合法 URL，Chrome 可靠渲染
+  function prepMediaBlobs(target, done) {
+    const keys = ['icon', 'badge', 'image'];
+    let pending = 0;
+    const finish = function () { if (!pending && done) { const d = done; done = null; d(); } };
+    keys.forEach(function (k) {
+      const v = target[k];
+      if (typeof v === 'string' && v.indexOf('data:') === 0) {
+        pending++;
+        dataUrlToBlob(v, function (b) {
+          if (b) {
+            try { target[k] = URL.createObjectURL(b); } catch (e) { delete target[k]; }
+          } else {
+            delete target[k];
+          }
+          if (--pending === 0) finish();
+        });
+      }
+    });
+    finish();
+  }
   function showSysNotification(title, opts) {
     opts = opts || {};
     return new Promise(function (resolve) {
@@ -265,46 +535,38 @@
           // v3.5.156：mochi 图标设到 badge（左侧小图标）——安卓通知里 badge 才是
           // 左侧小图标位；icon 是右侧大图标位（由调用方传联系人头像/消息图）。
           // 此前把 mochi 设进 icon → 显示在右侧，左侧 badge 未设 → 浏览器默认图标
-          if (!swOpts.badge && NOTIFY_ICON) swOpts.badge = NOTIFY_ICON;
+          // v3.13.x：badge 优先用 canvas 生成的单色透明图（Android small icon 规范）；
+          // 未生成完成时回退原始 icon-512 URL（已启动即预热，首条通知前通常已就绪）。
+          // v3.14.x：badge 同样走 Blob 直传（prepMediaBlobs 统一转换）
+          if (!swOpts.badge) swOpts.badge = BADGE_DATAURL || NOTIFY_ICON || undefined;
           navigator.serviceWorker.ready.then(function (reg) {
-            reg.showNotification(title, swOpts).then(function () { resolve(true); }, function () {
-              // v3.5.142：逐级降级重发——带 image（图片缩略图）失败 → 去 image 重发；
-              // 仍失败且带 icon → 再去 icon 重发；保证文字通知不因图片/图标异常整条丢失
-              const tryNoImage = function () {
-                if (swOpts.image) {
-                  const noImg = Object.assign({}, swOpts);
-                  delete noImg.image;
-                  reg.showNotification(title, noImg).then(function () { resolve(true); }, function () {
-                    if (swOpts.icon) {
-                      const noIcon = Object.assign({}, swOpts);
-                      delete noIcon.icon;
-                      reg.showNotification(title, noIcon).then(function () { resolve(true); }, function () { resolve(false); });
-                    } else {
-                      resolve(false);
-                    }
-                  });
-                } else if (swOpts.icon) {
-                  const noIcon = Object.assign({}, swOpts);
-                  delete noIcon.icon;
-                  reg.showNotification(title, noIcon).then(function () { resolve(true); }, function () { resolve(false); });
-                } else {
-                  resolve(false);
-                }
-              };
-              tryNoImage();
-            });
+            // v3.14.x：逐级降级重发——带 image 失败 → 去 image；仍失败 → 去 badge；
+            // 最后连 icon 也去掉只发纯文字。保证文字通知不因任一媒体字段异常整条丢失
+            const STRIP_LADDER = [[], ['image'], ['image', 'badge'], ['image', 'badge', 'icon']];
+            let ladderIdx = 0;
+            const tryNext = function () {
+              if (ladderIdx >= STRIP_LADDER.length) { resolve(false); return; }
+              const attempt = Object.assign({}, swOpts);
+              STRIP_LADDER[ladderIdx++].forEach(function (k) { delete attempt[k]; });
+              prepMediaBlobs(attempt, function () {
+                reg.showNotification(title, attempt).then(function () { resolve(true); }, tryNext);
+              });
+            };
+            tryNext();
           }).catch(function () {
-            // SW 不可用回退页面路径：去掉 image 与 icon（页面 Notification 对
+            // SW 不可用回退页面路径：去掉 image/icon/badge（页面 Notification 对
             // dataURL 图片/图标不稳定，带上会导致整条通知失败，v3.5.118 教训）
             const noMedia = Object.assign({}, opts);
             delete noMedia.image;
             delete noMedia.icon;
+            delete noMedia.badge;
             try { new Notification(title, noMedia); resolve(true); } catch (e) { resolve(false); }
           });
         } else {
           const noMedia = Object.assign({}, opts);
           delete noMedia.image;
           delete noMedia.icon;
+          delete noMedia.badge;
           try { new Notification(title, noMedia); resolve(true); } catch (e) { resolve(false); }
         }
       } catch (e) { resolve(false); }
@@ -316,8 +578,8 @@
     if (!('Notification' in window)) {
       // v3.7.x：按平台区分文案——安卓阉割 WebView（OPPO 自带/Via 等）也无 Notification API，
       //   原文案硬编码"iPhone"对安卓用户很困惑。iOS 仍引导装主屏（iOS PWA 也不支持本地通知）
-      const _isIOS = /iphone|ipad|ipod/i.test(navigator.userAgent)
-        && !/android/i.test(navigator.userAgent) && !window.MSStream;
+      // v3.16.x：设备判定统一读 device.js（mochiDevice）
+      const _isIOS = !!(window.mochiDevice || {}).isIOS;
       toast(_isIOS
         ? 'iPhone 网页版不支持系统通知\n请安装到主屏幕后由系统接管'
         : '当前浏览器不支持系统通知\n请改用 Chrome/Edge，或添加到主屏幕后由系统接管');
@@ -388,6 +650,8 @@
     }
     // v3.5.131：恢复时校验权限——浏览器/系统回收权限后开关仍显示"开"但通知静默失效
     notifyEnabled = saved === '1' && 'Notification' in window && Notification.permission === 'granted';
+    // v3.13.x：预热 badge 单色图——页面启动即后台生成，首条通知前通常已就绪
+    if ('Notification' in window && Notification.permission === 'granted') { getBadgeUrl(function () {}); }
     if (saved === '1' && !notifyEnabled) {
       try { gSet('bg-notify', '0'); } catch (e) {}
       toast('通知权限已被回收，已自动关闭通知');
@@ -439,6 +703,27 @@
       const keep = document.getElementById('bg-keepalive');
       const keepOn = keepEnabled;
       env.push(keepOn ? '✓ 后台保活：已开启' : '✗ 后台保活：未开启（TA 消息后台到不了，通知不会弹）');
+      // v3.13.x：拦截统计——本次会话后台期间有多少消息被去重闸门吞掉（定位"只有声不弹窗"）
+      try {
+        if (window.bgNotifyGateStats) {
+          const st = window.bgNotifyGateStats();
+          env.push('拦截统计（本次会话后台）：收到 ' + st.total + ' 条 · 过渡期拦 ' + st.tooFresh + ' · 重复拦 ' + st.dup + ' · 已发 ' + st.sent + '');
+        }
+      } catch (e) {}
+      // v3.15.x：头像链路探针——定位「通知里没有联系人头像」卡在哪一环：
+      // 头像值是否存在、长度、来源键、dataURL→Blob 转换是否成功
+      try {
+        const avCs = store.get('cs-avatar-partner') || '';
+        const avOld = store.get('avatar-partner') || '';
+        const avUsed = avCs || avOld;
+        if (!avUsed) {
+          env.push('✗ 联系人头像：无数据（cs-avatar-partner 与 avatar-partner 均为空）');
+          env.push('  解决：去【手机桌面美化】点 TA 头像上传一张图片');
+        } else {
+          env.push('✓ 联系人头像：' + (avUsed.length > 200 * 1024 ? '存在(' + Math.round(avUsed.length / 1024) + 'KB)' : '存在(' + Math.round(avUsed.length / 1024) + 'KB)') + ' · 来源:' + (avCs ? '聊天头像(cs)' : '桌面头像'));
+          env.push('  提示：若通知仍不显示头像 → 系统通知样式由 Chrome/ROM 决定，部分机型需展开通知才显示大图');
+        }
+      } catch (e) {}
       const isHttps = location.protocol === 'https:' || location.hostname === 'localhost' || location.hostname === '127.0.0.1';
       env.push(isHttps ? '✓ 访问协议：HTTPS 或本地' : '✗ 访问协议：' + location.protocol + '//（安卓 Chrome 需 HTTPS 才弹通知，GitHub Pages 部署后即是 HTTPS）');
       // v3.5.144：聊天消息后台弹窗诊断——后台收不到聊天消息 ≠ 通知问题，
@@ -463,7 +748,7 @@
       }
       // 环境 OK：真发一条测试通知（走 SW showNotification，页面隐藏也能显示）
       try {
-        const name = store.get('lbl-partner') || 'TA';
+        const name = store.get('lbl-partner') || (window.taWord ? window.taWord() : 'TA');
         showSysNotification('后台通知测试', { body: '来自 ' + name + ' · 如果能看到这条，后台通知就通了' }).then(function (ok) {
           if (ok) {
             env.push('✓ 测试通知已发送（Service Worker）');
@@ -487,48 +772,248 @@
   // v3.5.137：回到前台时补弹应用内横幅——后台期间收到的消息系统通知已进通知栏，
   //   但页面切回前台时应用内顶部横幅（desk-msg）不会自动出现；这里根据未读数
   //   在屏幕上方补一条横幅（点击默认进聊天），实现「切回即见新消息」的体验
+  // v3.5.161：修复「回前台重弹看过消息」——之前用 chat-unread 总量判断，但它是
+  //   你【看过消息前】的旧未读累计（进聊天页才清零），回前台会把前几分钟看过的
+  //   消息当新消息重弹。改为：切后台时记录未读基数（resumeUnreadBase），回前台
+  //   只提示【后台期间新增】的未读增量；无增量则完全不弹。
+  let resumeUnreadBase = -1; // 切后台时的未读基数；-1=未初始化（本次会话没切过后台）
   document.addEventListener('visibilitychange', function () {
-    if (document.visibilityState !== 'visible') return;
+    const vis = document.visibilityState;
+    if (vis === 'hidden') {
+      // 切后台：记录当前未读数，作为本次后台会话的基数
+      try { resumeUnreadBase = parseInt(store.get('chat-unread'), 10) || 0; } catch (e) { resumeUnreadBase = 0; }
+      return;
+    }
+    if (vis !== 'visible') return;
     const saved = gGet('bg-notify');
     if (saved === '1') {
-      const keep = document.getElementById('bg-keepalive');
       const keepOn = keepEnabled;
       if (!keepOn) {
         toast('提醒：后台保活已关闭，后台消息到不了，通知不会弹（设置里开启）');
       }
     }
-    // 补弹应用内横幅 + 汇总系统通知：有未读新消息且不在聊天页。
-    // v3.5.154：回前台瞬间发一条汇总系统通知「你不在的时候收到 N 条新消息」——
-    // 后台冻结导致消息/通知没能实时到达，回前台时一次告知，避免堆积消息陆续补发的混乱。
-    // 30 秒内不重复发（防止反复切出切入刷屏）
+    // 补弹应用内横幅 + 汇总系统通知：仅当【本次后台期间】未读有增量。
+    // v3.5.161：用增量（当前未读 - 切后台时基数）而非总量，避免重弹看过消息；
+    // 基数未初始化（本次会话没切过后台）时跳过，不弹旧未读
     try {
+      if (resumeUnreadBase < 0) return;
       const chatPage = document.getElementById('page-chat');
       const inChat = chatPage && !chatPage.hidden;
-      const unread = parseInt(store.get('chat-unread'), 10) || 0;
-      const name = store.get('lbl-partner') || 'TA';
-      if (!inChat && unread > 0 && window.showDeskPopup) {
+      const unreadNow = parseInt(store.get('chat-unread'), 10) || 0;
+      const inc = unreadNow - resumeUnreadBase;
+      if (!inChat && inc > 0 && window.showDeskPopup) {
+        const name = store.get('lbl-partner') || (window.taWord ? window.taWord() : 'TA');
         // visibilitychange 为 visible 时触发，isHidden=false 显示应用内横幅
-        window.showDeskPopup({ name: name, text: '你不在的时候收到 ' + unread + ' 条新消息', isHidden: false });
+        window.showDeskPopup({ name: name, text: '你不在的时候收到 ' + inc + ' 条新消息', isHidden: false });
         const now = Date.now();
         if (saved === '1' && 'Notification' in window && Notification.permission === 'granted' &&
             (!lastResumeNotifyAt || now - lastResumeNotifyAt > 30000)) {
           lastResumeNotifyAt = now;
-          showSysNotification(name, { body: '你不在的时候收到 ' + unread + ' 条新消息' });
+          showSysNotification(name, { body: '你不在的时候收到 ' + inc + ' 条新消息' });
         }
       }
     } catch (e) {}
   });
   let lastResumeNotifyAt = 0; // v3.5.154：回前台汇总通知去重
 
+  // v3.12.x：修复「刚聊完切后台，通知栏弹出几分钟前已看过的消息」——
+  // bgNotifyCheck 原来只判断「页面是否隐藏」，对内容毫无记忆：切后台后保活定时器
+  // 继续跑，回复链剩余部分/下一轮主动发送/查岗卡等一旦产出与刚才对话相同或延续的
+  // 内容，就原样再发一条系统通知（用户视角：明明看过的消息又弹一遍）。两道闸门：
+  //   ① 隐藏时长门槛：切后台头 15 秒内的"消息"多为切换过渡期定时器到点
+  //     （用户刚看完/马上回来看），不发系统通知；
+  //   ② 内容去重：与【最近聊天记录里 TA 已说过的内容】或【最近已发过的通知】
+  //     相同（指纹一致）→ 不再重复弹通知。消息本体照常进聊天记录和角标。
+  // v3.13.x 修正误杀（用户反馈：只听见消息声音、后台却不弹窗）——原实现把图片/表情包
+  // 统一归一成 [附件] 指纹，30 分钟内第二条图片消息或撞车的常见短语必被误拦：
+  //   - 附件指纹加入图片本体采样（MIME + 长度 + 3 个错位段哈希）——不同图片互不误判，
+  //     同一张图重复发仍可去重；
+  //   - 历史聊天查重窗口 30→15 分钟、已发通知查重窗口 10→6 分钟，误杀面减半；
+  //   - 文本指纹取前 60→100 字符，常见短语互撞更少。
+  let lastVisibleAt = Date.now();
+  let lastHiddenAt = 0; // v3.16.x：最近一次切后台时刻（修复过渡期闸门失效）
+  (function () {
+    const markVisible = function () {
+      if (document.visibilityState === 'visible') {
+        lastVisibleAt = Date.now();
+        lastHiddenAt = 0;
+      } else if (document.visibilityState === 'hidden') {
+        lastHiddenAt = Date.now();
+      }
+    };
+    document.addEventListener('visibilitychange', markVisible);
+    window.addEventListener('pageshow', markVisible);
+    window.addEventListener('focus', markVisible);
+  })();
+  const NOTIFY_HIDDEN_MIN_MS = 15000;
+  const NOTIFY_CHAT_DUP_MS = 15 * 60000; // v3.13.x：30→15 分钟
+  const NOTIFY_SENT_DUP_MS = 6 * 60000;  // v3.13.x：10→6 分钟
+  // 通知文本归一化：剥 dataURL/语音 ||| 段/SVG 标签，去空白后取前 100 字符做指纹
+  function normNotifyKey(raw) {
+    let s = String(raw || '');
+    if (s.length > 1024) s = s.slice(0, 1024); // 先截断再正则，避免超长 base64 全文替换开销
+    s = s.replace(/data:[a-zA-Z0-9.+-]+\/[a-zA-Z0-9.+-]+;base64,[A-Za-z0-9+/=]+/g, '[附件]')
+      .replace(/\|\|\|.*$/, '')
+      .replace(/<[^>]*>/g, '');
+    return s.replace(/\s+/g, '').slice(0, 100);
+  }
+  // dataURL 采样哈希（v3.13.x）：不读 base64 全文，取 MIME + 长度 + 3 个错位散列——
+  // 不同图片指纹互异（不再因都显示成 [图片] 而互判重复），相同图片重复发采样一致仍可去重
+  function sampleDataUrl(dataUrl) {
+    try {
+      if (!dataUrl || typeof dataUrl !== 'string') return '';
+      const m = /^data:([a-zA-Z0-9.+-]+\/[a-zA-Z0-9.+-]+);base64,/.exec(dataUrl);
+      const b64 = m ? dataUrl.slice(m[0].length) : dataUrl;
+      const h = function (shift) {
+        let x = 0;
+        for (let i = shift; i < b64.length; i += 7) x = (x * 31 + b64.charCodeAt(i)) & 0x7fffffff;
+        return x.toString(36);
+      };
+      return '|' + (m ? m[1] : '?') + ':' + b64.length + ':' + h(0) + ':' + h(1) + ':' + h(2);
+    } catch (e) { return ''; }
+  }
+  // 组装消息去重指纹：文本指纹 + 附件采样。纯附件消息（正文是 [图片]/[表情包] 占位、
+  // 空串、或本身是 dataURL）且带图时，文本基统一为 [附件] —— 与聊天记录里纯图消息
+  // （text 即 dataURL，扫描时抽出为 img）的指纹口径一致，保证查重能对上
+  function msgFingerprint(text, img) {
+    let t = String(text || '');
+    const isPh = /^\[(图片|表情包|语音|附件)\]$/.test(t.trim());
+    const imgOnly = isPh || !t.trim() || t.indexOf('data:') === 0;
+    let k = normNotifyKey(imgOnly && img ? '[附件]' : t);
+    const a = sampleDataUrl(img);
+    if (a) k += a;
+    return k;
+  }
+  // 最近窗口内聊天记录里 TA 是否已说过同样内容（扫尾部最多 150 条，命中即回）
+  // v3.14.x：refTs=本次通知对应的到达时刻——用于把「这条新消息自己刚入库的条目」
+  // 排除出扫描（卡片类是提示语+卡面两条几乎同时入库，见循环内说明）
+  function recentChatDup(key, refTs) {
+    if (!key) return false;
+    try {
+      const arr = window.getChatMsgs ? window.getChatMsgs() : null;
+      if (!arr || !arr.length) return false;
+      const cutoff = Date.now() - NOTIFY_CHAT_DUP_MS;
+      // v3.13.x 修复：聊天消息到达是「先入库（addRec msgs.push）再走 bgNotifyCheck」，
+      // 查重扫历史会把【刚到达的这条】自己判成"最近说过"而吞掉通知（用户表现：联系人
+      // 发消息有提示音但从不弹窗）。v3.14.x 演进：不再按下标跳过末尾条目——卡片类是
+      // 「提示语+卡面」两条几乎同时入库，只跳末尾一条会让刚看过的卡面永远扫不到
+      // （隐藏态再触发同文案时照样重弹，用户实测）；改为从末尾整条扫 + 按时间戳自排除：
+      // 与本次通知时刻相近(refTs±)或刚入库(墙钟 2.5s 内)的条目都视为"这条新消息自己"。
+      // 兜底处理迟到入库（refTs 远新于条目 ts 的延迟处理场景）不误吞。
+      for (let i = arr.length - 1, n = 0; i >= 0 && n < 150; i--, n++) {
+        const m = arr[i];
+        if (!m) continue;
+        const mts = m.ts || 0;
+        if (mts && mts < cutoff) break; // 追加有序，更早的不可能落在窗口内
+        // v3.14.x：自排除——本次通知对应的新入库条目（到达时刻±2.5s 或墙钟刚落库）
+        if (refTs && (mts >= refTs - 2500 || (!mts && i === arr.length - 1) || Date.now() - mts < 2500)) continue;
+        if (m.side !== 'in') continue;
+        let t = m.text || '';
+        let img = '';
+        // v3.13.x：parts 化消息——图片/表情包/语音的 dataURL 一并采样，参与指纹比对
+        if ((!t || t.indexOf('data:') === 0) && m.parts && m.parts.length) {
+          const texts = [], images = [];
+          for (let p = 0; p < m.parts.length; p++) {
+            const part = m.parts[p];
+            if (!part || !part.k) continue;
+            if (part.k === 'text') texts.push(part.v);
+            else if (part.k === 'image' || part.k === 'sticker' || part.k === 'voice') images.push(part.v);
+          }
+          t = texts.join(' ');
+          img = images[0] || '';
+        } else if (t.indexOf('data:') === 0) {
+          img = t; // 无 parts 的旧式纯图消息：dataURL 即正文
+          t = '';
+        } else if (t.indexOf('|||') >= 0) {
+          // v3.13.x：旧式语音消息 text 为「名称|||音频dataURL」——与探针/通知侧一致地
+          // 剥离 ||| 段再比指纹，否则带语音文本查不到历史（语音段剥离后同指纹）
+          t = t.split('|||')[0];
+        }
+        const mf = msgFingerprint(t, img);
+        if (mf === key) return true;
+        // v3.14.x：双向包含兜底——互动卡的通知文本是「前缀+卡面」（如「TA想问你一个问题：」+
+        // 卡面、「TA 来查岗了：」+卡面），聊天记录里存的却是裸卡面/裸提示语条目，精确相等
+        // 永远对不上 → 已看过的卡片再被任何机制触发时照样重弹系统通知（用户实测：
+        // 切后台回来再切出，弹出刚在聊天里看过的互动卡）。较短一边 ≥6 字才参与包含
+        // 比对，防「哈哈」这类超短文案误伤无关新消息
+        if (mf.length >= 6 && key.length > mf.length && key.indexOf(mf) >= 0) return true;
+        if (key.length >= 6 && mf.length > key.length && mf.indexOf(key) >= 0) return true;
+      }
+    } catch (e) {}
+    return false;
+  }
+  // 最近已发过同内容的系统通知（跨"生成源不同但文本相同"兜底）
+  const notifiedRecently = new Map();
+  function notifiedDup(key) {
+    if (!key) return false;
+    const last = notifiedRecently.get(key);
+    return !!(last && Date.now() - last < NOTIFY_SENT_DUP_MS);
+  }
+  function markNotified(key) {
+    if (!key) return;
+    notifiedRecently.set(key, Date.now());
+    if (notifiedRecently.size > 60) { // 上限防膨胀：删最早的（Map 保持插入序）
+      notifiedRecently.delete(notifiedRecently.keys().next().value);
+    }
+  }
+  // v3.14.x：「前台已看过」指纹记忆——此前前台收到内容时 bgNotifyCheck 直接裸返回、
+  // 什么都不记：同一条内容稍后再被任何机制触发（冻结定时器补跑/回复链延续/同类卡
+  // 再抽中），只要错过已发窗口与历史扫描窗口，就会再以系统通知形式弹出用户刚在
+  // 聊天里看过的内容。现在前台展示的同时记入 seenRecently（TTL 与历史扫描窗口一致，
+  // 15 分钟），后台侧把它当作第三道去重闸门。
+  const seenRecently = new Map();
+  function markSeen(key) {
+    if (!key) return;
+    seenRecently.set(key, Date.now());
+    if (seenRecently.size > 80) { // 上限防膨胀：删最早的（Map 保持插入序）
+      seenRecently.delete(seenRecently.keys().next().value);
+    }
+  }
+  function seenDup(key) {
+    if (!key) return false;
+    const last = seenRecently.get(key);
+    return !!(last && Date.now() - last < NOTIFY_CHAT_DUP_MS);
+  }
+  // v3.13.x：拦截统计——诊断"只听见声音不弹窗"时一屏看出每条消息卡在哪道闸门
+  let gateStats = { total: 0, tooFresh: 0, dup: 0, sent: 0 };
+  window.bgNotifyGateStats = function () { return Object.assign({}, gateStats); };
+  // 只读探针：诊断/回归用——给定文本（+可选图片 dataURL、可选本次到达时刻 refTs）
+  // 当前会被哪道闸门拦下
+  window.bgNotifyGateInfo = function (text, img, refTs) {
+    const nkey = msgFingerprint(text, img);
+    return {
+      hiddenForMs: Date.now() - lastVisibleAt,
+      // v3.16.x：过渡期用「切后台时刻 lastHiddenAt」——切后台头 15 秒内的积压消息不弹
+      tooFreshHidden: lastHiddenAt > 0 && Date.now() - lastHiddenAt < NOTIFY_HIDDEN_MIN_MS,
+      dupNotified: notifiedDup(nkey),
+      dupSeen: seenDup(nkey),
+      dupInChat: recentChatDup(nkey, refTs),
+      nkey: nkey
+    };
+  };
+
   // 供 chat.js（showDeskPopup 联动）/ 信箱 / 朋友圈调用：TA 相关新事件且页面不在
   // 前台时弹系统通知。第三参 extra：name 通知标题（信箱/朋友圈/机制名，默认 TA 昵称）、
   // img 图片 dataURL（通知 image 字段显示缩略图）；头像 + 昵称 + 时间（精确到秒）+ 内容
   window.bgNotifyCheck = function (text, ts, extra) {
     if (!notifyEnabled) return;
-    if (document.visibilityState === 'visible') return;
-    if (!('Notification' in window) || Notification.permission !== 'granted') return;
     extra = extra || {};
-    const name = extra.name || store.get('lbl-partner') || 'TA';
+    // v3.12.x：两道闸门（详见上方注释）——过渡期不弹 + 已看过/已弹过的内容不重弹
+    // v3.13.x：指纹由文本+附件采样构成——图片/表情包用本体采样去重，不同图片不再互拦
+    // v3.14.x：前台收到改为「记 seen 指纹后返回」而非裸返回——用户已在应用内看到的
+    // 内容，之后任何机制再次触发同文案都不再重复弹系统通知
+    const nkey = msgFingerprint(text, extra.img);
+    if (document.visibilityState === 'visible') { markSeen(nkey); return; }
+    if (!('Notification' in window) || Notification.permission !== 'granted') return;
+    gateStats.total++;
+    // v3.16.x：过渡期闸门改用「切后台时刻」——lastVisibleAt 是最近一次回前台时间，
+    // 前台久驻后（如看了 10 分钟）它很旧，切后台瞬间积压的定时器批量到点产生的
+    // 一堆消息会全部通过闸门 → 弹出大量看过的内容。改为切后台头 15 秒内一律不弹
+    if (lastHiddenAt > 0 && Date.now() - lastHiddenAt < NOTIFY_HIDDEN_MIN_MS) { gateStats.tooFresh++; return; }
+    if (notifiedDup(nkey) || seenDup(nkey)) { gateStats.dup++; return; }
+    if (recentChatDup(nkey, ts)) { gateStats.dup++; return; }
+    gateStats.sent++;
+    const name = extra.name || store.get('lbl-partner') || (window.taWord ? window.taWord() : 'TA');
     let t = '';
     if (ts) {
       const d = new Date(ts);
@@ -542,41 +1027,32 @@
     const body = String(text || '收到一条新消息')
       .replace(/data:[a-zA-Z0-9.+-]+\/[a-zA-Z0-9.+-]+;base64,[A-Za-z0-9+/=]+/g, '[附件]')
       .replace(/\|\|\|.*$/, '');
-    const opts = { body: (t ? t + '  ' : '') + (body && body.length > 40 ? body.slice(0, 40) + '…' : body) };
+    // v3.x.x：称呼跟随——通知正文里的 TA/他 按当前联系人性别替换（纯文本，安全）
+    const bodyFitted = window.taFit ? window.taFit(body) : body;
+    const opts = { body: (t ? t + '  ' : '') + (bodyFitted && bodyFitted.length > 40 ? bodyFitted.slice(0, 40) + '…' : bodyFitted) };
     // v3.5.156：修正安卓通知字段语义（此前 icon/badge/image 用反，导致
     // 「左侧浏览器图标、右侧 mochi、无头像」）：
     //   - badge（左侧小图标，单色）= mochi 字母图标（showSysNotification 兜底设）
     //   - icon（右侧大图标）= 联系人头像（v3.5.158：始终用头像，不被消息图顶替）
     //   - image（展开大图）= 消息图片（可选，有才设）
     // 头像/图片 dataURL → blob URL，安卓 Chrome 可靠渲染
-    let bigIcon = '';   // 右侧大图标：始终联系人头像
+    let bigIcon = '';   // 右侧大图标：联系人头像；无头像时兜底 mochi 字母图标（见下）
     let previewImg = ''; // 展开大图：消息图片
     // v3.5.158：右侧固定显示联系人头像——即使消息带表情包/图片，右侧仍是 TA 的头像，
     // 消息图只放 image（展开大图），不顶替头像位置
     // v3.7.x：跨桌面——extra.av（朋友圈通知的发布者头像）优先，其次当前桌面 TA 头像
-    const avatar = extra.av || store.get('avatar-partner') || '';
+    // v3.13.x：头像互动/换头像 v3.12.x 起只写聊天专用键 cs-avatar-partner（桌面
+    // avatar-partner 独立不再跟随），后台通知此前仍读桌面键 → 通知弹窗头像不跟随换头像；
+    // 与通话/聊天域同口径：先 cs-avatar-partner，未设回退 avatar-partner
+    // v3.14.x：无头像时 icon 兜底 NOTIFY_ICON——此前 icon 缺省时大图标位空置，
+    // 部分系统/浏览器会把通知左侧也渲染成浏览器默认图标；现在至少保证 mochi 字母图标
+    //（https URL，SW 随时可取）。media 不再各自转 blob URL，dataURL 原样上交
+    // showSysNotification 统一 Blob 化直传（页面冻结后 blob: URL 取不到图是左侧
+    // 回退浏览器默认图标的根因）
+    const avatar = extra.av || store.get('cs-avatar-partner') || store.get('avatar-partner') || '';
     if (avatar && (avatar.indexOf('data:') === 0 || /^https?:\/\//i.test(avatar))) bigIcon = avatar;
+    if (!bigIcon) bigIcon = NOTIFY_ICON;
     if (extra.img && (extra.img.indexOf('data:') === 0 || /^https?:\/\//i.test(extra.img))) previewImg = extra.img;
-    const toBlob = function (dataUrl, cb) {
-      try {
-        fetch(dataUrl).then(function (r) { return r.blob(); }).then(function (b) {
-          try { cb(URL.createObjectURL(b)); } catch (e) { cb(''); }
-        }).catch(function () { cb(''); });
-      } catch (e) { cb(''); }
-    };
-    const sendNotify = function (iconUrl, imgUrl) {
-      if (iconUrl) opts.icon = iconUrl;
-      if (imgUrl) opts.image = imgUrl;
-      showSysNotification(name, opts);
-    };
-    // v3.5.158：右侧头像 + 展开大图（消息图）——头像 blob 转换后发送，消息图一并带上
-    const doSend = function (iconUrl) {
-      if (previewImg && previewImg.indexOf('data:') === 0) {
-        toBlob(previewImg, function (u) { sendNotify(iconUrl, u || ''); });
-      } else {
-        sendNotify(iconUrl, previewImg);
-      }
-    };
     // v3.9.x 修复：头像裁剪为正方形，防止安卓通知拉伸变形
     // 通知的 icon 字段在安卓上会被强制拉伸填充，需预先裁剪为 1:1
     const cropAvatarToSquare = function (dataUrl, cb) {
@@ -589,7 +1065,7 @@
             const sy = (img.height - size) / 2;
             const c = document.createElement('canvas');
             c.width = size; c.height = size;
-            c.getContext('2d').drawImage(img, sx, sy, size, size, 0, 0, size, size);
+            c.getContext('2d').drawImage(img, sx, sy, size, size);
             cb(c.toDataURL('image/jpeg', 0.85));
           } catch (e) { cb(''); }
         };
@@ -597,10 +1073,22 @@
         img.src = dataUrl;
       } catch (e) { cb(''); }
     };
+    // v3.14.x：发送链路收敛——icon 裁剪完成后连同消息图一次性交
+    // showSysNotification（内部统一 dataURL→Blob 直传 + 逐级降级重发）
+    const sendFinal = function (iconVal) {
+      if (iconVal) opts.icon = iconVal;
+      if (previewImg) opts.image = previewImg;
+      // v3.12.x：受理成功才记入"已通知"指纹（窗口内同内容不再重弹）
+      showSysNotification(name, opts).then(function (ok) {
+        if (ok) markNotified(nkey);
+      });
+    };
     if (bigIcon && bigIcon.indexOf('data:') === 0) {
-      cropAvatarToSquare(bigIcon, function (u) { doSend(u || ''); });
+      // v3.15.x：裁剪失败不再丢弃头像——回退原 dataURL 交给 showSysNotification 的
+      // prepMediaBlobs 转 Blob；此前裁剪失败 cb('') 会直接丢头像导致通知无头像
+      cropAvatarToSquare(bigIcon, function (u) { sendFinal(u || bigIcon); });
     } else {
-      doSend(bigIcon);
+      sendFinal(bigIcon);
     }
   };
   // v3.5.147：通知缩略图压缩——canvas 把图片 dataURL 压到最长边 96px JPEG。
@@ -611,12 +1099,12 @@
       img.onload = function () {
         try {
           const maxSide = 96;
-          const scale = Math.min(1, maxSide / Math.max(img.width, img.height));
+      const scale = Math.min(1, maxSide / Math.max(img.width, img.height));
           const w = Math.max(1, Math.round(img.width * scale));
           const h = Math.max(1, Math.round(img.height * scale));
           const c = document.createElement('canvas');
           c.width = w; c.height = h;
-          c.getContext('2d').drawImage(img, 0, 0, w, h);
+          c.getContext('2d').drawImage(img, sx || 0, sy || 0, w, h);
           cb(c.toDataURL('image/jpeg', 0.72));
         } catch (e) { cb(''); }
       };
@@ -624,4 +1112,164 @@
       img.src = dataUrl;
     } catch (e) { cb(''); }
   }
+
+  // ================= v3.15.x：离线消息提醒（Periodic Background Sync，零后端） =================
+  // 页面全关后浏览器定期唤醒 SW（见 src/pwa/sw.js 同名段）：SW 读本段写入的快照弹通知。
+  // 本段职责：①设置开关+状态行；②注册/注销 periodicsync；③把「当前联系人可发文案」
+  // 快照写进 IDB 根键 xy-home-v2:psync-snap；④开屏就绪后把 SW 留下的 xy-home-v2:psync-queue
+  // 队列按联系人安全补投递进聊天（只走 chatAddIn 内存链路——绝不直写 chat-msgs，
+  // 遵守 v3.14.x 切桌面覆盖事故的教训）。
+  // 边界如实展示在状态行：仅 Chromium 系支持、需添加到桌面、频率由浏览器策略决定；
+  // 进程被杀无法唤醒（那需要真推送服务端，纯本地架构不引入）。iOS Safari 无此 API。
+  const PSYNC_TAG = 'mochi-ta-msg';
+  const PSYNC_SNAP_KEY = 'xy-home-v2:psync-snap';
+  const PSYNC_QUEUE_KEY = 'xy-home-v2:psync-queue';
+  const PSYNC_SNAP_TTL = 7 * 24 * 60 * 60 * 1000;
+  // 兜底想念语：自建字卡不足时也保证有内容可发（k:'bl' 标记内置）
+  const PSYNC_BUILTIN = [
+    '刚看到一句话，想起你了。',
+    '你在忙吗？我这边刚刚想到你。',
+    '没什么事，就是想跟你说句话。',
+    '今天也要好好吃饭呀。',
+    '突然很想你，就说一声。',
+    '记得喝水，别总忘了。',
+    '晚安前跟你说一声，我在。',
+    '有空的时候理理我呀。'
+  ];
+  function psyncSupported() {
+    try { return 'serviceWorker' in navigator && 'PeriodicSyncManager' in window; } catch (e) { return false; }
+  }
+  function psyncStandalone() {
+    try { return !!(window.matchMedia && window.matchMedia('(display-mode: standalone), (display-mode: fullscreen)').matches); } catch (e) { return false; }
+  }
+  function psyncEnabled() { return gGet('psync-en') === '1'; }
+  function psyncPlainCard(s) {
+    if (typeof s !== 'string') return false;
+    const t = s.trim();
+    if (!t || t.length > 60) return false;
+    if (t.indexOf('|||') >= 0) return false;               // 语音卡
+    if (t.indexOf('data:') === 0) return false;            // 图片/表情包
+    if (t.indexOf('http:') === 0 || t.indexOf('https:') === 0) return false;
+    return true;
+  }
+  function psyncShuffle(a) {
+    const r = a.slice();
+    for (let i = r.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); const t = r[i]; r[i] = r[j]; r[j] = t; }
+    return r;
+  }
+  function psyncBuildSnapshot() {
+    let cc = [];
+    try { cc = ((window.getCustomCards ? window.getCustomCards() : []) || []).filter(psyncPlainCard).slice(0, 40); } catch (e) { cc = []; }
+    const picks = [];
+    psyncShuffle(cc).forEach(function (t) { picks.push({ t: t.trim(), k: 'cc' }); });
+    psyncShuffle(PSYNC_BUILTIN).slice(0, 4).forEach(function (t) { picks.push({ t: t, k: 'bl' }); });
+    const snap = {
+      v: 1,
+      ts: Date.now(),
+      cid: window.__activeCid || 'default',
+      name: (function () { try { return store.get('lbl-partner') || 'TA'; } catch (e) { return 'TA'; } })(),
+      texts: psyncShuffle(picks).slice(0, 12)
+    };
+    window.__psyncSnapCount = snap.texts.length;
+    try { if (window.idbSet) window.idbSet(PSYNC_SNAP_KEY, snap); } catch (e) {}
+    return Promise.resolve(snap);
+  }
+  window.__psyncBuildSnapshot = function () { return psyncBuildSnapshot(); };
+  async function psyncApply() {
+    if (!psyncSupported() || !psyncEnabled()) { psyncSyncStatus(); return; }
+    try {
+      await navigator.serviceWorker.ready;
+      const st = await navigator.permissions.query({ name: 'periodic-background-sync' });
+      if (st && st.state === 'denied') { psyncSyncStatus('denied'); return; }
+      await navigator.periodicSync.register(PSYNC_TAG, { minInterval: 6 * 60 * 60 * 1000 });
+      await psyncBuildSnapshot();
+    } catch (e) {}
+    psyncSyncStatus();
+  }
+  async function psyncTeardown() {
+    try { if (psyncSupported() && navigator.periodicSync.getTags) {
+      const tags = await navigator.periodicSync.getTags();
+      if (tags.indexOf(PSYNC_TAG) >= 0) await navigator.periodicSync.unregister(PSYNC_TAG);
+    } } catch (e) {}
+    psyncSyncStatus();
+  }
+  async function drainPsyncQueue(force) {
+    if (!window.idbGet || !window.idbSet || !window.chatAddIn) return 0;
+    try { if (!force && performance.now() < 10000) return 0; } catch (e) {} // 开屏 10s 内不动，等聊天权威数据就绪
+    let arr = null;
+    try { arr = await window.idbGet(PSYNC_QUEUE_KEY); } catch (e) { return 0; }
+    if (!Array.isArray(arr) || !arr.length) return 0;
+    const cur = window.__activeCid || 'default';
+    const remain = [];
+    let delivered = 0;
+    for (let i = 0; i < arr.length; i++) {
+      const it = arr[i];
+      if (!it || typeof it.t !== 'string' || !it.t.trim()) continue;
+      if (!it.ts || Date.now() - it.ts > PSYNC_SNAP_TTL) continue;   // 过期丢弃
+      if ((it.cid || 'default') !== cur) { remain.push(it); continue; } // 别的桌面的留着
+      let dup = false;                                               // 防重复：最近 10 条同文本 30 分钟内视为已投递
+      try {
+        const msgs = window.getChatMsgs ? window.getChatMsgs() : null;
+        if (Array.isArray(msgs)) {
+          for (let j = Math.max(0, msgs.length - 10); j < msgs.length; j++) {
+            const m = msgs[j];
+            if (m && m.side === 'in' && m.text === it.t && Math.abs((m.ts || 0) - it.ts) < 30 * 60000) { dup = true; break; }
+          }
+        }
+      } catch (e) {}
+      if (!dup) { try { window.chatAddIn(it.t, { initiative: 1 }); delivered++; } catch (e) {} }
+    }
+    try { await window.idbSet(PSYNC_QUEUE_KEY, remain); } catch (e) {}
+    return delivered;
+  }
+  window.__psyncDrain = function (force) { return drainPsyncQueue(force === true); };
+  function psyncSyncStatus(state) {
+    const el = document.getElementById('psync-status');
+    if (!el) return;
+    if (!psyncSupported()) { el.textContent = '此浏览器不支持离线提醒（需安卓 Chromium 并添加到桌面）'; return; }
+    if (!psyncEnabled()) { el.textContent = '已关闭 · 页面全关后不再收到 TA 的消息提醒'; return; }
+    if (!psyncStandalone()) { el.textContent = '需先把应用添加到手机桌面（安装为应用）才会调度'; return; }
+    if (state === 'denied') { el.textContent = '系统拒绝了后台调度权限，暂无法离线提醒'; return; }
+    let n = (typeof window.__psyncSnapCount === 'number') ? window.__psyncSnapCount : 0;
+    el.textContent = '已开启 · 待发文案 ' + n + ' 条 · 频率由系统决定（通常数小时一次），进程被杀仍收不到';
+  }
+  // 设置开关（全局键 psync-en，与保活/通知同款 gGet/gSet）
+  const psBtn = document.getElementById('psync-en');
+  function syncPsyncUI() { if (psBtn) psBtn.checked = psyncEnabled(); }
+  if (psBtn) {
+    psBtn.addEventListener('change', function () {
+      const on = psBtn.checked;
+      gSet('psync-en', on ? '1' : '0');
+      psyncSyncStatus();
+      if (on) {
+        const go = function () { psyncApply(); };
+        if ('Notification' in window && Notification.permission === 'default' && typeof requestNotifyPermission === 'function') requestNotifyPermission(go);
+        else go();
+        toast(on ? '离线消息提醒已开启' : '离线消息提醒已关闭');
+      } else psyncTeardown();
+    });
+  }
+  // 调度钩子：开屏就绪刷快照+分批补投递；回前台/切桌面刷新
+  setTimeout(function () { psyncApply(); }, 8000);
+  [12000, 27000, 47000].forEach(function (ms) { setTimeout(function () { try { drainPsyncQueue(false); } catch (e) {} }, ms); });
+  try {
+    document.addEventListener('visibilitychange', function () {
+      if (document.visibilityState !== 'visible') return;
+      try { drainPsyncQueue(false); } catch (e) {}
+      try {
+        if (psyncEnabled() && psyncSupported()) {
+          const last = window.__psyncLastSnapAt || 0;
+          if (Date.now() - last > 300000) { window.__psyncLastSnapAt = Date.now(); psyncApply(); }
+        }
+      } catch (e) {}
+    });
+  } catch (e) {}
+  try {
+    document.addEventListener('contact-switched', function () {
+      setTimeout(function () {
+        try { drainPsyncQueue(false); } catch (e) {}
+        if (psyncEnabled() && psyncSupported()) psyncBuildSnapshot();
+      }, 3000);
+    });
+  } catch (e) {}
 })();

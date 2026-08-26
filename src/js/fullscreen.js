@@ -22,12 +22,14 @@
   const FS_KEY = 'fullscreen-enabled';
   // v3.6.x：CSS 兜底全屏持久化 key——上次走兜底（浏览器转横屏）则恢复时不再请求原生全屏
   const FB_KEY = 'fullscreen-fallback';
-  // v3.6.x：iOS 检测（与 mobile-adapt.js 同一判断）+ 主屏幕打开检测
-  // v3.7.x：加 Android 排除——OPPO/Via/夸克等浏览器可把 UA 伪装成 iPhone，
-  //   导致安卓机进 iOS 分支（弹"iOS 全屏说明"且不开真全屏）。UA 同时含 Android
-  //   关键字时按安卓处理（多数 UA 切换不彻底，会保留 Android 标识）
-  const isIOS = /iphone|ipad|ipod/i.test(navigator.userAgent)
-    && !/android/i.test(navigator.userAgent) && !window.MSStream;
+  // v3.16.x：设备判定统一收口到 device.js（window.mochiDevice）——此前与
+  // mobile-adapt.js 各算一遍（此处 isIOS 判定曾是它的复制）。现在统一读取，
+  // 判定逻辑只维护 device.js 一处。
+  let isIOS = false, isVia = false;
+  try {
+    const d = window.mochiDevice;
+    if (d) { isIOS = !!d.isIOS; isVia = !!d.isVia; }
+  } catch (e) {}
   const inIosStandalone = isIOS && (
     window.navigator.standalone === true ||
     (window.matchMedia && window.matchMedia('(display-mode: standalone)').matches)
@@ -36,10 +38,9 @@
   // 100dvh 不包含系统状态栏，.phone 底部留白、底部 tabbar/输入栏上移点不到
   //（base.css 用 100vh 覆盖占满全屏）
   if (inIosStandalone) document.documentElement.classList.add('ios-pwa-standalone');
-  // v3.6.x：Via 浏览器（UA 特征）——实测其 WebView 禁用了方向锁（lock 无效），
-  // 网页全屏必转横屏、退出后也不自动回竖屏。对这种浏览器直接不碰原生全屏，
-  // 走 CSS 兜底保持竖屏；真全屏引导用 Via 自带的全屏模式（竖屏沉浸）
-  const isVia = /via/i.test(navigator.userAgent);
+  // v3.6.x：Via 浏览器——网页全屏必转横屏且方向锁被 WebView 禁用（实测 lock 无效、
+  // 退出后也不自动回竖屏），原生全屏正是横屏源头，直接走 CSS 兜底；真全屏引导
+  // 用 Via 自带全屏模式（竖屏沉浸）。判定已收口 device.js（mochiDevice.isVia）
 
   function fsSupported() {
     // v3.6.x：webkit 前缀也判为支持（老版安卓 WebView/Chromium 只有 webkitRequestFullscreen）
@@ -347,13 +348,16 @@
         applyFsCss(false, false);
         enterFs();
         syncFsClass();
-        // v3.6.x：进入全屏后 900ms 复核两点：
+        // v3.6.x：进入全屏后复核两点：
         //   a) lock 是否真正生效（部分 WebView 的 lock 是空壳，全屏仍横屏）——
         //      无效则记录「此浏览器全屏必横屏」（下次直接走兜底）并回退；
         //   b) 原生全屏是否被浏览器拦截（无手势/权限）——既未进全屏也未走
         //      兜底则回滚开关（避免「已开全屏却无效果」）。横屏回退（方向监视器
         //      检测到横屏后应用 fs-css-active）先生效时 fsVisualActive() 已为
         //      true，本回调不会误回滚。
+        // v3.11.x：复核窗口 900→1500ms——低端机/重载页面上 requestFullscreen
+        // 完成可能超过 900ms，过早回滚会把开关改回关闭并经 MutationObserver
+        // 持久化 FS_KEY='0'（用户意图被覆盖，下次进入不再自动恢复）。
         setTimeout(() => {
           if (isFullscreen() && window.innerWidth > window.innerHeight) {
             store.set(FB_KEY, '1');
@@ -365,7 +369,7 @@
             t.checked = false;
             showFsFailTip();
           }
-        }, 900);
+        }, 1500);
       } else {
         if (isIOS && inIosStandalone) { applyIosFs(false); return; }
         // v3.6.x：修复 OPPO Edge 等安卓浏览器「全屏无法关闭」——旧逻辑先判
@@ -410,18 +414,38 @@
   // 「系统退出」（保留用户全屏意图）与「用户主动退出」（Esc/下滑提示条，
   // 浏览器标签模式应尊重并清标记，避免反复重入弹条）。
   let _wentBg = false;
+  // v3.11.x：最近一次转前台时刻——部分机型（小米 Chrome 实测反馈）切后台时
+  // fullscreenchange(exit) 早于 visibilitychange(hidden)，或退出事件被推迟到
+  // 回前台后才补发：两种时序下旧逻辑都会把「系统退出」误判成「用户主动退出」
+  // 而清掉持久化意图 → 每次进入应用全屏都失效，必须手动关开开关。记录回前台
+  // 时间供 handleFsExit 判定窗口使用。初值取模块加载时刻（加载后立刻补发的
+  // 系统退出同样按系统行为处理）。
+  let _lastVisibleAt = Date.now();
   function handleFsExit() {
     stopFsMonitor();
+    const d = document.documentElement;
     // 浏览器标签模式下，用户通过系统 UI（下滑/提示条/Esc）退出全屏 = 主动放弃全屏：
     // 清掉持久化标记，切后台回来 / 重新聚焦不再强制重入（原设计「不覆盖用户意图」
     // 只适用于 PWA 安装态，浏览器标签态会造成全屏退出后又被拉回的死循环）。
     // v3.8.x：切后台导致的系统退出（_wentBg）不属于主动放弃——保留标记，
-    // 切回后由 reenterFs 恢复（修复 OPPO Chrome 等把快捷方式态误报为非 PWA
-    // display-mode 时，切后台退出全屏后永不恢复的问题）。
-    if (!fsInPwa() && !_wentBg) {
-      try { store.set(FS_KEY, '0'); } catch (e) {}
-      try { store.set(FB_KEY, '0'); } catch (e) {}
-      try { document.documentElement.classList.remove('fs-css-active'); } catch (e) {}
+    // 切回后由 reenterFs 恢复。
+    // v3.11.x：清除决策延迟 700ms 复核，修复事件时序竞态——
+    //   · 复核时已转后台 / 窗口期内发生过 hidden → 系统切后台退出，保留意图；
+    //   · fs-css-active 在（横屏兜底流程自己设置的）→ 本应用的主动兜底，不动；
+    //   · 刚转前台 1.5s 内到达的 exit → 后台期间发生、回前台补发的系统退出，
+    //     保留意图并立即尝试恢复（此时多半无手势，armRetry 会等首次触摸）；
+    //   · 其余（持续可见且非刚回前台）→ 用户主动下滑/Esc 退出，尊重并清除。
+    //   原实现同步判定，以上任一时序都会误清 FS_KEY，下次进入永不自动恢复。
+    if (!fsInPwa()) {
+      setTimeout(() => {
+        if (document.visibilityState !== 'visible') return;            // 已在后台 → 系统行为
+        if (_wentBg) return;                                           // 复核窗口内切过后台
+        try { if (d.classList.contains('fs-css-active')) return; } catch (e) {} // 横屏兜底自有状态
+        if (_lastVisibleAt && Date.now() - _lastVisibleAt < 1500) { reenterFs(); return; } // 回前台补发的系统退出
+        try { store.set(FS_KEY, '0'); } catch (e) {}
+        try { store.set(FB_KEY, '0'); } catch (e) {}
+        try { d.classList.remove('fs-css-active'); } catch (e) {}
+      }, 700);
     }
   }
   // 全屏态变化时同步开关 + 输入框属性 + fs-active 类；
@@ -461,8 +485,8 @@
   function disarmRetry() {
     if (!_retryArmed) return;
     _retryArmed = false;
-    document.removeEventListener('click', retryClick);
-    document.removeEventListener('touchstart', retryTouch);
+    document.removeEventListener('click', retryClick, true);
+    document.removeEventListener('touchstart', retryTouch, true);
   }
   function retryClick(e) { if (!e.isTrusted) return; doRetry(); }
   function retryTouch(e) { if (!e.isTrusted) return; doRetry(); }
@@ -477,11 +501,13 @@
   // v3.8.x：立即武装手势重试（原实现延迟 600ms 才装监听）——用户切后台回来
   // 若在窗口期内触摸/点击，重试会被错过，之后无交互则全屏永不恢复
   //（OPPO Find X9 Chrome PWA 切后台退出全屏复现）
+  // v3.11.x：监听改捕获阶段——部分面板/按钮会对 click 调 stopPropagation，
+  // 冒泡阶段监听可能收不到首次触摸导致重试被吞（每次进入全屏都失效的方向之一）
   function armRetry() {
     disarmRetry();
     _retryArmed = true;
-    document.addEventListener('click', retryClick);
-    document.addEventListener('touchstart', retryTouch);
+    document.addEventListener('click', retryClick, true);
+    document.addEventListener('touchstart', retryTouch, true);
   }
   function reenterFs() {
     // v3.7.x：浏览器标签模式不自动重入全屏——每次打开页面就弹「退出全屏」提示条，
@@ -515,6 +541,7 @@
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState !== 'visible') { _wentBg = true; return; }
     _wentBg = false;
+    _lastVisibleAt = Date.now();   // v3.11.x：记录回前台时刻（供 handleFsExit 时序判定）
     if (isIOS && inIosStandalone) { if (store.get(FS_KEY) === '1') applyIosFs(true); }
     else reenterFs();
   });

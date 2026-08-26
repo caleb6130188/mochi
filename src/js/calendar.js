@@ -3,6 +3,10 @@
 // 每次首次打开日历触发 TA 留言弹窗；美化毛玻璃、无 emoji、矢量图标
 // v3.7.x：月历日期可点击自选——选中日期后上方卡片显示该日内容（当天心情/TA正在/TA留言/我的留言），
 //   任意日期首次访问自动生成当日内容并落盘（cal-YYYY-MM-DD）；我的留言仅今天可编辑。
+// v3.12.x：每日内容只从「首次使用日」开始生成——此前任意历史日期首次被查看都会现场随机
+//   生成并落盘（含上面的"历史日期也补齐"），从未用过本站的日期也显示心情感言。
+//   现在早于首次使用日的日期不读不写不生成（与未来日期同口径空态），并在进日历页时
+//   清理此前误生成的 cal-YYYY-MM-DD 残留数据。
 (function () {
   const uid = window.activePrefix();
   const store = window.activeStore();
@@ -64,15 +68,27 @@
   function genMessage() {
     const cards = [];
     const custom = (window.getCustomCards && window.getCustomCards()) || [];
+    // v3.12.x：排除拍一拍字卡（getCustomCards 是全类型扁平视图，含【拍一拍】分组——
+    //   "戳戳额头"类文本不该拼进每日留言；与 chat/feed/mail 回复池同口径）
+    const pokeSet = (function () {
+      try {
+        const pk = (window.getPokeCards && window.getPokeCards()) || [];
+        return pk.length ? new Set(pk) : null;
+      } catch (e) { return null; }
+    })();
     custom.forEach(c => {
-      if (typeof c === 'string' && c.indexOf('data:') !== 0 && c.indexOf('|||') < 0) cards.push(c);
+      if (typeof c !== 'string') return;
+      if (pokeSet && pokeSet.has(c)) return;
+      if (c.indexOf('data:') !== 0 && c.indexOf('|||') < 0) cards.push(c);
     });
     const defs = (window.getDefaultCardGroups && window.getDefaultCardGroups('main')) || [];
     // v3.8.x：默认字卡总开关 + 分类开关——关闭后每日留言不混入系统默认主字卡
+    // v3.12.x：单卡开关过滤——用户在默认字卡页关掉的卡不再进留言（此前漏过滤）
     const dcfg = (window.defaultCardCfg && window.defaultCardCfg()) || {};
     const catOn = window.defaultCardCat ? window.defaultCardCat('main') : true;
+    const isOff = window.isDefaultCardOff || null;
     if (dcfg.enabled !== false && catOn) {
-      defs.forEach(([g, arr]) => { if (Array.isArray(arr)) arr.forEach(c => cards.push(c)); });
+      defs.forEach(([g, arr]) => { if (Array.isArray(arr)) arr.forEach(c => { if (isOff && isOff('main', c)) return; if (typeof c === 'string' && c) cards.push(c); }); });
     }
     if (!cards.length) return '今天也想对你说点什么...';
     const maxCount = Math.min(8, cards.length);
@@ -87,12 +103,112 @@
     return sel.join('  ');
   }
 
-// 生成或获取某一日数据（按日期持久化，首次访问该日期时生成并落盘）
+  // ---- 首次使用日（本桌面命名空间第一次真实使用的日期） ----
+  // v3.12.x：推断口径——键名带日期后缀的真实使用痕迹（greeted-/cal-my-/memo-/today-mood-
+  //   /day-fish-/day-work- 等每天使用都会留下的键）+ quote-history 最早日期，取最早者。
+  //   刻意排除 cal-YYYY-MM-DD 本体（它正是「查看历史日期就补生成」的伪造源，cal-my- 是
+  //   用户真实输入要保留）与 love-start 等手填纪念日（可能远早于建站，会把全部历史误清）。
+  //   推断结果持久化 first-use-date；每次加载取 min(已存, 新推断) 自愈——首次推断时若
+  //   IndexedDB 恢复未完成漏看了更早痕迹，下次打开自动把首用日前移。只前移不后移：
+  //   已按更晚首用日清理过的日期本来就该为空，回填更早首用日不影响它们。
+  function normDateStr(s) {
+    const p = String(s || '').split('-');
+    if (p.length !== 3) return null;
+    const y = +p[0], m = +p[1], d = +p[2];
+    if (!y || !(m >= 1 && m <= 12) || !(d >= 1 && d <= 31)) return null;
+    return y + '-' + String(m).padStart(2, '0') + '-' + String(d).padStart(2, '0');
+  }
+  function inferFirstUse() {
+    const cands = [];
+    // 键名扫描范围：当前命名空间 + default 桌面的旧版顶层键回退区（defaultStore 回退口径一致）
+    try {
+      const pref = window.activePrefix() + ':';
+      const isDef = window.activePrefix() === 'xy-home-v2:default';
+      const re = /(\d{4}-\d{1,2}-\d{1,2})$/;
+      const ls = window.localStorage;
+      for (let i = 0; i < ls.length; i++) {
+        const k = ls.key(i) || '';
+        let tail = null;
+        if (k.indexOf(pref) === 0) tail = k.slice(pref.length);
+        else if (isDef && k.indexOf('xy-home-v2:') === 0) {
+          const rest = k.slice('xy-home-v2:'.length);
+          if (rest.indexOf(':') < 0) tail = rest; // 迁移前的旧顶层键（无第二段冒号）
+        }
+        if (!tail || /^cal-\d/.test(tail)) continue;
+        const m = re.exec(tail);
+        if (m) { const n = normDateStr(m[1]); if (n) cands.push(n); }
+      }
+    } catch (e) {}
+    try {
+      const ql = JSON.parse(store.get('quote-history') || '[]');
+      (Array.isArray(ql) ? ql : []).forEach(x => { if (x && x.date) { const n = normDateStr(x.date); if (n) cands.push(n); } });
+    } catch (e) {}
+    if (!cands.length) return null;
+    cands.sort();
+    return cands[0];
+  }
+  let _firstUse = null;
+  function firstUseDate() {
+    if (_firstUse) return _firstUse;
+    let saved = null;
+    try { saved = normDateStr(store.get('first-use-date') || ''); } catch (e) {}
+    const inferred = inferFirstUse();
+    _firstUse = (saved && inferred) ? (inferred < saved ? inferred : saved) : (saved || inferred || todayStr());
+    if (_firstUse > todayStr()) _firstUse = todayStr(); // 脏数据兜底：首用日不可能在未来
+    store.set('first-use-date', _firstUse);
+    try { if (window.idbSet) window.idbSet(window.activePrefix() + ':first-use-date', _firstUse); } catch (e) {}
+    return _firstUse;
+  }
+  // 清理历史上误生成的「首用日之前」心情感言条目（进日历页时跑一次，LS+IDB 双扫）
+  let _cleanedOld = false;
+  function cleanPreFirstEntries() {
+    if (_cleanedOld) return;
+    _cleanedOld = true;
+    const fu = firstUseDate();
+    const re = /^cal-(\d{4}-\d{2}-\d{2})$/;
+    const tailOf = (k) => {
+      try {
+        const pref = window.activePrefix() + ':';
+        if (k.indexOf(pref) === 0) return k.slice(pref.length);
+        if (window.activePrefix() === 'xy-home-v2:default' && k.indexOf('xy-home-v2:') === 0) {
+          const rest = k.slice('xy-home-v2:'.length);
+          if (rest.indexOf(':') < 0) return rest;
+        }
+      } catch (e) {}
+      return null;
+    };
+    try {
+      const kill = [];
+      const ls = window.localStorage;
+      for (let i = 0; i < ls.length; i++) {
+        const tail = tailOf(ls.key(i) || '');
+        const m = tail ? re.exec(tail) : null;
+        if (m && m[1] < fu) kill.push(m[1]);
+      }
+      kill.forEach(ds => { try { store.remove('cal-' + ds); } catch (e) {} });
+    } catch (e) {}
+    try {
+      if (window.idbGetAllKeys && window.idbDelete) {
+        window.idbGetAllKeys().then(keys => {
+          (keys || []).forEach(k => {
+            if (typeof k !== 'string') return;
+            const tail = tailOf(k);
+            const m = tail ? re.exec(tail) : null;
+            if (m && m[1] < fu) { try { window.idbDelete(k); } catch (e) {} }
+          });
+        }).catch(() => {});
+      }
+    } catch (e) {}
+  }
+
+  // 生成或获取某一日数据（按日期持久化，首次访问该日期时生成并落盘）
   // v3.7.x：抽出 getDayEntry 供「本周日常点击其他日期查看当日内容」复用，
   //   任意日期首次访问都会生成 TA 心情/正在/留言并保存（历史日期也补齐）。
   // v3.7.x bugfix：未来日期不读不写不生成——本周日常点击未来日期会现场随机生成
   //   TA 内容并落盘（"超前显示"），且会污染该日期当天真实的首次生成。
   //   已误生成的未来数据同步清理（LS remove + IDB delete），否则到点当天会被回填复用。
+  // v3.12.x：首用日之前的历史日期同样不读不写不生成——从未用过本站的日子不该有
+  //   心情感言；该区间残留的旧补齐数据顺手清掉（全量清扫见 cleanPreFirstEntries）。
   function getDayEntry(dateStr) {
     if (!dateStr) return null;
     const p0 = dateStr.split('-');
@@ -103,6 +219,13 @@
         const k = 'cal-' + dateStr;
         if (store.get(k)) store.remove(k);
         if (window.idbDelete) window.idbDelete(window.activePrefix() + ':' + k);
+      } catch (e) {}
+      return null;
+    }
+    if (dateStr < firstUseDate()) {
+      try {
+        const kb = 'cal-' + dateStr;
+        if (store.get(kb)) store.remove(kb);
       } catch (e) {}
       return null;
     }
@@ -138,13 +261,38 @@
   // v3.6.x：多桌面——切换联系人后清掉本会话缓存（calCache 只按日期缓存、不区分
   // 桌面，残留会导致新桌面显示旧桌面的「今日数据」）；viewY/viewM/selDate 同步复位到当前月/今天
   document.addEventListener('contact-switched', function () {
-    try { calCache = null; viewY = 0; viewM = -1; selDate = todayStr(); } catch (e) {}
+    try { calCache = null; viewY = 0; viewM = -1; selDate = todayStr(); _firstUse = null; _cleanedOld = false; } catch (e) {}
   });
 
   // 渲染月历（可切换月份）
   let viewY = 0, viewM = -1; // 0=当前月
   // v3.7.x：点选日期查看当日内容——selDate 为当前查看的日期，默认今天
   let selDate = todayStr();
+  // v3.12.x：有记录的日期打点（cal-rec）——「我们留言过/做过备忘等记录过信息」的日子与普通日区分，方便回找。
+  // 只统计人工留下的内容：我的留言(cal-my-*)、备忘(memo-* / memo-history)、心情(today-mood-* / mood-history)。
+  // TA 每日内容(cal-*)与每日情话(quote-history)是每天自动生成的、摸鱼/工作值是使用即累计的计数，
+  // 计入会天天有点失去区分度，均不打点；喝水记录已有独立蓝点(cal-water)不重复。
+  // memo-history/mood-history 老数据无按日快照，按 ts 落在哪天算哪天（口径同 renderDayNotes 的 histOnDay）。
+  function dayRecordSet(y, m) {
+    const set = new Set();
+    const daysInMonth = new Date(y, m + 1, 0).getDate();
+    for (let d = 1; d <= daysInMonth; d++) {
+      const ds = y + '-' + String(m + 1).padStart(2, '0') + '-' + String(d).padStart(2, '0');
+      if (store.get('cal-my-' + ds) || store.get('memo-' + ds) || store.get('today-mood-' + ds)) set.add(ds);
+    }
+    ['memo-history', 'mood-history'].forEach((hk) => {
+      try {
+        JSON.parse(store.get(hk) || '[]').forEach((x) => {
+          if (!(x && x.ts && x.text)) return;
+          const dt = new Date(x.ts);
+          if (dt.getFullYear() === y && dt.getMonth() === m) {
+            set.add(dt.getFullYear() + '-' + String(dt.getMonth() + 1).padStart(2, '0') + '-' + String(dt.getDate()).padStart(2, '0'));
+          }
+        });
+      } catch (e) {}
+    });
+    return set;
+  }
   function renderGrid() {
     const grid = document.getElementById('cal-grid');
     if (!grid) return;
@@ -159,30 +307,28 @@
     const wds = ['日', '一', '二', '三', '四', '五', '六'];
     let html = wds.map(w => '<span class="cal-wd">' + w + '</span>').join('');
     for (let i = 0; i < startWd; i++) html += '<span class="cal-cell blank"></span>';
+    // 渲染前一次性收集当月有记录的日期（避免逐格扫历史列表）
+    let recSet = null;
+    try { recSet = dayRecordSet(y, m); } catch (e) { recSet = new Set(); }
     for (let d = 1; d <= days; d++) {
       const isToday = d === now.getDate() && y === now.getFullYear() && m === now.getMonth();
       const ds = y + '-' + String(m + 1).padStart(2, '0') + '-' + String(d).padStart(2, '0');
-      // 经期日着色（period 实际 / predict 预测 / fertile 排卵期）
-      let phCls = '';
-      try {
-        const ph = window.periodDayPhase && window.periodDayPhase(ds);
-        if (ph && ph !== 'none') phCls = ' cal-period-' + ph;
-      } catch (e) {}
-      html += '<span class="cal-cell' + phCls + (isToday ? ' today' : '') + (ds === selDate ? ' sel' : '') + '" data-date="' + ds + '">' + d + '</span>';
+      // v3.12.x：主日历不再显示经期信息（经期只在第三页「经期记录」独立功能的月历里展示），
+      //   原 cal-period-* 着色与长按跳经期页一并移除
+      // v3.11.x：喝水记录日打点（p2-features.js 暴露 waterDayHas）
+      let wCls = '';
+      try { if (window.waterDayHas && window.waterDayHas(ds)) wCls = ' cal-water'; } catch (e) {}
+      const rCls = recSet.has(ds) ? ' cal-rec' : '';
+      html += '<span class="cal-cell' + wCls + rCls + (isToday ? ' today' : '') + (ds === selDate ? ' sel' : '') + '" data-date="' + ds + '">' + d + '</span>';
     }
     grid.innerHTML = html;
   }
   // v3.7.x：点击日期自选 → 显示该日内容（当日心情 / TA 正在 / TA 留言 / 我的留言）
+  // v3.12.x：移除「长按经期日格跳经期页」——主日历不再展示经期信息，经期查看/标记
+  //   统一走第三页「经期记录」独立功能（其自带月历支持短按详情/长按标红）
   const calGridEl = document.getElementById('cal-grid');
   if (calGridEl) {
-    let pressTimer = null, longPressed = false;
-    const goPeriodPage = () => {
-      const app = document.querySelector('.app[data-app="period"]');
-      const periodPage = document.getElementById('page-period');
-      if (app && periodPage) app.click();
-    };
     calGridEl.addEventListener('click', (ev) => {
-      if (longPressed) { longPressed = false; return; }
       const cell = ev.target.closest('.cal-cell');
       if (!cell || cell.classList.contains('blank')) return;
       const ds = cell.getAttribute('data-date');
@@ -190,28 +336,6 @@
       selDate = ds;
       render();
     });
-    // 长按经期日格 500ms 跳经期页（短按仍切换查看当日内容）
-    calGridEl.addEventListener('contextmenu', (ev) => {
-      const cell = ev.target.closest('.cal-cell');
-      if (!cell || cell.classList.contains('blank')) return;
-      const ds = cell.getAttribute('data-date');
-      let ph = 'none';
-      try { ph = (window.periodDayPhase && window.periodDayPhase(ds)) || 'none'; } catch (e) {}
-      if (ph !== 'none') { ev.preventDefault(); goPeriodPage(); }
-    });
-    calGridEl.addEventListener('touchstart', (ev) => {
-      const cell = ev.target.closest('.cal-cell');
-      if (!cell || cell.classList.contains('blank')) return;
-      const ds = cell.getAttribute('data-date');
-      let ph = 'none';
-      try { ph = (window.periodDayPhase && window.periodDayPhase(ds)) || 'none'; } catch (e) {}
-      longPressed = false;
-      if (ph === 'none') return;
-      pressTimer = setTimeout(() => { pressTimer = null; longPressed = true; goPeriodPage(); }, 500);
-    }, { passive: true });
-    calGridEl.addEventListener('touchmove', () => { if (pressTimer) { clearTimeout(pressTimer); pressTimer = null; } }, { passive: true });
-    calGridEl.addEventListener('touchend', () => { if (pressTimer) { clearTimeout(pressTimer); pressTimer = null; } }, { passive: true });
-    calGridEl.addEventListener('touchcancel', () => { if (pressTimer) { clearTimeout(pressTimer); pressTimer = null; } }, { passive: true });
   }
   // 月份前进/后退
   const calPrev = document.getElementById('cal-prev');
@@ -262,7 +386,8 @@
         if (!qt && selDate === todayStr()) {
           try { qt = (window.getQuoteOfDay && window.getQuoteOfDay()) || ''; } catch (e) {}
         }
-        qEl.textContent = qt || (selDate === todayStr() ? '今天还没有情话' : '这一天没有留下情话');
+        qEl.textContent = (qt || (selDate === todayStr() ? '今天还没有情话' : '这一天没有留下情话'));
+        if (qEl.textContent && window.taFit) qEl.textContent = window.taFit(qEl.textContent);
       }
     }
     // 我的备忘 / 我的心情：按日快照优先，回退当天历史（多天多条用；连接）
@@ -318,22 +443,28 @@
   }
 
   function render() {
+    try { ensureFishHeat(); } catch (e) {} // v3.13.x：热力图与选中日期无关，进页即刷
     const parts = selDate.split('-');
     const dd = new Date(+parts[0], +parts[1] - 1, +parts[2]);
     const n2 = new Date();
     // v3.7.x：未来日期不生成不读取内容，只显示空态提示（与本周日常一致），避免"超前显示"
     const isFuture = dd > new Date(n2.getFullYear(), n2.getMonth(), n2.getDate());
     const e = isFuture ? null : getDayEntry(selDate);
+    // v3.12.x：首用日之前的过去日期与未来同口径——隐藏 TA/我卡只留一个空态卡；
+    //   文案区分「还没到」与「当时还没开始使用」。小记/摸鱼等数据驱动卡片天然为空，
+    //   不需要额外门控。
+    const isBefore = !isFuture && !e && selDate < firstUseDate();
+    cleanPreFirstEntries();
     // v3.10.x：UI 精简——未来日期隐藏 TA/我卡，只显示一个空态卡（不再 6 张卡各说一遍）
     const taCard = document.getElementById('cal-ta-card');
     const meCard = document.getElementById('cal-me-card');
     const emptyCard = document.getElementById('cal-empty-card');
     const emptyTxt = document.getElementById('cal-empty-txt');
-    if (isFuture) {
+    if (isFuture || isBefore) {
       if (taCard) taCard.hidden = true;
       if (meCard) meCard.hidden = true;
       if (emptyCard) emptyCard.hidden = false;
-      if (emptyTxt) emptyTxt.textContent = '这一天还没有内容，等到了那一天再来看看吧';
+      if (emptyTxt) emptyTxt.textContent = isFuture ? '这一天还没有内容，等到了那一天再来看看吧' : '开始使用之前的日子，没有留下内容';
       renderGrid();
       return;
     }
@@ -349,14 +480,80 @@
     const nameEl = document.getElementById('cal-mood-name');
     if (nameEl) nameEl.textContent = e ? e.mood : '未来';
     const descEl = document.getElementById('cal-mood-desc');
-    if (descEl) descEl.textContent = e ? e.desc : '这一天还没有内容';
+    if (descEl) descEl.textContent = e ? (window.taFit ? window.taFit(e.desc) : e.desc) : '这一天还没有内容';
     const actEl = document.getElementById('cal-activity');
-    if (actEl) actEl.textContent = e ? e.activity : '—';
+    if (actEl) actEl.textContent = e ? (window.taFit ? window.taFit(e.activity) : e.activity) : '—';
     const msgEl = document.getElementById('cal-message');
-    if (msgEl) msgEl.textContent = e ? e.message : '这一天还没有留言';
+    if (msgEl) msgEl.textContent = e ? (window.taFit ? window.taFit(e.message) : e.message) : '这一天还没有留言';
     renderMyMessage();
     renderDayNotes(dd, isFuture);
     renderGrid();
+  }
+
+  // ===== v3.13.x：摸鱼热力图（近一年 GitHub 贡献格样式，双方当日合计） =====
+  // 数据源 fish-day-add（与桌面周末面板/主页记录/信箱周报同源）。与选中日期无关，
+  // 卡片动态创建、插在 #cal-empty-card 之后；render() 每次进入页面时刷新数据。
+  let _heatCard = null;
+  function heatNorm(s) {
+    const p = String(s || '').split('-');
+    if (p.length !== 3) return null;
+    const y = +p[0], m = +p[1], d = +p[2];
+    if (!y || !(m >= 1 && m <= 12) || !(d >= 1 && d <= 31)) return null;
+    return new Date(y, m - 1, d);
+  }
+  function ensureFishHeat() {
+    const emptyCard = document.getElementById('cal-empty-card');
+    const meCard = document.getElementById('cal-me-card');
+    const anchor = emptyCard || meCard;
+    if (!anchor) return;
+    if (!_heatCard) {
+      _heatCard = document.createElement('div');
+      _heatCard.className = 'cal-card glass';
+      _heatCard.id = 'cal-fish-heat';
+      _heatCard.innerHTML =
+        '<div class="cal-sec">' +
+          '<div class="cal-sec-head"><div class="cal-sec-title">摸鱼热力图</div><span class="fh-range" id="fh-range"></span></div>' +
+          '<div class="fh-scroll"><div class="fh-grid-wrap" id="fh-wrap"></div></div>' +
+          '<div class="fh-legend">少 <i class="fh-cell l0"></i><i class="fh-cell l1"></i><i class="fh-cell l2"></i><i class="fh-cell l3"></i><i class="fh-cell l4"></i> 多' +
+          '<span class="fh-tip">格子 = 双方当日合计</span></div>' +
+        '</div>';
+      anchor.parentNode.insertBefore(_heatCard, anchor.nextSibling);
+    }
+    const rangeEl = document.getElementById('fh-range');
+    const wrap = document.getElementById('fh-wrap');
+    if (!wrap) return;
+    // 汇总每日合计（键 Y-M-D 与 fishDayKey 同格式）
+    const map = {};
+    try {
+      JSON.parse(store.get('fish-day-add') || '[]').forEach(x => {
+        const d = heatNorm(x && x.date);
+        if (!d || isNaN(d.getTime())) return;
+        const k = d.getFullYear() + '-' + d.getMonth() + '-' + d.getDate();
+        const ex = map[k] || { m: 0, t: 0 };
+        ex.m += x.mine || 0; ex.t += x.ta || 0;
+        map[k] = ex;
+      });
+    } catch (e) {}
+    // 53 列（周）× 7 行：从本周周六往前推，今天之后的格子置灰
+    const now = new Date();
+    const today0 = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    const end = new Date(today0); end.setDate(end.getDate() + (6 - end.getDay())); // 本周周六
+    const start = new Date(end); start.setDate(start.getDate() - 53 * 7 + 1);
+    let html = '';
+    const cur = new Date(start);
+    while (cur <= end) {
+      const k = cur.getFullYear() + '-' + cur.getMonth() + '-' + cur.getDate();
+      const v = map[k];
+      const sum = v ? (v.m + v.t) : 0;
+      const lv = sum >= 60 ? 4 : sum >= 30 ? 3 : sum >= 10 ? 2 : sum >= 1 ? 1 : 0;
+      const fut = cur > today0 ? ' fut' : '';
+      html += '<i class="fh-cell l' + lv + fut + '" title="' + (cur.getMonth() + 1) + ' 月 ' + cur.getDate() + ' 日 · 摸鱼 ' + sum + ' 点"></i>';
+      cur.setDate(cur.getDate() + 1);
+    }
+    wrap.innerHTML = html;
+    if (rangeEl) {
+      rangeEl.textContent = '近一年 · ' + (start.getMonth() + 1) + '.' + start.getDate() + ' - ' + (today0.getMonth() + 1) + '.' + today0.getDate();
+    }
   }
 
   // 桌面【日历】图标进入
@@ -441,7 +638,9 @@
         document.body.appendChild(el);
       }
       el._t.textContent = name + ' 的今日留言';
-      el._b.textContent = '今日心情：' + e2.mood + '（' + e2.cat + '）\nTA 正在：' + e2.activity + '\n\nTA 留言：\n' + e2.message;
+      el._b.textContent = window.taFit
+        ? window.taFit('今日心情：' + e2.mood + '（' + e2.cat + '）\nTA 正在：' + e2.activity + '\n\nTA 留言：\n' + e2.message)
+        : ('今日心情：' + e2.mood + '（' + e2.cat + '）\nTA 正在：' + e2.activity + '\n\nTA 留言：\n' + e2.message);
       el.hidden = false;
       el.style.transition = 'none';
       el.style.opacity = '0';

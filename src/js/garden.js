@@ -4,21 +4,112 @@ var s = window.activeStore();
 var page = document.getElementById("page-garden");
 if (!s || !page) return;
 var G = "garden-data";
-var G_GLOBAL = "garden-data-global";
-var gs = null;
-try { gs = window.xyStore("xy-home-v2"); } catch (e) {}
-var isGlobal = false;
-function curStore() { return isGlobal ? gs : s; }
-function curKey() { return isGlobal ? G_GLOBAL : G; }
-function curIdbKey() { return isGlobal ? ("xy-home-v2:" + G_GLOBAL) : (window.activePrefix() + ":" + G); }
+// 各桌面（联系人）花园相互独立；「全球园」合并视图已按需求移除，
+// 启动时一次性清理旧合并缓存 xy-home-v2:garden-data-global（各桌面原始数据从未被改动，不受影响）
+try { var _legacyG = window.xyStore("xy-home-v2"); if (_legacyG && _legacyG.get("garden-data-global")) _legacyG.remove("garden-data-global"); } catch (e) {}
 var PLOTS = 12;
 var PI = 1800;
 var WILT_SEC = 172800;
 function pn() { return s.get("lbl-partner") || "TA"; }
-function load() { try { var d = JSON.parse(curStore().get(curKey()) || "{}"); if (!d.p) d.p = []; while (d.p.length < PLOTS) d.p.push(null); if (!d.l) d.l = []; if (!d.lpc) d.lpc = 0; if (!d.dex) d.dex = {}; if (!d.exp) d.exp = 0; if (!d.inv) d.inv = {}; if (!d.st) d.st = { p: 0, w: 0, h: 0, f: 0, mp: 0, mw: 0, mh: 0, mf: 0 }; if (!d.decor) d.decor = {}; if (!d.visitor) d.visitor = null; return d; } catch (e) { return { p: new Array(PLOTS).fill(null), l: [], lpc: 0, dex: {}, exp: 0, inv: {}, st: { p: 0, w: 0, h: 0, f: 0, mp: 0, mw: 0, mh: 0, mf: 0 }, decor: {}, visitor: null }; } }
-function save(d) { try { if (batchSave) { saveDirty = true; return; } curStore().set(curKey(), JSON.stringify(d)); try { if (window.idbSet) window.idbSet(curIdbKey(), JSON.stringify(d)); } catch (e2) {} } catch (e) {} }
+function load() { try { dataPf = window.activePrefix(); var d = JSON.parse(s.get(G) || "{}"); if (!d.p) d.p = []; while (d.p.length < PLOTS) d.p.push(null); if (!d.l) d.l = []; if (!d.lpc) d.lpc = 0; if (!d.dex) d.dex = {}; if (!d.exp) d.exp = 0; if (!d.inv) d.inv = {}; if (!d.st) d.st = { p: 0, w: 0, h: 0, f: 0, mp: 0, mw: 0, mh: 0, mf: 0 }; if (!d.decor) d.decor = {}; if (!d.visitor) d.visitor = null; return d; } catch (e) { return { p: new Array(PLOTS).fill(null), l: [], lpc: 0, dex: {}, exp: 0, inv: {}, st: { p: 0, w: 0, h: 0, f: 0, mp: 0, mw: 0, mh: 0, mf: 0 }, decor: {}, visitor: null }; } }
+// v3.14.x 丢数据修复：save 加两道闸——
+// a) saveLock：启动/进园时 LS 缺 garden-data 且 IDB 尚未判定（有值回填 or 确认为空）前，
+//    一律禁止落盘。否则真我/荣耀 Edge 等 IDB 读慢或事务挂起的机型上，checkPartnerPassive
+//    （回到手机桌面即触发）/下雨浇水/访客等自动保存会把「未加载出来的空花园」写回存储，
+//    永久覆盖 IndexedDB 里的老数据 = 用户种的花全部消失。
+// b) 桌面护栏：data 归属桌面（dataPf）与当前激活桌面不一致时（切桌面后残留旧对象），
+//    绝不把旧桌面花园写进新桌面的键——放弃本次保存并按新桌面重新加载。
+var saveLock = true, dataPf = null;
+function save(d) {
+  try {
+    if (saveLock) return;
+    var pfNow = window.activePrefix();
+    if (dataPf && pfNow !== dataPf) { try { data = load(); } catch (e0) {} return; }
+    if (batchSave) { saveDirty = true; return; }
+    s.set(G, JSON.stringify(d));
+    try { if (window.idbSet) window.idbSet(pfNow + ":" + G, JSON.stringify(d)); } catch (e2) {}
+  } catch (e) {}
+}
 var batchSave = false, saveDirty = false;
-(function r() { try { if (!window.idbGet) return; var pf = window.activePrefix(); if (!s.get(G)) window.idbGet(pf + ":" + G).then(function (v) { if (window.activePrefix() !== pf || !v) return; try { s.set(G, typeof v === "string" ? v : JSON.stringify(v)); } catch (e) {} }); } catch (e) {} })();
+// 「垃圾空档」判定：无任何花、经验、日志、背包的档案视同不存在——
+// Edge 等浏览器部分清理/慢IDB窗口期里，自动保存会把全新默认档写进存储；
+// 之后启动若把它当「有数据」就会跳过找回流程，花永远回不来。
+function isJunkGardenStr(raw) {
+  try {
+    if (!raw) return true;
+    var d = JSON.parse(raw);
+    if (!d || typeof d !== "object") return true;
+    if (d.p) { for (var i = 0; i < d.p.length; i++) if (d.p[i]) return false; }
+    if ((d.exp || 0) > 0) return false;
+    if (d.l && d.l.length) return false;
+    if (d.inv) { for (var k in d.inv) { if (d.inv[k]) return false; break; } }
+    return true;
+  } catch (e) { return false; } // 解析失败按有效数据处理，宁可保守不覆盖
+}
+function junkEmpty() { try { return isJunkGardenStr(s.get(G)); } catch (e) { return false; } }
+function toast(msg) { try { var t = document.getElementById("cc-toast"); if (!t) { t = document.createElement("div"); t.id = "cc-toast"; document.body.appendChild(t); } t.textContent = msg; t.className = "cc-toast"; void t.offsetWidth; t.className = "cc-toast show"; clearTimeout(t._timer); t._timer = setTimeout(function () { t.className = "cc-toast"; }, 2000); } catch (e) {} }
+// 从 IDB 判定当前桌面的 garden-data：命中→回填 LS（先回查防覆盖期间新写入）→解锁；
+// 未命中→重试一次仍无→解锁并尝试从自动备份副本定向找回。cb(值或null) 在判定完成后回调。
+var _probeCbs = null;
+function probeIdb(cb) {
+  if (cb) { if (_probeCbs) { _probeCbs.push(cb); return; } _probeCbs = [cb]; }
+  var pf = window.activePrefix();
+  function done(v) {
+    saveLock = false;
+    var cbs = _probeCbs || []; _probeCbs = null;
+    for (var i = 0; i < cbs.length; i++) { try { cbs[i](v); } catch (e) {} }
+    if (!v) offerSnapshotRecover(pf);
+  }
+  try {
+    if (!window.idbGet) { done(null); return; }
+    var attempt = 0;
+    (function run() {
+      attempt++;
+      window.idbGet(pf + ":" + G).then(function (v) {
+        if (window.activePrefix() !== pf) { done(null); return; }
+        if (v) {
+          var str = typeof v === "string" ? v : JSON.stringify(v);
+          if (isJunkGardenStr(str)) { // IDB 里也只是垃圾空档 → 视同不存在
+            if (attempt < 2) setTimeout(run, 300);
+            else done(null);
+            return;
+          }
+          try { if (!s.get(G) || junkEmpty()) s.set(G, str); } catch (e) {}
+          done(str);
+        } else if (attempt < 2) setTimeout(run, 300);
+        else done(null);
+      }).catch(function () { if (attempt < 2) setTimeout(run, 300); else done(null); });
+    })();
+  } catch (e) { done(null); }
+}
+// 定向找回：IDB 判定为空但自动备份副本里有本桌面花园（含花）时，弹窗询问恢复（每会话一次）
+function offerSnapshotRecover(pf) {
+  try {
+    if (sessionStorage.getItem("xy-garden-recover-offered")) return;
+    sessionStorage.setItem("xy-garden-recover-offered", "1");
+    if (!window.idbGet || !window.openModal) return;
+    window.idbGet("xy-home-v2:__auto-backup-snapshot").then(function (raw) {
+      if (!raw || window.activePrefix() !== pf || !junkEmpty()) return;
+      var snap; try { snap = JSON.parse(typeof raw === "string" ? raw : JSON.stringify(raw)); } catch (e) { return; }
+      var key = pf + ":" + G;
+      var val = (snap.ls && snap.ls[key]) || (snap.idb && snap.idb[key]);
+      if (!val || typeof val !== "string") return;
+      var d; try { d = JSON.parse(val); } catch (e) { return; }
+      var hasFlower = false;
+      if (d && d.p) for (var i = 0; i < d.p.length; i++) if (d.p[i]) { hasFlower = true; break; }
+      if (!hasFlower) return;
+      window.openModal("找回花园", "", function () {
+        if (window.activePrefix() !== pf || !junkEmpty()) return;
+        try { s.set(G, val); } catch (e) {}
+        try { if (window.idbSet) window.idbSet(key, val); } catch (e2) {}
+        dataPf = null; data = load(); selPlot = -1;
+        if (!page.hidden) renderAll();
+        toast("花园数据已找回 🌸");
+      }, { noInput: true, staticText: "这个桌面的花园现在是空的，但在自动备份副本里发现了它种着花的样子。\n\n要恢复吗？（会用副本覆盖当前的空花园）" });
+    }).catch(function () {});
+  } catch (e) {}
+}
+(function r() { try { if (!junkEmpty()) { dataPf = window.activePrefix(); saveLock = false; return; } probeIdb(function (v) { if (v) { try { data = load(); } catch (e) {} } }); } catch (e) { saveLock = false; } })();
 
 var T = {
   rose: { n: "\u73AB\u7470", e: ["\uD83C\uDF31", "\uD83C\uDF3F", "\uD83C\uDF39"], sn: ["\u79CD\u5B50", "\u53D1\u82BD", "\u5F00\u82B1"], g: [172800, 432000], xp: 30, lv: 1, ss: 3, m: "\u70ED\u70C8\u7684\u7231" },
@@ -205,9 +296,6 @@ function buildPlotInner(plot, si, wl) {
   var h = "";
   if (plot && plot.pot && plot.pot > 1) h += "<span class=\"garden-pot-mark\">" + (plot.pot === 3 ? "\u8C6A\u534E" : "\u9AD8\u7EA7") + "</span>";
   if (si) {
-    if (isGlobal && plot.by && plot.by.indexOf("@") >= 0) {
-      h += "<span class=\"garden-plant-src\">" + plot.by.split("@")[1] + "</span>";
-    }
     var emoji = si.wilted ? "\uD83E\uDD40" : si.emoji;
     h += "<span class=\"garden-plant-emoji\">" + emoji + "</span>";
     h += "<span class=\"garden-plant-name\">" + si.name + "</span>";
@@ -250,8 +338,7 @@ function renderGrid() {
     var st = s ? (s.wilted ? "\u5DF2\u51CB\u8C22" : s.bloomed ? "\u6210\u719F" : fmtShort(s.nextSec)) : "\u7A7A\u5730";
     var pg = s && !s.bloomed && !s.wilted ? Math.floor(s.progress * 10) : -1;
     var wp = w > 0 ? Math.floor(w * 10) : 0;
-    var sr = (isGlobal && p && p.by && p.by.indexOf("@") >= 0) ? p.by.split("@")[1] : "";
-    var sig = c + "|" + em + "|" + st + "|" + pg + "|" + wp + "|" + sr + "|" + (p && p.pot || 1);
+    var sig = c + "|" + em + "|" + st + "|" + pg + "|" + wp + "|" + (p && p.pot || 1);
     var el = grid.children[j];
     if (el.getAttribute("data-sig") === sig) continue;
     el.setAttribute("data-sig", sig);
@@ -270,7 +357,10 @@ function renderLog() {
   entries.forEach(function (e) {
     var tm = e.tm ? new Date(e.tm * 1000) : new Date();
     var ts = tm.getHours().toString().padStart(2, "0") + ":" + tm.getMinutes().toString().padStart(2, "0");
-    h += "<div class=\"garden-log-item\"><span class=\"who\">" + (e.who || "") + "</span><span class=\"act\">" + (e.act || "") + "</span><span class=\"tm\">" + ts + "</span></div>";
+    // v3.x.x：称呼跟随——日志渲染层替换 TA/他（存储原文不动）
+    var who = (e.who || ""), act = (e.act || "");
+    if (window.taFit) { who = window.taFit(who); act = window.taFit(act); }
+    h += "<div class=\"garden-log-item\"><span class=\"who\">" + who + "</span><span class=\"act\">" + act + "</span><span class=\"tm\">" + ts + "</span></div>";
   });
   el.innerHTML = h;
 }
@@ -302,6 +392,7 @@ function waterPlot(idx) {
   updDaily("w");
   updWaterStreak();
   fxAtPlot(idx, "fx-water", 900);
+  if (Math.random() < 0.08) { var pn3 = pn(); addLog(pn3, "\u770B\u5230\u4F60\u5728\u6D47\u6C34\uFF0C\u4E5F\u6765\u5E2E\u5FD9\u4E86~"); partnerAct(true); }
   save(data); renderAll();
 }
 
@@ -396,7 +487,25 @@ function addInvQual(type, q) {
   data.qual[type][q] = (data.qual[type][q] || 0) + 1;
 }
 function qualMul(q) { return q === "p" ? 2 : q === "f" ? 1.5 : 1; }
-function qualLabel(q) { return q === "p" ? "\u3010\u5B8C\u7F8E\u3011" : q === "f" ? "\u3010\u4F18\u8D28\u3011" : ""; }
+function qualLabel(q) { return q === "p" ? "【完美】" : q === "f" ? "【优质】" : ""; }
+// ---- v3.15.x：收花联动心意币（与心意集市/红包同一本账）——按品质发给双方：
+// 二调对齐红包金额体系——完美 ¥52 / 优质 ¥13.14 / 普通 ¥5.2，枯萎 ¥1.3；日封顶 ¥520 防刷。
+// v3.16.x：花园收花改为我和 TA 同步同额入账（不再只进我的余额），流水记「花园收花」。
+function harvestCoinFen(q, wilted) { return wilted ? 130 : q === "p" ? 5200 : q === "f" ? 1314 : 520; }
+function grantHarvestCoin(q, wilted) {
+  try {
+    if (typeof window.giftWalletChange !== "function") return null;
+    var ck = "ml2_coin_garden_" + new Date().toISOString().slice(0, 10);
+    var cur = Number(s.get(ck)) || 0;
+    var cap = 52000;
+    if (cur >= cap) return null;
+    var fen = Math.min(harvestCoinFen(q, wilted), cap - cur);
+    s.set(ck, String(cur + fen));
+    window.giftWalletChange(fen, fen, "花园收花");
+    return fen;
+  } catch (e) { return null; }
+}
+function coinTxt(fen) { return "🪙 双方心意币各 +¥" + (fen / 100).toFixed(2); }
 var HYBRIDS = [
   { a: "rose", b: "sakura", r: "flameRose" },
   { a: "rose", b: "clover", r: "blueRose" },
@@ -497,6 +606,7 @@ function fertilizePlot(idx) {
   updSt("f", true);
   updDaily("f");
   fxAtPlot(idx, "fx-fert", 800);
+  if (Math.random() < 0.08) { var pn3 = pn(); addLog(pn3, "\u770B\u5230\u4F60\u5728\u65BD\u80A5\uFF0C\u4E5F\u6765\u5E2E\u5FD9\u4E86~"); partnerAct(true); }
   save(data); renderAll();
 }
 
@@ -522,11 +632,13 @@ function harvestPlot(idx) {
   var dropped = dropRareSeed();
   fxAtPlot(idx, "fx-harvest", 1000);
   addLog("\u6211", "\u6536\u83B7\u4E86 " + name + qualLabel(q) + (wilted ? "\uFF08\u5DF2\u51CB\u8C22\uFF09" : "") + " (+" + xpg + "\u7ECF\u9A8C)" + (dropped ? " \u2728\u83B7\u5F97\u7A00\u6709\u79CD\u5B50" + T[dropped].n : ""));
+  var coinGot = grantHarvestCoin(q, wilted);
+  if (coinGot) addLog("\u6211", "\u6536\u82B1\u5956\u52B1\u5230\u8D26 " + coinTxt(coinGot));
   save(data); renderAll();
 }
 
 
-function partnerAct(silent) {
+function partnerAct(silent, used) {
   var pName = pn();
   var r = Math.random();
   var emptyPlots = [];
@@ -547,9 +659,28 @@ function partnerAct(silent) {
     var bb = (data.p[b] && data.p[b].bloomedAt) || 0;
     return ba - bb;
   });
+  function pick(arr) {
+    if (!arr || !arr.length) return -1;
+    var avail = arr;
+    if (used && used.length) {
+      avail = arr.filter(function (x) { return used.indexOf(x) < 0; });
+      if (!avail.length) avail = arr;
+    }
+    var idx = avail[Math.floor(Math.random() * avail.length)];
+    if (used) used.push(idx);
+    return idx;
+  }
   var acted = false;
-  if (r < 0.15 && emptyPlots.length > 0) {
-    var idx = emptyPlots[Math.floor(Math.random() * emptyPlots.length)];
+  var actType;
+  if (r < 0.15) actType = "plant";
+  else if (r < 0.35) actType = "water";
+  else if (r < 0.50) actType = "waterall";
+  else if (r < 0.65) actType = "harvest";
+  else if (r < 0.78) actType = "harvestall";
+  else if (r < 0.90) actType = "fertilize";
+  else actType = "patrol";
+  if (actType === "plant" && emptyPlots.length > 0) {
+    var idx = pick(emptyPlots);
     var keys = Object.keys(T).filter(function (k) { return unlocked(k); });
     if (keys.length > 0) {
       var t = keys[Math.floor(Math.random() * keys.length)];
@@ -559,15 +690,15 @@ function partnerAct(silent) {
       updDex(t, "p"); updSt("p", false);
       acted = true;
     }
-  } else if (r < 0.35 && dryPlots.length > 0) {
-    var idx = dryPlots[Math.floor(Math.random() * dryPlots.length)];
+  } else if (actType === "water" && dryPlots.length > 0) {
+    var idx = pick(dryPlots);
     var si = stageInfo(data.p[idx]);
     data.p[idx].watered = Math.floor(Date.now() / 1000);
     data.p[idx].planted = Math.max(0, data.p[idx].planted - 7200);
     addLog(pName, "\u7ED9 " + (si ? si.name : "\u690D\u7269") + " \u6D47\u4E86\u6C34");
     updSt("w", false);
     acted = true;
-  } else if (r < 0.50 && dryPlots.length > 0) {
+  } else if (actType === "waterall" && dryPlots.length > 0) {
     var wcnt = 0;
     for (var pi = 0; pi < data.p.length; pi++) {
       if (data.p[pi] && waterLvl(data.p[pi]) < 0.3) {
@@ -577,8 +708,8 @@ function partnerAct(silent) {
       }
     }
     if (wcnt > 0) { addLog(pName, "\u4E00\u952E\u6D47\u4E86 " + wcnt + " \u68F5\u690D\u7269"); updSt("w", false); acted = true; }
-  } else if (r < 0.65 && bloomedPlots.length > 0) {
-    var idx = bloomedPlots[0];
+  } else if (actType === "harvest" && bloomedPlots.length > 0) {
+    var idx = pick(bloomedPlots);
     var si = stageInfo(data.p[idx]);
     var name = si ? si.name : "\u690D\u7269";
     var type = data.p[idx].type;
@@ -598,8 +729,17 @@ function partnerAct(silent) {
       addInvQual(type, pq);
       addLog(pName, "\u6536\u83B7\u4E86 " + name + qualLabel(pq) + (wilted ? "\uFF08\u5DF2\u51CB\u8C22\uFF09" : "") + " (+" + xpg + "\u7ECF\u9A8C)");
     }
+    if (Math.random() < 0.03) {
+      var rareKs = Object.keys(T).filter(function(k){return T[k].rare;});
+      if (rareKs.length) {
+        var rk = rareKs[Math.floor(Math.random()*rareKs.length)];
+        if (!data.rareInv) data.rareInv = {};
+        data.rareInv[rk] = (data.rareInv[rk]||0) + 1;
+        addLog(pName, "\u7559\u4E0B\u4E86\u4E00\u9897" + T[rk].n + "\u7684\u79CD\u5B50 \u2728");
+      }
+    }
     acted = true;
-  } else if (r < 0.78 && bloomedPlots.length > 1) {
+  } else if (actType === "harvestall" && bloomedPlots.length > 0) {
     var hcnt = 0;
     for (var pi = 0; pi < data.p.length; pi++) {
       if (!data.p[pi]) continue;
@@ -617,8 +757,17 @@ function partnerAct(silent) {
       hcnt++;
     }
     if (hcnt > 0) { addLog(pName, "\u4E00\u952E\u6536\u83B7 " + hcnt + " \u6735\u82B1"); acted = true; }
-  } else if (r < 0.90 && plantedPlots.length > 0) {
-    var idx = plantedPlots[Math.floor(Math.random() * plantedPlots.length)];
+    if (hcnt > 0 && Math.random() < 0.03) {
+      var rareKs2 = Object.keys(T).filter(function(k2){return T[k2].rare;});
+      if (rareKs2.length) {
+        var rk2 = rareKs2[Math.floor(Math.random()*rareKs2.length)];
+        if (!data.rareInv) data.rareInv = {};
+        data.rareInv[rk2] = (data.rareInv[rk2]||0) + 1;
+        addLog(pName, "\u7559\u4E0B\u4E86\u4E00\u9897" + T[rk2].n + "\u7684\u79CD\u5B50 \u2728");
+      }
+    }
+  } else if (actType === "fertilize" && plantedPlots.length > 0) {
+    var idx = pick(plantedPlots);
     var si = stageInfo(data.p[idx]);
     data.p[idx].planted = Math.max(0, data.p[idx].planted - 21600);
     addLog(pName, "\u7ED9 " + (si ? si.name : "\u690D\u7269") + " \u65BD\u4E86\u80A5");
@@ -626,12 +775,18 @@ function partnerAct(silent) {
     acted = true;
   }
   if (acted && Math.random() < 0.4) {
-    var msg = WM[Math.floor(Math.random() * WM.length)];
+    // v3.13.x：悄悄话走系统预设字卡池（字卡库「花园」tab 同源，dc-off-garden:* 过滤）
+    var wmPool = (window.getLibPool ? window.getLibPool("garden", "梦角悄悄话", WM) : WM).slice();
+    if (window.isDefaultCardOff) wmPool = wmPool.filter(function (c) { return !window.isDefaultCardOff("garden", c); });
+    if (!wmPool.length) wmPool = WM.slice();
+    var msg = wmPool[Math.floor(Math.random() * wmPool.length)];
     addLog(pName, "\uD83D\uDC95 " + msg);
   }
-  data.lpc = Math.floor(Date.now() / 1000);
-  save(data);
-  if (!silent) renderAll();
+  if (acted) {
+    data.lpc = Math.floor(Date.now() / 1000);
+    save(data);
+  }
+  if (!silent && acted) renderAll();
   return acted;
 }
 
@@ -808,7 +963,9 @@ var ACHV = [
   { id: "decorAll", n: "尽善尽美", e: "\uD83C\uDFE0", d: "买齐全部装饰", check: function () { return Object.keys(DECOR).every(function (k) { return (data.decor[k] || 0) >= DECOR[k].max; }); } },
   { id: "visitor", n: "生机勃勃", e: "\uD83E\uDE9B", d: "招待过访客", check: function () { return !!data.visitor; } },
   { id: "bouquet3", n: "花束使者", e: "\uD83D\uDCC1", d: "制作 3 束花", check: function () { return (data.bouquetCnt || 0) >= 3; } },
-  { id: "partnerCare", n: "同育之情", e: "\uD83D\uDC95", d: "梦角打理 10 次", check: function () { return (data.st.mp || 0) + (data.st.mw || 0) + (data.st.mh || 0) + (data.st.mf || 0) >= 10; } },
+  { id: "partnerCare", n: "同育之情", e: "\uD83D\uDC95", d: "梦角打理 30 次", check: function () { return (data.st.mp || 0) + (data.st.mw || 0) + (data.st.mh || 0) + (data.st.mf || 0) >= 30; } },
+  { id: "partnerCareII", n: "日久情深", e: "\uD83D\uDC9D", d: "梦角打理 100 次", check: function () { return (data.st.mp || 0) + (data.st.mw || 0) + (data.st.mh || 0) + (data.st.mf || 0) >= 100; } },
+  { id: "partnerCareIII", n: "生生不息", e: "\uD83D\uDC9E", d: "梦角打理 300 次", check: function () { return (data.st.mp || 0) + (data.st.mw || 0) + (data.st.mh || 0) + (data.st.mf || 0) >= 300; } },
   { id: "rich", n: "花山花海", e: "\uD83D\uDCB0", d: "库存 20 朵花", check: function () { var t = 0; Object.keys(data.inv || {}).forEach(function (k) { t += data.inv[k] || 0; }); return t >= 20; } },
   { id: "wiltedSee", n: "封存时光", e: "\uD83E\uDD40", d: "见证花朵凋谢", check: function () { return !!data.wiltedSeen; } },
   { id: "hybridMaster", n: "杂交大师", e: "\uD83E\uDD7C", d: "发现 5 个杂交配方", check: function () { return Object.keys(data.hybridFound || {}).length >= 5; } },
@@ -1057,6 +1214,9 @@ function renderReport() {
   h += '<div class="report-row"><span>\u8FDE\u7EED\u6D47\u6C34</span><b>' + streak + ' \u5929</b></div>';
   h += '<div class="report-row"><span>\u56FE\u9274\u6536\u96C6</span><b>' + dexGot + '/' + Object.keys(T).length + '</b></div>';
   h += '<div class="report-row"><span>\u68A6\u89D2\u6253\u7406</span><b>' + partnerCare + ' \u6B21</b></div>';
+  var gTime = data.gardenTime || 0;
+  var gTimeTxt = gTime >= 3600 ? Math.floor(gTime / 3600) + " \u5C0F\u65F6" : Math.floor(gTime / 60) + " \u5206\u949F";
+  h += '<div class="report-row"><span>\u901B\u82B1\u56ED\u65F6\u957F</span><b>' + gTimeTxt + '</b></div>';
   h += '</div>';
   h += '<button class="report-share-btn" id="garden-report-share">\uD83D\uDCF8 \u5206\u4EAB\u5230\u670B\u53CB\u5708</button>';
   el.innerHTML = h;
@@ -1122,19 +1282,28 @@ function renderAll() {
 
 function checkPartnerPassive() {
   try {
-    var d = load();
     var now = Math.floor(Date.now() / 1000);
+    if (data && data.lpc && now - data.lpc < PI) return;
+    var d = load();
+    now = Math.floor(Date.now() / 1000);
     var last = d.lpc || 0;
-    if (!last) { d.lpc = now; save(d); return; }
+    if (!last) {
+      data = d;
+      var ok0 = partnerAct(true);
+      if (!ok0) data.lpc = now - PI;
+      save(data);
+      return;
+    }
     var elapsed = now - last;
-    if (elapsed < PI) return;
+    if (elapsed < PI) { data = d; return; }
     var slots = Math.floor(elapsed / PI);
-    if (slots > 8) slots = 8;
     data = d;
     var triggered = 0;
+    var used = [];
     for (var i = 0; i < slots; i++) {
-      if (Math.random() < 0.35) {
-        if (partnerAct(true)) triggered++;
+      if (triggered >= 40) break;
+      if (Math.random() < 0.4) {
+        if (partnerAct(true, used)) triggered++;
       }
     }
     if (triggered > 0) {
@@ -1142,7 +1311,7 @@ function checkPartnerPassive() {
       addLog(pName, "\u6253\u7406\u4E86\u82B1\u56ED\uFF08\u540E\u53F0\uFF09");
       save(data);
     } else {
-      data.lpc = now;
+      data.lpc = last + slots * PI;
       save(data);
     }
   } catch (e) {}
@@ -1225,6 +1394,7 @@ function waterAll() {
   if (cnt > 0) {
     addLog("\u6211", "\u4E00\u952E\u6D47\u4E86 " + cnt + " \u68F5\u690D\u7269");
     updSt("w", true);
+    if (Math.random() < 0.08) { var pn3 = pn(); addLog(pn3, "\u770B\u5230\u4F60\u5728\u6D47\u6C34\uFF0C\u4E5F\u6765\u5E2E\u5FD9\u4E86~"); partnerAct(true); }
     save(data); renderAll();
   }
 }
@@ -1232,6 +1402,7 @@ function waterAll() {
 function harvestAll() {
   var cnt = 0;
   var totalXp = 0;
+  var totalCoin = 0;
   var xpb = 1 + decorBuffs().xp;
   var dropped = [];
   for (var i = 0; i < data.p.length; i++) {
@@ -1251,10 +1422,14 @@ function harvestAll() {
     var dr = dropRareSeed(); if (dr) dropped.push(dr);
     fxAtPlot(i, "fx-harvest", 1000);
     totalXp += xpg;
+    // v3.15.x：一键收获同样发收花奖励（grantHarvestCoin 内部走同一日封顶计数）
+    var cg = grantHarvestCoin(q, wilted);
+    if (cg) totalCoin += cg;
     cnt++;
   }
   if (cnt > 0) {
     addLog("\u6211", "\u4E00\u952E\u6536\u83B7 " + cnt + " \u6735\u82B1 (+" + totalXp + "\u7ECF\u9A8C)" + (dropped.length ? " \u2728\u83B7\u5F97" + dropped.length + "\u9897\u7A00\u6709\u79CD\u5B50" : ""));
+    if (totalCoin > 0) addLog("\u6211", "\u6536\u82B1\u5956\u52B1\u5230\u8D26 " + coinTxt(totalCoin));
     save(data); renderAll();
   }
 }
@@ -1326,11 +1501,23 @@ function spawnVisitor() {
 }
 
 function openGarden() {
-  if (isGlobal) toggleGlobal();
   var editing = Array.from(document.querySelectorAll(".app-grid")).some(function (g) { return g.classList.contains("editing"); });
   if (editing) return;
   document.querySelectorAll(".page").forEach(function (pg) { pg.hidden = true; });
   page.hidden = false;
+  // v3.14.x：LS 缺 garden-data（或只是垃圾空档）时先等 IDB 判定再初始化本局——
+  // 直接往下走会 load() 出全新空档并触发一连串自动保存（下雨浇水/访客/伙伴），
+  // 把 IDB 里还没读完的老花园覆盖掉。先渲染当前内存态（可能为空），判定命中后重载。
+  if (junkEmpty()) {
+    try { renderAll(); } catch (e) {}
+    probeIdb(function (v) {
+      if (!page.hidden) openGardenBody(!!v);
+    });
+    return;
+  }
+  openGardenBody(false);
+}
+function openGardenBody(recovered) {
   checkPartnerPassive();
   data = load();
   checkLoginReward();
@@ -1357,6 +1544,7 @@ function openGarden() {
   spawnVisitor();
   if (Math.random() < 0.3 + dbf.partner) partnerAct();
   renderAll();
+  if (recovered) toast("\u5DF2\u627E\u56DE\u82B1\u56ED\u6570\u636E \uD83C\uDF38");
   try { document.dispatchEvent(new CustomEvent("garden-enter")); } catch (e) {}
 }
 
@@ -1371,6 +1559,20 @@ if (backBtn) backBtn.addEventListener("click", function () {
   try { document.dispatchEvent(new CustomEvent("garden-leave")); } catch (e) {}
 });
 
+document.addEventListener("garden-enter", function () {
+  try { data._enterTs = Math.floor(Date.now() / 1000); } catch (e) {}
+});
+document.addEventListener("garden-leave", function () {
+  try {
+    if (data._enterTs) {
+      var dur = Math.floor(Date.now() / 1000) - data._enterTs;
+      if (dur > 0 && dur < 86400) data.gardenTime = (data.gardenTime || 0) + dur;
+      data._enterTs = 0;
+      save(data);
+    }
+  } catch (e) {}
+});
+
 var gridEl = document.getElementById("garden-grid");
 if (gridEl) gridEl.addEventListener("click", handlePlotClick);
 
@@ -1379,10 +1581,7 @@ if (toolbarEl) toolbarEl.addEventListener("click", handleTool);
 
 
 document.addEventListener("contact-switched", function () {
-  if (!page.hidden) {
-    if (isGlobal) toggleGlobal();
-    else { data = load(); selPlot = -1; renderAll(); }
-  }
+  if (!page.hidden) { data = load(); selPlot = -1; renderAll(); }
 });
 
 (function watchHome() {
@@ -1398,150 +1597,6 @@ document.addEventListener("contact-switched", function () {
     try { checkPartnerPassive(); } catch (e) {}
   }
 })();
-
-// ===== 全球园：真合并所有联系人花园数据，可继续种植/收获（原各联系人数据保留不动） =====
-var globalBtn = null;
-var remergeBtn = null;
-function ensureGlobalUI() {
-  if (globalBtn) return;
-  var header = page.querySelector("header") || page.children[0];
-  if (header) {
-    globalBtn = document.createElement("span");
-    globalBtn.className = "garden-ov-btn";
-    globalBtn.textContent = "\uD83C\uDF10 \u5168\u90E8";
-    globalBtn.addEventListener("click", toggleGlobal);
-    header.appendChild(globalBtn);
-    remergeBtn = document.createElement("span");
-    remergeBtn.className = "garden-ov-btn garden-remerge-btn";
-    remergeBtn.textContent = "\uD83D\uDD04 \u91CD\u65B0\u5408\u5E76";
-    remergeBtn.hidden = true;
-    remergeBtn.addEventListener("click", remergeGlobal);
-    header.appendChild(remergeBtn);
-  }
-}
-function loadGardenAsync(cid) {
-  return new Promise(function (resolve) {
-    var raw = null;
-    try { raw = window.storeFor(cid).get("garden-data"); } catch (e) {}
-    if (raw) { try { resolve(JSON.parse(raw)); return; } catch (e) {} }
-    if (!window.idbGet) { resolve(null); return; }
-    window.idbGet("xy-home-v2:" + cid + ":garden-data").then(function (v) {
-      if (!v) { resolve(null); return; }
-      try { resolve(typeof v === "string" ? JSON.parse(v) : v); } catch (e) { resolve(null); }
-    }).catch(function () { resolve(null); });
-  });
-}
-function loadAllGardensAsync() {
-  var list = [];
-  try { if (window.getContacts) list = window.getContacts() || []; } catch (e) {}
-  if (!list.length) list = [{ id: "default", name: "\u9ED8\u8BA4" }];
-  return Promise.all(list.map(function (c) {
-    return loadGardenAsync(c.id).then(function (d) {
-      if (!d) return null;
-      var name = c.name || c.id;
-      try { var pnn = window.storeFor(c.id).get("lbl-partner"); if (pnn) name = pnn; } catch (e) {}
-      return { cid: c.id, name: name, data: d };
-    });
-  })).then(function (arr) { return arr.filter(function (x) { return !!x; }); });
-}
-function mergeAllToGlobal() {
-  return loadAllGardensAsync().then(function (gardens) {
-    var g = { p: [], l: [], lpc: Math.floor(Date.now() / 1000), dex: {}, exp: 0, inv: {}, st: { p: 0, w: 0, h: 0, f: 0, mp: 0, mw: 0, mh: 0, mf: 0 }, decor: {}, visitor: null };
-    gardens.forEach(function (gd) {
-      var d = gd.data || {};
-        if (d.p) d.p.forEach(function (plot) {
-          if (plot) {
-            var np = { type: plot.type, planted: plot.planted, by: (plot.by || "\u6211") + "@" + gd.name };
-            if (plot.watered) np.watered = plot.watered;
-            if (plot.bloomedAt) np.bloomedAt = plot.bloomedAt;
-            if (plot.coOp) np.coOp = plot.coOp;
-            g.p.push(np);
-          }
-        });
-      g.exp += (d.exp || 0);
-      if (d.st) Object.keys(d.st).forEach(function (k) { g.st[k] = (g.st[k] || 0) + (d.st[k] || 0); });
-      if (d.dex) Object.keys(d.dex).forEach(function (t) {
-        var src = d.dex[t]; if (!src || typeof src !== "object") return;
-        if (!g.dex[t]) g.dex[t] = { p: 0, h: 0 };
-        g.dex[t].p += src.p || 0;
-        g.dex[t].h += src.h || 0;
-      });
-      if (d.inv) Object.keys(d.inv).forEach(function (t) { g.inv[t] = (g.inv[t] || 0) + (d.inv[t] || 0); });
-      if (d.decor) Object.keys(d.decor).forEach(function (t) { g.decor[t] = (g.decor[t] || 0) + (d.decor[t] || 0); });
-      if (d.l) d.l.forEach(function (e) { g.l.push({ who: e.who, act: (e.act || "") + " @" + gd.name, tm: e.tm }); });
-      if (d.visitor) {
-        var now = Math.floor(Date.now() / 1000);
-        if (d.visitor.start + d.visitor.dur > now) {
-          if (!g.visitor || d.visitor.start > g.visitor.start) g.visitor = d.visitor;
-        }
-      }
-    });
-    while (g.p.length < 12) g.p.push(null);
-    if (g.p.length > 36) {
-      var extra = g.p.splice(36);
-      extra.forEach(function (plot) { if (plot && T[plot.type]) g.inv[plot.type] = (g.inv[plot.type] || 0) + 1; });
-
-    }
-    g.l.sort(function (a, b) { return (a.tm || 0) - (b.tm || 0); });
-    g.l = g.l.slice(-100);
-    return g;
-  });
-}
-function toggleGlobal() {
-  ensureGlobalUI();
-  if (isGlobal) {
-    isGlobal = false;
-    data = load();
-    selPlot = -1;
-    if (globalBtn) globalBtn.textContent = "\uD83C\uDF10 \u5168\u90E8";
-    if (remergeBtn) remergeBtn.hidden = true;
-    renderAll();
-  } else {
-    isGlobal = true;
-    var existing = null;
-    try { existing = gs.get(G_GLOBAL); } catch (e) {}
-    if (existing) {
-      data = load();
-      selPlot = -1;
-      if (globalBtn) globalBtn.textContent = "\u2190 \u8FD4\u56DE\u672C\u684C";
-      if (remergeBtn) remergeBtn.hidden = false;
-      renderAll();
-    } else {
-      var scroll = page.querySelector(".garden-scroll");
-      var tip = null;
-      if (scroll) {
-        tip = document.createElement("div");
-        tip.className = "garden-merge-tip";
-        tip.textContent = "\u9996\u6B21\u5408\u5E76\u6240\u6709\u8054\u7CFB\u4EBA\u82B1\u56ED\u2026";
-        scroll.insertBefore(tip, scroll.firstChild);
-      }
-      mergeAllToGlobal().then(function (g) {
-        save(g);
-        data = load();
-        selPlot = -1;
-        if (globalBtn) globalBtn.textContent = "\u2190 \u8FD4\u56DE\u672C\u684C";
-        if (remergeBtn) remergeBtn.hidden = false;
-        if (tip) tip.remove();
-        renderAll();
-      });
-    }
-  }
-}
-function remergeGlobal() {
-  if (!window.openModal) { doRemerge(); return; }
-  window.openModal("\u91CD\u65B0\u5408\u5E76", "", function (v) {
-    if (v === "ok") doRemerge();
-  }, { pills: [{ label: "\u786E\u8BA4\u5408\u5E76\uFF08\u8986\u76D6\u5F53\u524D\u5168\u7403\u56ED\uFF09", value: "ok" }, { label: "\u53D6\u6D88", value: "cancel" }], noInput: true });
-}
-function doRemerge() {
-  mergeAllToGlobal().then(function (g) {
-    save(g);
-    data = load();
-    selPlot = -1;
-    renderAll();
-  });
-}
-ensureGlobalUI();
 
 window.gardenBloomDates = function () {
   var list = [];
