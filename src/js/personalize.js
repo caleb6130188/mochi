@@ -212,6 +212,12 @@ try {
   // 通用弹层：IAB 不支持 prompt/confirm，用页面内模态框替代；支持输入 / 色板
   (function () {
     const mask = document.getElementById('modal-mask');
+    // v3.27.x：opts 是 window.openModal 的函数参数（函数体在 return ctl 处结束），
+    // IIFE 作用域里的 change 监听器（txtImportAuto 自动提交）直接引用 opts 会抛
+    // ReferenceError → 文件导入静默失败（"导入美化方案选完文件没反应"）。
+    // 每次打开时把 opts 存到 IIFE 级变量供监听器读取。
+    let _modalOpts = null;
+    const modalBox = mask ? mask.querySelector('.modal') : null;
     const title = document.getElementById('modal-title');
     const staticEl = document.getElementById('modal-static');
     const input = document.getElementById('modal-input');
@@ -232,6 +238,7 @@ try {
     const okBtn = document.getElementById('modal-ok');
     const cancelBtn = document.getElementById('modal-cancel');
     const copyBtn = document.getElementById('modal-copy');
+    const exportBtn = document.getElementById('modal-export');
     if (!mask || !input) return;
     // v3.10.x：vivo/OPPO Edge 等安卓内核对 ce-box（mobile-adapt 输入转换器）的
     // value 代理支持不完整——弹窗里明明打完字，点确定读 input.value 却是空，
@@ -269,12 +276,23 @@ try {
             b.classList.add('on');
             pillVal = p.value;
             pillClicked = true;
+            // v3.20.x：pillSubmit——点选即提交（单坎作答等纯单选弹窗），
+            // 用定时器让选中态先渲染一帧再走 fire()/close()（与 okBtn 同一回调路径）
+            // v3.27.x：嵌套弹窗守卫同 okBtn——fire 内开了新弹窗则不 close
+            if (pillSubmit) {
+              const _s = _openSeq;
+              setTimeout(function () { try { fire(); } finally { if (_openSeq === _s) close(); } }, 0);
+            }
           });
           pillsEl.appendChild(b);
         });
       }
     }
     let pillsOnOk = null;
+    // v3.20.x：pillSubmit——纯单选胶囊弹窗（查岗作答等）点选即提交，无需再点底部
+    // 确定按钮。此前点胶囊又得再点确认，配合确认按钮曾残留错误文案，用户以为
+    // 点选项即选上，实际未提交 → 作答完全不落地（卡片不更新、无回答气泡）。
+    let pillSubmit = false;
     let noInput = false;
     let picked = -1;
     let customVal = null;
@@ -288,14 +306,30 @@ try {
     let stayOnce = false;
     let sliderCfg = null;
     let sliderInitPill = null;
+    // v3.27.x：弹窗打开序号——okBtn/Enter 的 finally close() 只在自己「本次打开」
+    // 未变化时才关闭（fire() 的 cb 若同步打开了新弹窗，_openSeq 已递增 → 跳过关闭，
+    // 新弹窗保留）。修「导出美化方案」等嵌套弹窗：外层确定把刚打开的下一层弹窗
+    // 立即关掉（stayOnce 会被内层 openModal 重置，扛不住跨弹窗嵌套）。
+    let _openSeq = 0;
     // v3.6.x：用户是否真的点过 pill——区分「opts.pill 预设值」与「用户主动选择」。
     // 修复：今天的心情/字体大小等「pills + 输入框 + pill 预设」弹窗里，用户输入文字点确定时，
     // fire() 的 pills 分支误把预设的旧 pillVal 传回回调，输入的文本被丢弃（卡片不更新）。
     let pillClicked = false;
     window.openModal = function (t, v, fn, opts) {
       opts = opts || {};
+      _modalOpts = opts;
+      _openSeq++;
+      // v3.25.x：opts.big——宽版弹窗（诊断信息等长文只读展示），配合 CSS
+      // .modal.modal--big 加宽 + 放大输入框；每次开弹窗按 opts.big 重设类，天然复位。
+      if (modalBox) modalBox.classList.toggle('modal--big', !!opts.big);
+      // v3.20.x：每次打开弹窗重置底部确认按钮文案为默认「确定」——此前只在调用方显式
+      // ctl.okText() 时才会写，若某次弹窗（如心意币「申请」）设过、下一个弹窗
+      // （如跨桌面通话/查岗的 pill 弹窗）没设，按钮就残留显示上一个弹窗文案。
+      // 需要定制文案的调用方在 openModal 返回后调 ctl.okText() 覆盖即可。
+      if (okBtn) okBtn.textContent = '确定';
       stayOnce = false;
       pillsOnOk = opts.pillsOnOk || null;
+      pillSubmit = !!(opts.pillSubmit);
       noInput = !!(opts.noInput);
       pillClicked = false;
       // v3.6.x：opts.lock——锁定弹窗（换头像邀请等必须做出选择）：
@@ -329,6 +363,9 @@ try {
         if (opts.textarea) {
           textarea.value = v || '';
           textarea.placeholder = opts.textareaPlaceholder || '多行内容';
+          // v3.25.x：opts.textareaRows——指定多行框行数（诊断信息等长文只读展示，
+          // 默认模板 rows="3" 装不下 14 行诊断内容，iOS 原生框不随内容增高会显得很小）
+          if (opts.textareaRows) { try { textarea.rows = opts.textareaRows; } catch (e) {} }
         }
       }
       // 目标分组下拉
@@ -421,7 +458,19 @@ try {
         stay: function () { stayOnce = true; },
         title: function (s) { title.textContent = String(s == null ? '' : s); },
         hint: function (s) { if (staticEl) { staticEl.hidden = !s; staticEl.textContent = s || ''; } },
-        text: function (s) { try { input.value = s || ''; } catch (e) {} },
+        text: function (s) {
+          // v3.26.x：无参时作为 getter 返回当前文本——诊断信息等只读弹窗的
+          // 「复制/导出」按钮用 ctl.text() 拿最新内容（此前只有 setter 语义，
+          // 传空参返回 undefined，导致复制出「undefined」）。有参时维持 setter。
+          if (arguments.length === 0) {
+            try {
+              if (textarea && !textarea.hidden) return textarea.value;
+              if (!input.hidden) return input.value;
+            } catch (e) {}
+            return '';
+          }
+          try { input.value = s || ''; } catch (e) {}
+        },
         maxLen: function (n) { try { if (n) input.maxLength = n; else input.removeAttribute('maxlength'); } catch (e) {} },
         ph: function (s) { try { input.placeholder = s || ''; } catch (e) {} },
         okText: function (s) { if (okBtn) okBtn.textContent = s || '确定'; },
@@ -453,6 +502,19 @@ try {
           if (cfg.label) copyBtn.textContent = cfg.label;
           if (typeof cfg.fn === 'function') {
             copyBtn.onclick = function () { try { cfg.fn(ctl); } catch (e) {} };
+          }
+        }
+      }
+      // v3.25.x：opts.exportBtn——与 copyBtn 同机制的第二个自定义按钮（诊断信息
+      // 「导出txt」等：大文本剪贴板可能截断，下载文件兜底）。不传则隐藏，零影响。
+      if (exportBtn) {
+        const cfg2 = opts.exportBtn || null;
+        exportBtn.hidden = !cfg2;
+        exportBtn.onclick = null;
+        if (cfg2) {
+          if (cfg2.label) exportBtn.textContent = cfg2.label;
+          if (typeof cfg2.fn === 'function') {
+            exportBtn.onclick = function () { try { cfg2.fn(ctl); } catch (e) {} };
           }
         }
       }
@@ -533,23 +595,56 @@ try {
         if (!f) return;
         const reader = new FileReader();
         reader.onload = () => {
-          const txt = String(reader.result || '');
-          if (textarea) textarea.value = txt; // 填入文本框，由用户确认
+          // v3.18.x：修复 txt 乱码——readAsText 默认按 UTF-8 解码，中文 txt 常为
+          // GBK/GB2312（ANSI）编码（Windows 记事本等保存），会被解成乱码。
+          // 改为读 ArrayBuffer 探测编码：能按 UTF-8 严格解（合法序列+自动去 BOM）就用 UTF-8，
+          // 解不了说明是 GBK 系，回退用 gb18030（GBK 超集）解码。
+          let txt = '';
+          try {
+            const buf = reader.result;
+            if (buf) {
+              try {
+                txt = new TextDecoder('utf-8', { fatal: true }).decode(buf);
+              } catch (e) {
+                try {
+                  txt = new TextDecoder('gb18030').decode(buf);
+                } catch (e2) {
+                  txt = new TextDecoder('utf-8').decode(buf); // 兜底
+                }
+              }
+            }
+          } catch (e) { txt = String(reader.result || ''); }
+          if (textarea) textarea.value = txt;
+          // v3.27.x：文件导入直接生效——否则选完文件还需再点一次「确定」，
+          // 手机上用户以为选了文件就导入、没点确定，导致「导入了却没应用」。
+          // 仅 opts.txtImportAuto 的弹窗开启自动提交（opts 经 _modalOpts 引用，
+          // 直接引用函数参数 opts 会 ReferenceError，见 IIFE 顶部注释）。
+          // 直接 cb(txt) 而非 fire()：导入弹窗为 noInput（无输入框/textarea），
+          // fire() 的 noInput 分支会传 'ok' 导致 JSON 解析失败。
+          if (_modalOpts && _modalOpts.txtImportAuto) {
+            try { if (cb) cb(txt); } catch (e) {}
+            try { close(); } catch (e) {}
+          }
         };
-        reader.readAsText(f);
+        reader.readAsArrayBuffer(f);
         fileInput.value = '';
       });
     }
     okBtn.addEventListener('click', () => {
       // v3.5.130：回调抛异常（如存储配额满）也必须关闭弹窗，防止残留卡死
-      try { fire(); } finally { close(); }
+      // v3.27.x：期间打开过新弹窗（_openSeq 变化）则不关——嵌套弹窗由 fire 内 openModal 接管
+      const _s = _openSeq;
+      try { fire(); } finally { if (_openSeq === _s) close(); }
     });
     cancelBtn.addEventListener('click', close);
     mask.addEventListener('click', (e) => { if (e.target === mask && !lock) close(); });
     input.addEventListener('keydown', (e) => {
       // v3.6.x：与 OK 按钮一致用 try/finally——回调抛异常（如存储配额满）时也必须
       // 关闭弹窗，否则残留卡死、后续再点 OK 每次都抛
-      if (e.key === 'Enter' && !e.isComposing && e.keyCode !== 229) { try { fire(); } finally { close(); } }
+      if (e.key === 'Enter' && !e.isComposing && e.keyCode !== 229) {
+        const _s = _openSeq;
+        try { fire(); } finally { if (_openSeq === _s) close(); }
+      }
     });
   })();
 
@@ -565,12 +660,19 @@ try {
         window.openModal('修改昵称', el.textContent, (v) => {
           const val = (v || '').trim();
           if (val) {
+            // v3.26.x：改前先记有效昵称（聊天独立昵称 cs-lbl-partner 优先）——变化时接入
+            // 系统消息昵称清扫，与 chat-settings / contacts 改名路径行为一致
+            let oldEff = '';
+            if (key === 'lbl-partner') oldEff = store.get('cs-lbl-partner') || store.get('lbl-partner') || 'TA';
             el.textContent = val;
             store.set(key, val);
-            // 同步聊天页顶部标题（联系人的昵称）
+            // 同步聊天页顶部标题——必须走 renderChatHeader（按 cs-lbl-partner 优先解析）：
+            // 直写 textContent 会把已设置的「聊天独立昵称」顶掉（反馈：设置了独立仍显示桌面名）
             if (key === 'lbl-partner') {
-              const pname = document.getElementById('chat-partner-name');
-              if (pname) pname.textContent = val;
+              if (window.renderChatHeader) { try { window.renderChatHeader(); } catch (e) {} }
+              else { const pname = document.getElementById('chat-partner-name'); if (pname) pname.textContent = val; }
+              const newEff = store.get('cs-lbl-partner') || store.get('lbl-partner') || 'TA';
+              if (newEff !== oldEff) { try { if (window.chatSysNickChanged) window.chatSysNickChanged(oldEff); } catch (e) {} }
             }
           }
         }, { maxlength: 12 });
@@ -728,17 +830,30 @@ try {
 
   // 壁纸只在桌面显示：桌面时铺满全屏，切到字卡库/设置/聊天时隐藏（数据保留）
   const bgData = () => sanitizeBg('phone-bg', BG_SAFE_LIMIT);
+  const bgPresetCss = () => {
+    const n = getBgPresetName();
+    if (!n) return '';
+    const p = BG_PRESETS.find(b => b.name === n);
+    return p ? p.css : '';
+  };
   const applyBgVisibility = () => {
     if (!phoneEl) return;
     const home = document.getElementById('page-phone');
-    const show = home && !home.hidden && bgData();
-    if (show) {
-      phoneEl.style.backgroundImage = 'url("' + bgData() + '")';
-      phoneEl.style.backgroundSize = 'cover';
-      phoneEl.style.backgroundPosition = 'center';
-      phoneEl.style.backgroundAttachment = 'scroll';
-      applyBodyBg(bgData());
-    } else {
+    const show = home && !home.hidden;
+    if (!show) {
+      phoneEl.style.backgroundImage = '';
+      applyBodyBg(null);
+      return;
+    }
+    // v3.26.x：修复「内置壁纸预设没应用到桌面」——此前只判断自定义 phone-bg，
+    // 预设（phone-bg-preset）只靠加载时 applyPhoneBgPreset 一次性铺上，任何
+    // tab 切换触发 applyBgVisibility 都会因 bgData() 为空把预设壁纸清掉。
+    // 现在自定义图优先、其次内置预设，都没有才清空。
+    const customBg = bgData();
+    const presetCss = bgPresetCss();
+    if (customBg) applyPhoneBg(customBg);
+    else if (presetCss) applyPhoneBgPreset(presetCss);
+    else {
       phoneEl.style.backgroundImage = '';
       applyBodyBg(null);
     }
@@ -839,19 +954,21 @@ try {
   };
   applyHiddenIcons();
   // v3.5.95：自定义图标大键可能只存在 IndexedDB（压缩失败兜底会存原始大图）→ 补读后重新恢复图标
+  // v3.26.x：串行逐键读取（上一键 resolve 才读下一键）把回填耗时放大成 N×单键——大键多或
+  // 慢 IDB 机器（更新后首启网络/主线程忙时更甚）窗口拉长到数秒以上，用户看到「上传的桌面
+  // 图标图片消失，刷新才回来」。改为 Promise.all 并行一次读完，全部写回后统一重绘一次；
+  // 单键失败只跳过该键不影响其余（原串行链一键 reject 会中断后续所有键且不再重绘）。
   try {
     if (window.idbGetAllKeys) {
       window.idbGetAllKeys().then(keys => {
         const iconKeys = (keys || []).filter(k => k.indexOf(window.activePrefix() + ':app-icon-') === 0);
         if (!iconKeys.length) return;
-        let p = Promise.resolve();
-        iconKeys.forEach(k => {
-          p = p.then(() => window.idbGet(k)).then(v => {
+        return Promise.all(iconKeys.map(k =>
+          window.idbGet(k).then(v => {
             if (v && typeof v === 'string' && v.length > 2) store.set(k.slice(window.activePrefix().length + 1), v);
-          });
-        });
-        p.then(() => restoreAppIcons());
-      });
+          }).catch(function () {})
+        )).then(() => restoreAppIcons());
+      }).catch(function () {});
     }
   } catch (e) {}
 
@@ -876,18 +993,27 @@ try {
         try { if (input.parentNode) input.remove(); } catch (e) {}
         if (!f) { return; }
         const reader = new FileReader();
+        // v3.2x.x：上传图片卡顿很久——解码全分辨率位图 + 压到 256px 在
+        // 主线程同步执行，原图大时界面会卡死数秒且毫无反馈看起来像假死。
+        // 现在选完图先弹「正在处理图片…」，并让出当前帧（setTimeout）让
+        // toast 先渲染出来，再做耗时的压缩，处理完再提示结果；超出 8MB
+        // base64 / 26MP 的图 decode 前就被 compressImage 拦截（不会有卡顿）。
         reader.onload = () => {
-          compressImage(reader.result, 256).then(data => {
-            if (!data) { toast('图片过大或格式不支持，请换一张小图'); return; }
-            if (ico) {
-              ico.innerHTML = '';
-              const img = document.createElement('img');
-              img.src = data;
-              img.alt = '';
-              ico.appendChild(img);
-            }
-            store.set('app-icon-' + key, data);
-          });
+          toast('正在处理图片…');
+          setTimeout(() => {
+            compressImage(reader.result, 256).then(data => {
+              if (!data) { toast('图片过大或格式不支持，请换一张小图'); return; }
+              if (ico) {
+                ico.innerHTML = '';
+                const img = document.createElement('img');
+                img.src = data;
+                img.alt = '';
+                ico.appendChild(img);
+              }
+              store.set('app-icon-' + key, data);
+              toast('图标已更新');
+            });
+          }, 80);
         };
         reader.readAsDataURL(f);
       };
@@ -1506,53 +1632,385 @@ try {
     } catch (e) {}
     return data;
   };
-  const showBeautyFallback = (json) => {
-    if (!window.openModal) return;
-    // v3.7.x 修复：原 noInput 隐藏输入框且无 staticText，fallback 是空弹窗——
-    // 改用 textarea 完整展示 JSON 供手动复制
-    window.openModal('美化方案（全选复制）', json, () => {}, {
-      textarea: true,
-      textareaPlaceholder: '长按/全选复制，发给对方粘贴导入',
-    });
+  // v3.27.x：导出/导入只保留「文件」方式——「复制文字」已移除（含图片的方案 JSON
+  // 巨大，剪贴板/聊天工具复制发送会被截断或失败，对方也无法粘贴导入）。
+  // v3.26.x：导出前先选「当前设置 / 某个已保存方案」，选定后直接下载 .json 文件。
+  // 全局主题延续右侧方案保存逻辑（collectBeautyFull），方案的 data 里已含 accent/theme。
+  const downloadBeautyFile = (json) => {
+    try {
+      const blob = new Blob([json], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = 'mochi美化方案-' + new Date().toISOString().slice(0, 10) + '.json';
+      document.body.appendChild(a);
+      a.click();
+      setTimeout(() => { try { document.body.removeChild(a); URL.revokeObjectURL(url); } catch (e) {} }, 1000);
+      toast('已导出美化方案文件');
+    } catch (e) { toast('导出文件失败'); }
+  };
+  const startBeautyExport = (data) => {
+    const json = JSON.stringify(data);
+    if (json.length > 64 * 1024 * 1024) { toast('方案过大，导出失败'); return; }
+    downloadBeautyFile(json);
   };
   const beautyExportRow = document.getElementById('row-beauty-export');
   if (beautyExportRow) {
     beautyExportRow.addEventListener('click', () => {
-      const data = collectBeauty();
-      try { const ac = localStorage.getItem('xy-home-v2:accent-color'); if (ac) data['__accent__'] = ac; } catch (e) {}
-      try { const tm = localStorage.getItem('xy-home-v2:theme-mode'); if (tm) data['__theme__'] = tm; } catch (e) {}
-      const json = JSON.stringify(data);
-      if (navigator.clipboard && navigator.clipboard.writeText) {
-        navigator.clipboard.writeText(json).then(() => toast('已复制到剪贴板，发给对方粘贴导入')).catch(() => showBeautyFallback(json));
-      } else {
-        showBeautyFallback(json);
-      }
+      const schemes = getSchemes();
+      // 第一步：选择要导出「当前设置」还是某个已保存方案；无保存方案时直接导出当前设置
+      if (!schemes.length || !window.openModal) { startBeautyExport(collectBeautyFull()); return; }
+      const pills = [{ label: '当前设置', value: 'current' }]
+        .concat(schemes.map((s, i) => ({ label: s.name || ('方案' + (i + 1)), value: 'sch_' + i })));
+      // v3.27.x：选完来源直接下载文件（startBeautyExport 已无嵌套弹窗，无需 ctl.stay）
+      window.openModal('导出美化方案', '', (v) => {
+        let data;
+        if (v && v.indexOf('sch_') === 0) {
+          const i = parseInt(String(v).slice(4), 10);
+          const s = schemes[i];
+          if (!s) { toast('未找到该方案'); return; }
+          data = s.data || {};
+        } else {
+          data = collectBeautyFull();
+        }
+        startBeautyExport(data);
+      }, {
+        noInput: true,
+        staticText: '选择要导出的美化方案，将生成 .json 文件：\n· 当前设置：导出当前正在使用的美化\n· 已保存方案：导出对应方案（含其壁纸/配色）',
+        pills: pills,
+      });
     });
   }
+  // v3.17.x：美化数据写入当前桌面（导入 / 应用方案共用），含动态键与全局主题
+  const applyBeautyData = (data) => {
+    BEAUTY_KEYS.forEach(k => { if (data[k] !== undefined) store.set(k, data[k]); });
+    // 动态键导入：自定义图标 / 图标顺序 / 图片组件本体
+    Object.keys(data).forEach(k => {
+      if ((k.indexOf('app-icon-') === 0 || k.indexOf('desk-image-src-') === 0) && data[k] !== undefined) {
+        store.set(k, data[k]);
+      }
+    });
+    if (data['__accent__']) { try { localStorage.setItem('xy-home-v2:accent-color', data['__accent__']); } catch (e) {} }
+    if (data['__theme__']) { try { localStorage.setItem('xy-home-v2:theme-mode', data['__theme__']); } catch (e) {} }
+  };
   const beautyImportRow = document.getElementById('row-beauty-import');
   if (beautyImportRow) {
     beautyImportRow.addEventListener('click', () => {
       if (!window.openModal) return;
+      // v3.27.x：导入只保留「从文件导入」——去掉粘贴文本（含图片的方案 JSON 巨大，
+      // 粘贴导入不现实；只点确定未选文件时提示）。
       window.openModal('导入美化方案', '', (v) => {
-        if (!v || !v.trim()) return;
+        if (!v || !v.trim() || v === 'ok') {
+          if (v === 'ok') toast('请点击「从文件导入」选择 .json 文件');
+          return;
+        }
         try {
           const data = JSON.parse(v.trim());
           if (typeof data !== 'object' || Array.isArray(data)) { toast('格式错误'); return; }
-          BEAUTY_KEYS.forEach(k => { if (data[k] !== undefined) store.set(k, data[k]); });
-          // 动态键导入：自定义图标 / 图标顺序 / 图片组件本体
-          Object.keys(data).forEach(k => {
-            if ((k.indexOf('app-icon-') === 0 || k.indexOf('desk-image-src-') === 0) && data[k] !== undefined) {
-              store.set(k, data[k]);
+          // v3.27.x：导入前自动把「当前美化」保存成方案，避免被导入覆盖后丢失
+          //（用户要求：导入不影响原本拥有的美化，原美化自动存为方案）
+          try {
+            const cur = collectBeautyFull();
+            if (cur && Object.keys(cur).length > 0) {
+              const d = new Date();
+              const p = (n) => (n < 10 ? '0' : '') + n;
+              const name = '导入前备份 ' + p(d.getMonth() + 1) + '-' + p(d.getDate()) + ' ' + p(d.getHours()) + ':' + p(d.getMinutes());
+              const list = getSchemes();
+              list.push({ name, time: Date.now(), data: cur });
+              saveSchemesList(list);
+              toast('已自动保存原美化 → 方案「' + name + '」');
             }
-          });
-          if (data['__accent__']) { try { localStorage.setItem('xy-home-v2:accent-color', data['__accent__']); } catch (e) {} }
-          if (data['__theme__']) { try { localStorage.setItem('xy-home-v2:theme-mode', data['__theme__']); } catch (e) {} }
+          } catch (e) {}
+          applyBeautyData(data);
           toast('已导入，刷新生效');
           setTimeout(() => location.reload(), 800);
-        } catch (e) { toast('解析失败，请检查文本'); }
-      }, { textarea: true, textareaPlaceholder: '粘贴对方导出的美化方案文本' });
+        } catch (e) { toast('解析失败，请检查文件内容'); }
+      }, { noInput: true, staticText: '导入前会自动把当前美化保存为「导入前备份」方案；只支持从文件导入 .json（点下方「从文件导入」选择文件后自动应用）', txtImport: true, txtImportAuto: true });
     });
   }
+
+  // ===== v3.17.x：美化方案（全局保存，所有联系人桌面通用） =====
+  // 方案数据与导出一致（collectBeauty + 全局主题），存根命名空间 xy-home-v2:beauty-schemes，
+  // 切换联系人桌面后依然可见、可一键应用——满足「通用」需求。
+  const SCHEMES_KEY = 'beauty-schemes';
+  const getSchemes = () => {
+    try { const a = JSON.parse(gStore.get(SCHEMES_KEY) || '[]'); return Array.isArray(a) ? a : []; } catch (e) { return []; }
+  };
+  const saveSchemesList = (arr) => { try { gStore.set(SCHEMES_KEY, JSON.stringify(arr)); } catch (e) {} };
+  const collectBeautyFull = () => {
+    const data = collectBeauty();
+    try { const ac = localStorage.getItem('xy-home-v2:accent-color'); if (ac) data['__accent__'] = ac; } catch (e) {}
+    try { const tm = localStorage.getItem('xy-home-v2:theme-mode'); if (tm) data['__theme__'] = tm; } catch (e) {}
+    return data;
+  };
+  // ---- 桌面美化方案缩略图 + 保存确认（预览+摘要），同聊天方案一致 ----
+  // 迷你手机屏幕：强调色状态栏/底栏 + 页面底色/壁纸 + 强调色图标点，便于识别每个方案
+  function desktopSchemeThumb(data) {
+    data = data || {};
+    const dark = data['__theme__'] === 'dark';
+    const accent = data['__accent__'] || (dark ? '#ffffff' : '#111111');
+    const pgBg = data['page-bg-0'] || (dark ? '#1c1c1e' : '#f2f3f5');
+    const ink = dark ? '#ffffff' : '#111111';
+    const soft = dark ? 'rgba(255,255,255,.6)' : 'rgba(0,0,0,.45)';
+    let wallStyle = 'background:' + pgBg;
+    const bgv = data['phone-bg'];
+    if (bgv && typeof bgv === 'string' && (bgv.indexOf('data:') === 0 || bgv.indexOf('http') === 0)) {
+      wallStyle += ';background-image:url(&quot;' + bgv + '&quot;);background-size:cover;background-position:center';
+    } else if (bgv && typeof bgv === 'string') {
+      wallStyle += ';background:' + bgv;
+    }
+    let dots = '';
+    for (let _d = 0; _d < 4; _d++) dots += '<div style="flex:1;height:9px;border-radius:4px;background:' + soft + ';opacity:.7"></div>';
+    return '' +
+      '<div style="position:relative;width:100%;height:74px;border-radius:9px;overflow:hidden;background:#e6e9ee;display:flex;align-items:center;justify-content:center;box-sizing:border-box">' +
+        '<div style="position:relative;width:58px;height:100%;border-radius:8px;overflow:hidden;border:1.5px solid ' + ink + ';box-sizing:border-box;background:#fff">' +
+          '<div style="height:10px;background:' + accent + '"></div>' +
+          '<div style="height:16px;display:flex;align-items:center;padding:0 5px;box-sizing:border-box"><div style="flex:1;height:5px;border-radius:3px;background:' + ink + '"></div><div style="width:5px;height:5px;border-radius:2px;background:' + accent + ';margin-left:2px"></div></div>' +
+          '<div style="height:35px;' + wallStyle + ';display:flex;align-items:center;justify-content:center;gap:4px;padding:0 5px;box-sizing:border-box">' + dots + '</div>' +
+          '<div style="height:9px;background:' + accent + ';opacity:.85"></div>' +
+        '</div>' +
+      '</div>';
+  }
+  function desktopBeautySummary(data) {
+    data = data || {};
+    const out = [];
+    out.push('主题 ' + (data['__theme__'] === 'dark' ? '深色' : '浅色'));
+    if (data['__accent__']) out.push('强调色 ' + data['__accent__']);
+    if (data['phone-bg'] || data['phone-bg-preset']) out.push('壁纸');
+    if (data['page-bg-0']) out.push('页面配色已设');
+    const fs = data['desk-font-size'];
+    if (fs) out.push('桌面字号 ' + fs);
+    const is = data['ico-shape'];
+    if (is) out.push('图标 ' + ({ square: '方形', circle: '圆形', round: '圆角' }[is] || is));
+    const rad = data['desk-card-radius'];
+    if (rad) out.push('卡片圆角 ' + rad);
+    return out;
+  }
+  function beautySaveModalEl() {
+    let m = document.getElementById('beauty-save-modal');
+    if (!m) {
+      m = document.createElement('div'); m.id = 'beauty-save-modal'; m.hidden = true;
+      m.style.cssText = 'position:fixed;inset:0;z-index:90;align-items:center;justify-content:center;background:rgba(0,0,0,.4);display:none';
+      document.body.appendChild(m);
+      m.addEventListener('click', (e) => { if (e.target === m) { m.style.display = 'none'; m.hidden = true; } });
+    }
+    return m;
+  }
+  // 保存当前为方案：可视确认（缩略预览 + 设置摘要）再取名入库（全局）
+  window.saveBeautyScheme = function () {
+    const x = beautySaveModalEl();
+    x.innerHTML = '';
+    const wrap = document.createElement('div');
+    wrap.style.cssText = 'box-sizing:border-box;width:min(84vw,340px);max-height:84vh;overflow-y:auto;background:var(--card-bg,#fff);color:var(--ink,#111);border-radius:16px;padding:16px;box-shadow:0 14px 40px rgba(0,0,0,.25)';
+    const hd = document.createElement('div');
+    hd.style.cssText = 'font-size:15px;font-weight:700;text-align:center;margin-bottom:12px';
+    hd.textContent = '保存当前为桌面美化方案';
+    const data = collectBeautyFull();
+    const pv = document.createElement('div');
+    pv.innerHTML = desktopSchemeThumb(data);
+    const sub = document.createElement('div');
+    sub.style.cssText = 'font-size:10.5px;color:var(--muted,#999);margin:8px 0 6px';
+    sub.textContent = '正在保存的当前设置：';
+    const sum = document.createElement('div');
+    sum.style.cssText = 'display:flex;flex-wrap:wrap;gap:5px;margin-bottom:12px';
+    const chips = desktopBeautySummary(data);
+    chips.forEach(c => { const el = document.createElement('span'); el.textContent = c; el.style.cssText = 'font-size:10.5px;color:var(--muted,#666);background:var(--card-soft,#f2f3f5);border:1px solid var(--card-border,#eee);padding:2px 8px;border-radius:999px'; sum.appendChild(el); });
+    const inp = document.createElement('input');
+    inp.placeholder = '例如：情侣粉、简约黑白…'; inp.maxLength = 20;
+    inp.style.cssText = 'width:100%;box-sizing:border-box;padding:9px 11px;font-size:13px;border:1px solid var(--card-border,#ddd);border-radius:9px;background:var(--bg-b,#fff);color:var(--ink,#111)';
+    const act = document.createElement('div');
+    act.style.cssText = 'display:flex;gap:8px;margin-top:13px;justify-content:flex-end';
+    const cancel = mkBtn('取消', 'font-size:12.5px;padding:7px 14px;border:1px solid var(--card-border,#eee);border-radius:9px;background:var(--btn-cancel-bg,#fafafa);color:var(--btn-cancel-ink,#555)', () => { x.style.display = 'none'; x.hidden = true; });
+    const ok = mkBtn('保存方案', 'font-size:12.5px;padding:7px 14px;border:none;border-radius:9px;background:var(--ink,#111);color:#fff', () => {
+      const name = (inp.value || '').trim();
+      if (!name) { inp.style.borderColor = '#e05a5a'; return; }
+      const list = getSchemes();
+      list.push({ name, time: Date.now(), data });
+      saveSchemesList(list);
+      x.style.display = 'none'; x.hidden = true;
+      toast('已保存方案「' + name + '」，所有桌面通用');
+      const m = document.getElementById('beauty-scheme-manager');
+      if (m && !m.hidden) window.openBeautySchemes();
+    });
+    act.appendChild(cancel); act.appendChild(ok);
+    wrap.appendChild(hd); wrap.appendChild(pv); wrap.appendChild(sub); wrap.appendChild(sum); wrap.appendChild(inp); wrap.appendChild(act);
+    x.appendChild(wrap);
+    x.style.display = 'flex'; x.hidden = false;
+    setTimeout(() => { try { inp.focus(); } catch (e) {} }, 60);
+  };
+  // 方案管理器弹窗（自定义居中框，与联系人管理器同风格）
+  function schemeModalEl() {
+    let m = document.getElementById('beauty-scheme-manager');
+    if (!m) {
+      m = document.createElement('div'); m.id = 'beauty-scheme-manager'; m.hidden = true;
+      m.style.cssText = 'position:fixed;inset:0;z-index:89;align-items:center;justify-content:center;background:rgba(0,0,0,.4)';
+      document.body.appendChild(m);
+      m.addEventListener('click', (e) => { if (e.target === m) hideSchemeModal(m); });
+    }
+    return m;
+  }
+  function showSchemeModal(m) { m.style.display = 'flex'; m.hidden = false; }
+  function hideSchemeModal(m) { m.style.display = 'none'; m.hidden = true; }
+  function applyScheme(idx, m) {
+    const s = getSchemes()[idx];
+    if (!s || !window.openModal) return;
+    // v3.26.x：预选中唯一「应用」pill——noInput 弹窗只点底部「确定」时 fire() 传
+    // pillVal=null → v!=='ok' 静默不应用（与「恢复默认桌面/删除方案」同因同修）
+    const ctl = window.openModal('应用方案「' + s.name + '」？', '', (v) => {
+      if (v !== 'ok') return;
+      applyBeautyData(s.data || {});
+      hideSchemeModal(m); // 与聊天方案 applyChatScheme 一致：应用成功先关管理弹层，避免残留到刷新
+      toast('已应用「' + s.name + '」，刷新生效');
+      setTimeout(() => location.reload(), 800);
+    }, { noInput: true, pillSubmit: true, staticText: '将覆盖当前桌面的美化设置，刷新生效', pills: [{ label: '应用', value: 'ok' }] });
+    if (ctl && ctl.pills) ctl.pills([{ label: '应用', value: 'ok' }], 'ok');
+  }
+  function deleteScheme(idx, m) {
+    const s = getSchemes()[idx];
+    if (!s || !window.openModal) return;
+    // v3.26.x：预选中唯一「删除」pill——否则只点底部「确定」传 null → 静默不删除（反馈"没反应"）
+    const ctl = window.openModal('删除方案「' + s.name + '」？', '', (v) => {
+      if (v !== 'ok') return;
+      const list = getSchemes();
+      list.splice(idx, 1);
+      saveSchemesList(list);
+      toast('已删除方案');
+      window.openBeautySchemes();
+    }, { noInput: true, pillSubmit: true, staticText: '删除后不可恢复', pills: [{ label: '删除', value: 'ok' }] });
+    if (ctl && ctl.pills) ctl.pills([{ label: '删除', value: 'ok' }], 'ok');
+  }
+  window.openBeautySchemes = function () {
+    const m = schemeModalEl();
+    m.innerHTML = '';
+    const box = document.createElement('div');
+    box.style.cssText = 'width:min(92vw,420px);max-height:80vh;display:flex;flex-direction:column;background:var(--card-bg,#fff);color:var(--ink,#111);border-radius:16px;padding:18px;box-shadow:0 8px 30px rgba(0,0,0,.2)';
+    const head = document.createElement('div');
+    head.innerHTML = '<div style="font-size:16px;font-weight:600;margin-bottom:4px">美化方案</div><div style="font-size:12px;color:var(--muted,#888);margin-bottom:12px">方案在所有联系人桌面通用，点「应用」一键切换当前桌面外观</div>';
+    box.appendChild(head);
+    const list = document.createElement('div'); list.className = 'cm-list';
+    list.style.cssText = 'display:flex;flex-direction:column;gap:8px;margin-bottom:12px;overflow-y:auto;overflow-x:hidden;-webkit-overflow-scrolling:touch;flex:1;min-height:0';
+    const schemes = getSchemes();
+    if (!schemes.length) {
+      const empty = document.createElement('div');
+      empty.innerHTML = '<div style="font-size:13px;color:var(--muted,#999);text-align:center;padding:20px 0">还没有保存的方案<br>先点下方「保存当前为方案」</div>';
+      list.appendChild(empty);
+    }
+    schemes.forEach((s, i) => {
+      const row = document.createElement('div');
+      row.style.cssText = 'display:flex;flex-direction:column;gap:8px;padding:10px;border:1px solid var(--card-border,#eee);border-radius:10px';
+      const th = document.createElement('div');
+      th.innerHTML = desktopSchemeThumb(s.data || {});
+      row.appendChild(th);
+      const nm = document.createElement('div');
+      const t = new Date(s.time || Date.now());
+      const ds = (t.getMonth() + 1) + '-' + t.getDate();
+      nm.innerHTML = '<div style="font-size:14px;font-weight:600;word-break:break-all">' + s.name + '</div><div style="font-size:11px;color:var(--muted,#999)">保存于 ' + ds + '</div>';
+      row.appendChild(nm);
+      const btns = document.createElement('div');
+      btns.style.cssText = 'display:flex;align-items:center;gap:7px;flex-wrap:wrap';
+      btns.appendChild(mkBtn('预览', 'font-size:12px;padding:4px 10px;border:1px solid var(--card-border,#ddd);border-radius:8px;background:var(--btn-cancel-bg,#fafafa);color:var(--ink,#111)', () => desktopStartPreview(s, m)));
+      btns.appendChild(mkBtn('应用', 'font-size:12px;padding:4px 10px;border:none;border-radius:8px;background:var(--ink,#111);color:var(--bg-b,#fff)', () => applyScheme(i, m)));
+      btns.appendChild(mkBtn('改名', 'font-size:12px;padding:4px 10px;border:1px solid var(--card-border,#ddd);border-radius:8px;background:var(--btn-cancel-bg,#fafafa);color:var(--ink,#111)', () => renameScheme(i, m)));
+      btns.appendChild(mkBtn('删除', 'font-size:12px;padding:4px 10px;border:1px solid rgba(163,45,45,.35);border-radius:8px;background:var(--danger-soft,#fff5f5);color:var(--danger-ink,#a32d2d)', () => deleteScheme(i, m)));
+      row.appendChild(btns);
+      list.appendChild(row);
+    });
+    box.appendChild(list);
+    const save = document.createElement('button');
+    save.textContent = '+ 保存当前为方案';
+    save.style.cssText = 'width:100%;padding:12px;border:none;border-radius:10px;background:var(--ink,#111);color:var(--bg-b,#fff);font-size:14px;font-weight:600';
+    save.addEventListener('click', () => { window.saveBeautyScheme(); });
+    box.appendChild(save);
+    const close = document.createElement('button');
+    close.textContent = '关闭';
+    close.style.cssText = 'width:100%;margin-top:8px;padding:10px;border:1px solid var(--card-border,#eee);border-radius:10px;background:var(--btn-cancel-bg,#fafafa);color:var(--btn-cancel-ink,#555)';
+    close.addEventListener('click', () => hideSchemeModal(m));
+    box.appendChild(close);
+    m.appendChild(box);
+    showSchemeModal(m);
+  };
+  const beautySaveRow = document.getElementById('row-beauty-save');
+  if (beautySaveRow) beautySaveRow.addEventListener('click', () => window.saveBeautyScheme());
+  const beautySchemesRow = document.getElementById('row-beauty-schemes');
+  if (beautySchemesRow) beautySchemesRow.addEventListener('click', () => window.openBeautySchemes());
+
+  // ---- v3.25.x：桌面方案 预览 / 重命名（预览跨 reload 保持，可还原） ----
+  const PREVIEW_BACKUP_KEY = 'beauty-preview-backup';
+  const PREVIEW_NAME_KEY = 'beauty-preview-name';
+  function mkBtn(label, css, fn) {
+    const b = document.createElement('button');
+    b.textContent = label;
+    b.style.cssText = css;
+    b.addEventListener('click', fn);
+    return b;
+  }
+  function beautyPreviewBarEl() {
+    let bar = document.getElementById('beauty-preview-bar');
+    if (!bar) {
+      bar = document.createElement('div'); bar.id = 'beauty-preview-bar';
+      bar.style.cssText = 'position:fixed;left:0;right:0;bottom:0;z-index:96;margin:12px;padding:12px 14px;background:var(--card-bg,#fff);color:var(--ink,#111);border:1px solid var(--card-border,#eee);border-radius:14px;box-shadow:0 8px 30px rgba(0,0,0,.25);display:none;align-items:center;gap:10px';
+      document.body.appendChild(bar);
+    }
+    return bar;
+  }
+  function desktopStartPreview(s, m) {
+    if (!s) return;
+    try {
+      localStorage.setItem(PREVIEW_BACKUP_KEY, JSON.stringify({ data: collectBeautyFull() }));
+      localStorage.setItem(PREVIEW_NAME_KEY, s.name);
+    } catch (e) {}
+    hideSchemeModal(m);
+    applyBeautyData(s.data || {});
+    toast('正在预览「' + s.name + '」…');
+    setTimeout(() => location.reload(), 350);
+  }
+  function renameScheme(idx, m) {
+    const list = getSchemes();
+    const s = list[idx];
+    if (!s || !window.openModal) return;
+    const ctl = window.openModal('编辑方案名称', s.name, (name) => {
+      name = (name || '').trim();
+      if (!name) { ctl.hint('名称不能为空'); ctl.stay(); return; }
+      s.name = name; saveSchemesList(list); toast('已重命名');
+      window.openBeautySchemes();
+    }, { maxlength: 20, placeholder: '输入方案名称' });
+  }
+  // 打开页面时若有进行中的预览，显示浮条（「使用」/「还原」）
+  (function initBeautyPreview() {
+    let backup = null, name = '';
+    try { backup = JSON.parse(localStorage.getItem(PREVIEW_BACKUP_KEY) || 'null'); } catch (e) {}
+    try { name = localStorage.getItem(PREVIEW_NAME_KEY) || ''; } catch (e) {}
+    if (!backup || !backup.data || !name) return;
+    const bar = beautyPreviewBarEl();
+    bar.innerHTML = '';
+    const tx = document.createElement('div'); tx.style.flex = '1'; tx.style.fontSize = '13px';
+    tx.innerHTML = '正在预览「<b>' + name + '</b>」<div style="font-size:11px;color:var(--muted,#999)">点「使用」保存 / 「还原」恢复</div>';
+    const clearP = () => { try { localStorage.removeItem(PREVIEW_BACKUP_KEY); localStorage.removeItem(PREVIEW_NAME_KEY); } catch (e) {} };
+    const re = mkBtn('还原', 'font-size:12px;padding:6px 12px;border:1px solid var(--card-border,#eee);border-radius:8px;background:var(--btn-cancel-bg,#fafafa);color:var(--btn-cancel-ink,#555)', () => {
+      clearP(); applyBeautyData(backup.data); bar.style.display = 'none'; toast('已还原'); setTimeout(() => location.reload(), 350);
+    });
+    const keep = mkBtn('使用这个方案', 'font-size:12px;padding:6px 12px;border:none;border-radius:8px;background:var(--ink,#111);color:var(--bg-b,#fff)', () => {
+      clearP(); bar.style.display = 'none'; toast('已应用「' + name + '」');
+    });
+    bar.appendChild(tx); bar.appendChild(re); bar.appendChild(keep);
+    bar.style.display = 'flex';
+  })();
+
+  // 手机桌面美化页：顶部标签切换分区（颜色/尺寸/背景/图标/方案），互斥显示
+  (function initThemeTabs() {
+    const tabsEl = document.getElementById('them-tabs');
+    const page = document.getElementById('page-theme');
+    if (!tabsEl || !page) return;
+    const tabs = tabsEl.querySelectorAll('.them-tab');
+    const secs = page.querySelectorAll('.them-sec');
+    function show(name) {
+      secs.forEach(s => { s.hidden = (s.dataset.sec !== name); });
+      tabs.forEach(t => { t.classList.toggle('active', t.dataset.tab === name); });
+    }
+    tabs.forEach(t => t.addEventListener('click', () => show(t.dataset.tab)));
+    // 默认显示第一个省区（颜色）
+    show(tabs[0] ? tabs[0].dataset.tab : 'color');
+  })();
 
   // ===== v3.6.x：深色模式（两档手动开关：浅色/深色，不跟随系统） =====
   // 全局设置（不按联系人隔离），存储键 xy-home-v2:theme-mode
@@ -2162,101 +2620,48 @@ try {
   const resetDeskRow = document.getElementById('row-desk-reset');
   if (resetDeskRow) {
     resetDeskRow.addEventListener('click', () => {
-      window.openModal('恢复默认桌面', '将恢复桌面卡片布局与页数，桌面恢复为默认三页（每页已设置的背景图与图标不受影响）。确定继续？', (v) => {
+      // v3.26.x：预选中唯一「确定恢复默认」pill——noInput 弹窗只点底部「确定」时
+      // fire() 传 pillVal=null → 静默不执行（反馈"点了没反应"）。与删除方案同因同修。
+      const ctl = window.openModal('恢复默认桌面', '将恢复桌面卡片布局与页数，桌面恢复为默认三页（每页已设置的背景图与图标不受影响）。确定继续？', (v) => {
         if (v !== '1') return;
-        // v3.10.x 修复：恢复默认后第三页「经期」小组件消失——原先 remove 掉
-        // desk-page-count 后按默认 2 页收缩，静态第三页被整页删除，desk-period
-        // 与 p3apps 一起移进隐藏池；ensureP3 只找回 p3apps（图标组），desk-period
-        // 留在池里不再显示。改为直接恢复为模板默认的 3 页：第三页未被删时
-        // desk-period 原样保留；若此前第三页已被用户删掉（组件在池里），由下方
-        // ensureP3 + 找回逻辑把 desk-period / p3apps 放回重建的第三页。
-        try { store.set('desk-page-count', '3'); } catch (e) {}
-        try { store.remove('desk-layout'); } catch (e) {}
-        buildDeskPages();
-        // v3.11.x 修复：恢复默认后老 desk-layout 里没有的新版组件（如第三页喝水/
-        // 吃什么/同频/番茄钟等动态注入图标）会被 applyDeskLayout 收进隐藏池，
-        // 只保证页数/找回 p3apps/desk-period 仍看不到它们 → 把池中模板默认应有的
-        // 组件逐个找回默认页；仅桌面小组件（desk-clock/calendar/timer/anniv，
-        // 模板本就默认在池中「未添加」）保持原状。
+        // 恢复默认桌面：彻底回到系统默认布局（组件卡片 + 图标位置）。
+        // 旧实现只删 desk-layout 并按隐藏池就地回位，有三处漏洞导致多次复现「没恢复」：
+        // ① 已移动到非默认页的组件不在隐藏池里，不会被挪回；② 图标顺序 app-icon-order-*
+        //   和隐藏图标 hidden-icons 从不清理，图标位置保持自定义；③ desk-layout 只存于
+        //   IndexedDB 时（本地存储被清理的场景）刷新后会被回填还原。
+        // 新做法：清掉「布局 / 页数 / 各网格图标顺序 / 隐藏图标」四类键（store.remove 会同时
+        // 清 memoryCache + localStorage + IndexedDB），随后整页刷新——页面每次加载都由 template
+        // 生成默认 DOM，布局键为空时 applyDeskLayout/图标排序都不重排，即还原成系统默认。
+        // 每页背景图（page-bg-*）与自定义图标图片（app-icon-*）保留，符合提示文案。
+        let dels = [];
         try {
-          var wpool = document.getElementById('desk-widget-pool');
-          if (wpool) {
-            var poolWidgets = Array.prototype.slice.call(wpool.querySelectorAll('[data-desk-widget]')).filter(function (nd) { return nd.parentNode === wpool; });
-            var rslides2 = Array.prototype.slice.call(pagesBox.querySelectorAll('.page-slide'));
-            var rp0 = rslides2[0] || null, rp1 = rslides2[1] || null, rp2 = rslides2[2] || null;
-            var P3GRID = '[data-app="p3"][data-desk-widget="p3apps"]';
-            // 第一遍：整组网格先回位（apps 首页组 / p2apps 第二页组 / p3apps 第三页组）
-            poolWidgets.forEach(function (nd) {
-              var wid = nd.getAttribute('data-desk-widget');
-              if (wid === 'apps' && rp0) rp0.appendChild(nd);
-              else if (wid === 'p2apps' && rp1) rp1.appendChild(nd);
-              else if (wid === 'p3apps' && rp2) rp2.appendChild(nd);
-            });
-            // 第二遍：其余普通组件/图标回默认页
-            poolWidgets.forEach(function (nd) {
-              var wid = nd.getAttribute('data-desk-widget');
-              if (wid === 'apps' || wid === 'p2apps' || wid === 'p3apps') return;
-              if (wid === 'desk-clock' || wid === 'desk-calendar' || wid === 'desk-timer' || wid === 'desk-anniv') return;
-              var tgt;
-              if (wid === 'deco' || wid === 'quote-row' || wid === 'checkin') tgt = rp0;
-              else if (wid === 'music' || wid === 'week' || wid === 'weekend') tgt = rp1;
-              // v3.13.x：memo-row 不在此处回位——下方 setTimeout 统一放到第三页经期卡下方
-              else if (wid === 'memo-row') return;
-              else tgt = rp2;
-              if (!tgt) return;
-              if (wid.indexOf('app-') === 0) {
-                var p3grid = document.querySelector(P3GRID);
-                if (p3grid) p3grid.appendChild(nd);
-                else tgt.appendChild(nd);
-                return;
-              }
-              var p3g2 = document.querySelector(P3GRID);
-              if (rp2 && p3g2 && p3g2.parentNode === rp2) rp2.insertBefore(nd, p3g2);
-              else tgt.appendChild(nd);
+          store.remove('desk-layout');
+          store.set('desk-page-count', '3');
+          document.querySelectorAll('.app-grid').forEach(function (g) {
+            if (g.dataset.app) store.remove('app-icon-order-' + g.dataset.app);
+          });
+          store.remove('hidden-icons');
+          // v3.27.x（华为 Mate 40 Pro+自带浏览器反馈）：store.remove 里的 idbDelete 是异步
+          // fire-and-forget，原 400ms 后 reload 在 IDB 慢/事务挂起的浏览器上删除还没提交，
+          // 新页面 idbRestore 会把旧 desk-layout 从 IDB 回填回来 →「恢复默认没生效」。
+          // 这里显式等 IDB 删除完成（每键 3s 兜底超时）再 reload。
+          if (window.idbDelete) {
+            const P = (window.activePrefix ? window.activePrefix() : 'xy-home-v2:default');
+            dels.push(window.idbDelete(P + ':desk-layout'));
+            dels.push(window.idbDelete(P + ':hidden-icons'));
+            document.querySelectorAll('.app-grid').forEach(function (g) {
+              if (g.dataset.app) dels.push(window.idbDelete(P + ':app-icon-order-' + g.dataset.app));
             });
           }
         } catch (e) {}
-        setTimeout(function () {
-          try { if (window.ensureP3) window.ensureP3(); } catch (e) {}
-          try {
-            var dp = document.querySelector('[data-desk-widget="desk-period"]');
-            var rbox = document.getElementById('desktop-pages');
-            if (dp && rbox && dp.closest && dp.closest('#desk-widget-pool')) {
-              var rslides = rbox.querySelectorAll('.page-slide');
-              var rthird = rslides.length >= 3 ? rslides[2] : null;
-              if (rthird) {
-                var anchor = rthird.querySelector('[data-desk-widget="p3apps"]');
-                if (anchor && anchor.parentNode === rthird) rthird.insertBefore(dp, anchor);
-                else rthird.appendChild(dp);
-              }
-            }
-          } catch (e) {}
-          // v3.13.x：今日备忘/心情行放回第三页「经期卡」下方（p3apps 前）。
-          // 不只看是否在池里——池外但位置不对（如已在页上但被后续找回的经期卡
-          // 插到了前面）也一并校正为「紧跟经期卡之后」。
-          try {
-            var mr = document.querySelector('[data-desk-widget="memo-row"]');
-            var rbox2 = document.getElementById('desktop-pages');
-            if (mr && rbox2) {
-              var rs2 = rbox2.querySelectorAll('.page-slide');
-              var rt2 = rs2.length >= 3 ? rs2[2] : null;
-              if (rt2) {
-                var dp2 = rt2.querySelector('[data-desk-widget="desk-period"]');
-                var okPos = dp2 && dp2.parentNode === rt2 && mr.parentNode === rt2 && mr.previousElementSibling === dp2;
-                if (!okPos) {
-                  if (dp2 && dp2.parentNode === rt2) rt2.insertBefore(mr, dp2.nextSibling);
-                  else {
-                    var an2 = rt2.querySelector('[data-desk-widget="p3apps"]');
-                    if (an2 && an2.parentNode === rt2) rt2.insertBefore(mr, an2);
-                    else rt2.appendChild(mr);
-                  }
-                }
-              }
-            }
-          } catch (e) {}
-        }, 100);
         toast('已恢复默认桌面');
-      }, { noInput: true, pills: [{ label: '确定恢复默认', value: '1' }] });
+        Promise.all(dels.map(function (p) {
+          return Promise.race([p, new Promise(function (r) { setTimeout(r, 3000); })]);
+        })).then(function () {
+          try { location.reload(); } catch (e) {}
+        });
+      }, { noInput: true, pillSubmit: true, pills: [{ label: '确定恢复默认', value: '1' }] });
+      if (ctl && ctl.pills) ctl.pills([{ label: '确定恢复默认', value: '1' }], '1');
     });
   }
   buildDeskPages();
@@ -2435,7 +2840,9 @@ try {
     WIDGET_IDS.forEach(wid => {
       // v3.7.x：apps/p2apps 老兼容——之前 app-grid 没 data-desk-widget，老 layout 不含它们；
       // 加 data-desk-widget 后若按常规移池会把老用户的功能图标藏掉，故跳过池逻辑保持原位
-      if (wid === 'apps' || wid === 'p2apps') return;
+      // v3.26.x：p3apps 同因——第三页图标组（经期/记账/花园/喝水/吃什么/番茄钟）老 layout
+      // 不含它，按常规移池会让第三页整组功能图标消失，故同样跳过池逻辑保持原位
+      if (wid === 'apps' || wid === 'p2apps' || wid === 'p3apps') return;
       const node = document.querySelector('[data-desk-widget="' + wid + '"]');
       if (!node) return;
       // v3.7.x：单个功能图标仍在 app-grid 内（未被移出）时跳过池逻辑，保持原位
@@ -3330,14 +3737,16 @@ try {
     });
   }
 
-  // ===== v3.x：桌面长按拖拽重排（移动模式，复用 decor-on + desk-layout/app-icon-order） =====
-  // 长按图标/组件 350ms → 进入移动模式（抖动可拖拽）→ 拖动跟手 → 释放重排 + 持久化
+  // ===== v3.x：桌面拖拽重排（移动模式，复用 decor-on + desk-layout/app-icon-order） =====
+  // v3.27.x：移除「非移动模式长按 350ms 自动进移动模式+拖拽」入口——用户反馈日常点按
+  // 图标长按即误触进移动模式、图标被拖乱（要求「固定一行 4 个」不被打乱）。拖动排序
+  // 仅保留主动入口：装饰模式（设置→自定义桌面图标）→「编辑布局」→ 移动模式（短按即拖）。
   // 参考 chatcard.js pointer 拖拽；跨页拖到边缘 300ms 自动翻页（window.deskGo）
   // 图标限本 app-grid 内换位（持久化 app-icon-order）；独立组件可跨页（持久化 desk-layout）
   {
     const phone = document.getElementById('page-phone');
     const MOVE_DELAY = 350, EDGE = 44, EDGE_DELAY = 300;
-    let pressTimer = null, startX = 0, startY = 0, inMoveMode = false, dragging = false;
+    let inMoveMode = false, dragging = false;
     const enterMoveMode = () => {
       if (inMoveMode) return;
       inMoveMode = true;
@@ -3400,29 +3809,21 @@ try {
       if (e.target.closest('.desk-lib, .desk-page-add, .decor-bar')) return;
       const target = e.target.closest('[data-desk-widget], .app');
       if (!target) return;
-      startX = e.clientX; startY = e.clientY;
+      // v3.27.x：非移动模式不再有长按入口——日常点按/长按图标无副作用（点击照常），
+      // 拖动排序只走「装饰模式→编辑布局」主动入口。下方逻辑仅在 inMoveMode 时生效。
+      if (!inMoveMode) return;
       const t = target;
       // 移动模式已开启：区分「快速横滑翻页」与「长按/短按拖拽」——组件 touch-action:none
       // 时浏览器不会自动滚动，手指快速横滑由 JS 判为翻页（v3.14.x：修复移动/装修模式桌面
       // 滑不动）。记录按下时刻：短按后立即横向位移>12px → 翻页；长按超过 MOVE_DELAY（按住
       // 不动）或纵向位移为主 → 拖拽。这样长按图标拖动仍可拖（长按超时后移动不被判横滑）。
-      if (inMoveMode) {
-        t._swipeX = e.clientX; t._swipeY = e.clientY;
-        t._swipeT = Date.now();
-        t._swiping = null;
-        return; // 等 pointermove 判定方向
-      }
-      // 非移动模式：长按 350ms 进入移动模式 + 开始拖拽（兼容旧入口）
-      pressTimer = setTimeout(() => {
-        pressTimer = null;
-        enterMoveMode();
-        startDeskDrag(e, t);
-      }, MOVE_DELAY);
+      t._swipeX = e.clientX; t._swipeY = e.clientY;
+      t._swipeT = Date.now();
+      t._swiping = null;
+      return; // 等 pointermove 判定方向
     });
     pagesBox.addEventListener('pointermove', (e) => {
-      if (pressTimer && (Math.abs(e.clientX - startX) > 10 || Math.abs(e.clientY - startY) > 10)) {
-        clearTimeout(pressTimer); pressTimer = null;
-      }
+      // v3.27.x：非移动模式长按入口已移除，pressTimer 位移取消逻辑随之删除
       // 移动模式下的横滑翻页判定：手指按下但未进入拖拽（_swiping 未定）时判定方向
       if (inMoveMode && !dragging) {
         const t = e.target.closest ? e.target.closest('[data-desk-widget], .app') : null;
@@ -3435,34 +3836,17 @@ try {
             return;
           }
           if (Math.abs(dx) > 12 || Math.abs(dy) > 12) {
-            if (Math.abs(dx) > Math.abs(dy) * 1.5) {
-              // 短按后立即横向位移为主 → 翻页手势（组件上快速横滑翻页），不进入拖拽
-              t._swiping = 'h';
-            } else {
-              // 纵向为主 → 立即开始拖拽（短按即拖）
-              t._swiping = 'v';
-              startDeskDrag(e, t);
-            }
-          }
-        }
-        // 已判为横滑：跟手更新，但不动 scrollLeft（松手时 deskGo 吸附翻页）
-        if (t && t._swiping === 'h' && window.deskIdx) {
-          const dx = e.clientX - t._swipeX;
-          if (Math.abs(dx) > 46) {
-            const slides = pagesBox.querySelectorAll('.page-slide').length;
-            const cur = window.deskIdx();
-            const dir = dx < 0 ? 1 : -1; // 左滑下一页
-            if (cur + dir >= 0 && cur + dir < slides) {
-              if (window.deskGo) window.deskGo(cur + dir);
-              t._swiping = 'done';
-            }
+            // v3.27.x（华为 Mate 40 Pro+自带浏览器反馈）：移动模式（编辑布局）下图标/组件上
+            // 任意方向滑动都直接拖拽——原「横向位移为主→翻页」把横向拖动抢成翻页，导致图标
+            // 只能竖着换行、无法横向放置。移动模式翻页由「空白处原生滚动（.desk-move-mode
+            // 容器 touch-action:pan-x pan-y）+ 拖到屏幕边缘自动翻页」承担，JS 横滑翻页冗余。
+            t._swiping = 'v';
+            startDeskDrag(e, t);
           }
         }
       }
     });
-    const cancelPress = () => { if (pressTimer) { clearTimeout(pressTimer); pressTimer = null; } };
-    pagesBox.addEventListener('pointerup', cancelPress);
-    pagesBox.addEventListener('pointercancel', cancelPress);
+    // v3.27.x：pressTimer/cancelPress 已随长按入口移除（pointerdown 仅移动模式生效）
     // v3.14.x：移动模式下横滑判定结束/取消时清理（避免残留 _swiping 状态）
     const clearSwipe = (e) => {
       const t = e.target.closest ? e.target.closest('[data-desk-widget], .app') : null;
@@ -3535,23 +3919,21 @@ try {
         if (edgeTimer) { clearTimeout(edgeTimer); edgeTimer = null; }
         edgeL.classList.remove('show'); edgeR.classList.remove('show'); edgeDir = 0;
       };
-      const inGrid = !!el.closest('.app-grid');
+      // v3.23.x：小图标（.app-grid 内）拖到屏幕边缘同样自动翻页——跨页移动的前提
       const onMove = (ev) => {
         ev.preventDefault();
         clone.style.left = (ev.clientX - offsetX) + 'px';
         clone.style.top = (ev.clientY - offsetY) + 'px';
-        if (!inGrid) {
-          const w = window.innerWidth;
-          const slides = pagesBox.querySelectorAll('.page-slide').length;
-          const cur = window.deskIdx ? window.deskIdx() : 0;
-          if (ev.clientX < EDGE && cur > 0) {
-            edgeL.classList.add('show');
-            if (edgeDir !== -1) { edgeDir = -1; if (edgeTimer) clearTimeout(edgeTimer); edgeTimer = setTimeout(() => { if (window.deskGo) window.deskGo(cur - 1); }, EDGE_DELAY); }
-          } else if (ev.clientX > w - EDGE && cur < slides - 1) {
-            edgeR.classList.add('show');
-            if (edgeDir !== 1) { edgeDir = 1; if (edgeTimer) clearTimeout(edgeTimer); edgeTimer = setTimeout(() => { if (window.deskGo) window.deskGo(cur + 1); }, EDGE_DELAY); }
-          } else { clearEdge(); }
-        }
+        const w = window.innerWidth;
+        const slides = pagesBox.querySelectorAll('.page-slide').length;
+        const cur = window.deskIdx ? window.deskIdx() : 0;
+        if (ev.clientX < EDGE && cur > 0) {
+          edgeL.classList.add('show');
+          if (edgeDir !== -1) { edgeDir = -1; if (edgeTimer) clearTimeout(edgeTimer); edgeTimer = setTimeout(() => { if (window.deskGo) window.deskGo(cur - 1); }, EDGE_DELAY); }
+        } else if (ev.clientX > w - EDGE && cur < slides - 1) {
+          edgeR.classList.add('show');
+          if (edgeDir !== 1) { edgeDir = 1; if (edgeTimer) clearTimeout(edgeTimer); edgeTimer = setTimeout(() => { if (window.deskGo) window.deskGo(cur + 1); }, EDGE_DELAY); }
+        } else { clearEdge(); }
         dropInfo = computeDrop(el, ev.clientX, ev.clientY);
         updateDropLine(dropInfo);
       };
@@ -3573,24 +3955,34 @@ try {
       document.addEventListener('pointercancel', onUp);
     }
 
+    function gridDropInfo(grid, dragged, clientX, clientY) {
+      const apps = Array.prototype.slice.call(grid.querySelectorAll('.app'))
+        .filter(a => a !== dragged && a.style.display !== 'none' && !a.hidden);
+      for (const a of apps) {
+        const r = a.getBoundingClientRect();
+        if (clientX < r.left + r.width / 2 && clientY < r.top + r.height / 2) {
+          return { type: 'grid', grid: grid, ref: a, before: true };
+        }
+      }
+      for (const a of apps) {
+        const r = a.getBoundingClientRect();
+        if (clientY < r.bottom) return { type: 'grid', grid: grid, ref: a, before: false };
+      }
+      if (apps.length) return { type: 'grid', grid: grid, ref: apps[apps.length - 1], before: false };
+      // v3.23.x：空网格返回 ref:null（配合 doDrop append），原实现返回 null=整格不可落
+      return { type: 'grid', grid: grid, ref: null, before: false };
+    }
     function computeDrop(dragged, clientX, clientY) {
       const inGrid = !!dragged.closest('.app-grid');
       if (inGrid) {
         const grid = dragged.closest('.app-grid');
-        const apps = Array.prototype.slice.call(grid.querySelectorAll('.app'))
-          .filter(a => a !== dragged && a.style.display !== 'none' && !a.hidden);
-        for (const a of apps) {
-          const r = a.getBoundingClientRect();
-          if (clientX < r.left + r.width / 2 && clientY < r.top + r.height / 2) {
-            return { type: 'grid', grid: grid, ref: a, before: true };
-          }
-        }
-        for (const a of apps) {
-          const r = a.getBoundingClientRect();
-          if (clientY < r.bottom) return { type: 'grid', grid: grid, ref: a, before: false };
-        }
-        if (apps.length) return { type: 'grid', grid: grid, ref: apps[apps.length - 1], before: false };
-        return null;
+        // v3.23.x：跨页——贴边翻页后当前页（deskIdx 立即更新）与图标原页不同，
+        // 落点改算【目标页网格】，返回 grid 型落点（doDrop 会把图标挪入该网格）
+        const slides = Array.prototype.slice.call(pagesBox.querySelectorAll('.page-slide'));
+        const curIdx = Math.max(0, Math.min(slides.length - 1, window.deskIdx ? window.deskIdx() : 0));
+        const curGrid = slides[curIdx] ? slides[curIdx].querySelector('.app-grid') : null;
+        if (curGrid && curGrid !== grid) return gridDropInfo(curGrid, dragged, clientX, clientY);
+        return gridDropInfo(grid, dragged, clientX, clientY);
       }
       const slides = Array.prototype.slice.call(pagesBox.querySelectorAll('.page-slide'));
       // 用 deskIdx()（go() 立即更新）而非 scrollLeft——翻页中途 scrollLeft 在两页之间会算错页
@@ -3634,6 +4026,8 @@ try {
 
     function doDrop(dragged, info) {
       if (info.type === 'grid') {
+        // v3.23.x：跨页移动——目标网格不是图标当前网格时先挪入目标网格（空网格 append）
+        if (dragged.parentNode !== info.grid) info.grid.appendChild(dragged);
         if (info.ref && dragged !== info.ref) {
           if (info.before) info.grid.insertBefore(dragged, info.ref);
           else info.grid.insertBefore(dragged, info.ref.nextSibling);
@@ -3732,6 +4126,17 @@ try {
     if (!el) return;
     const text = (window.getQuoteOfDay && window.getQuoteOfDay()) || '我偏爱你。';
     el.textContent = window.taFit ? window.taFit(text) : text;
+    // v3.25.x：3 行（45px 盒）仍放不下时逐级缩字号（13→10px 下限），尽量卡内显示全文；
+    // 超过 10px 也装不下的极端长句保留省略号（完整内容日历页按天可查）。
+    // rAF 等一帧布局稳定后再量，避免启动早期量到 0 高。
+    requestAnimationFrame(function () {
+      var fs = 13;
+      el.style.fontSize = fs + 'px';
+      while (el.scrollHeight > el.clientHeight + 1 && fs > 10) {
+        fs -= 0.5;
+        el.style.fontSize = fs + 'px';
+      }
+    });
     // 今日情话存档：每天一条，全部历史保存在主页（同一天不重复）
     try {
       const today = fishToday();
@@ -4411,6 +4816,332 @@ try {
       if (setPage) setPage.hidden = false;
     });
   }
+
+  // ===== v3.26.x：查看存储——看全站功能占用空间 + 手动清理错误诊断记录 =====
+  // 用户反馈「存储已用 1.x GB」：这里把 localStorage + IndexedDB 按功能归类展示占用，
+  // 并提供「清理错误诊断记录」一键清掉诊断缓存（__diag-*）。只读统计 + 定向清理，
+  // 不提供清业务数据（避免误删聊天记录等关键内容）。统计为异步（IDB 逐键读体积），
+  // 打开页面时先渲染 localStorage，IndexedDB 边读边补齐。
+  (function () {
+    const page = document.getElementById('page-storage');
+    if (!page) return;
+    const row = document.getElementById('row-storage-view');
+    const back = document.getElementById('storage-back');
+    const G = 'xy-home-v2:';
+    const DIAG_KEYS = [
+      'xy-home-v2:__diag-errs',
+      'xy-home-v2:__diag-errs-seen',
+      'xy-home-v2:__diag-env',
+      'xy-home-v2:__diag-lt',
+      'xy-home-v2:__diag-net',
+      'xy-home-v2:__diag-tap'
+    ];
+    // v3.26.x：自动备份快照（副本）体积统计：split 成 LS 贡献 + IDB 贡献，汇总后显示和提示
+    let snapLs = 0, snapIdb = 0, snapText = '(统计中)';
+    // v3.26.x：IndexedDB 扫描是否完成——完成前禁止删除按钮且显示「统计中…」，防止"打开即点删/删完没落库"拿错数字或多扫到旧快照
+    let idbDone = false;
+
+    function fmtBytes(n) {
+      if (n == null || isNaN(n)) return '(未知)';
+      if (n >= 1048576) return (n / 1048576).toFixed(1) + ' MB';
+      if (n >= 1024) return (n / 1024).toFixed(1) + ' KB';
+      return n + ' B';
+    }
+    // 键名（去掉 xy-home-v2: 前缀，可能带 cid 命名空间）→ 功能分类
+    function catOf(tail) {
+      if (!tail) return '其他';
+      // —— 全局系统 / 诊断 / 索引前缀（无 cid 命名空间）——
+      if (tail.indexOf('__diag-') === 0) return '错误诊断记录';
+      if (tail.indexOf('music-file:') >= 0) return '本地音乐';
+      if (tail.indexOf('__auto-backup-snapshot') >= 0) return '自动备份快照';
+      // v3.26.x：__last-backup 只是"最近导出时间"小键，不再是副本体积；归到系统设置，
+      // 让「自动备份快照」分类只精确反映副本键，删除后该分类能真正归零
+      if (tail.indexOf('__last-backup') >= 0 || tail.indexOf('__last-backup-remind') >= 0) return '系统设置';
+      if (tail.indexOf('psync-') >= 0) return '后台同步缓存';
+      if (tail.indexOf('__big-idx') >= 0 || tail.indexOf('__ls-dirty') >= 0) return '数据索引';
+      if (/^(__layout-pref|ver-update-ack-ts|__edge-backup-hint-done|__quota_probe__)$/.test(tail)) return '系统设置';
+      if (/^(contacts|active-contact|migrated-v1)$/.test(tail)) return '联系人/桌面';
+      // 根键里的「功能:子键」多段名（无 cid 前缀），先于 cid 剥离判断
+      if (/^incoming-last:/.test(tail)) return '查岗/TA互动';
+      // 剥离第一段 cid 命名空间（如 default:xxx、<cid>:xxx）
+      const m = /^(?:[^:]+:)?(.*)$/.exec(tail);
+      const base = m ? m[1] : tail;
+      // —— 聊天 / 群聊 ——
+      if (base === 'chat-msgs') return '聊天记录';
+      if (base === 'group-chat-msgs') return '群聊记录';
+      // —— 备忘录（必须在日历 memo- 规则之前）——
+      if (/^memo-app-/.test(base)) return '备忘录';
+      // —— 聊天设置全局键 ——
+      if (base === 'reply-settings' || base === 'chat-settings') return '聊天设置';
+      // —— 查岗 / TA 互动 ——
+      if (/^(ta-checkin|checkin-|ckq-|incoming-|desk-checkin-en|desk-call-en|desk-freq-mode|ta-ask|ta-invite|ti-last-id|ta-cc-state|interact-card-last|invite-ask-history|reply-gc-)/.test(base)) return '查岗/TA互动';
+      // —— 定位 / 轨迹 ——
+      if (/^(loc-|loc-lib-|loc-sense)/.test(base)) return '定位/轨迹';
+      // —— 日历 / 每日留言 / 心情 ——
+      if (/^(cal-|first-use-date|quote-history|memo-|today-mood-|mood-history|memo-history|day-fish-|day-work-)/.test(base)) return '日历/每日留言';
+      // —— 字卡 / 回复 / 收藏 / 拍一拍 / 表情 ——
+      if (/^(cc-groups|cc-groups-public|default-cards|quote-cards|reply-|fav-|ta-mood|poke-|emoji-|my-emoji-groups|rps-score|mh-|rc-enabled|mc-enabled|chat-count)/.test(base)) return '字卡/回复/收藏';
+      // —— 各业务功能 ——
+      if (/^divine-/.test(base)) return '占卜';
+      if (/^mail-/.test(base)) return '信箱';
+      if (/^feed-/.test(base)) return '朋友圈';
+      if (/^(records-|anniversary|myarc|myarc-cur)/.test(base)) return '纪念/统计/档案';
+      if (/^(decision-|gdec-)/.test(base)) return '帮我决定';
+      if (/^accounting-/.test(base)) return '记账';
+      if (/^period-/.test(base)) return '经期';
+      if (/^(garden-|plant-)/.test(base)) return '花园';
+      if (base === 'room-data') return '房间';
+      if (/^drift-/.test(base)) return '漂流瓶';
+      if (/^(gift-|giftbox|rp-|market-|wallet)/.test(base)) return '礼物/红包';
+      if (/^cjian-/.test(base)) return '梦角档案';
+      if (/^fishing-/.test(base)) return '钓鱼';
+      if (/^(brick-|c4-|ms-|ml2_coin|pong-|snake-|memory-|breakout-)/.test(base)) return '小游戏';
+      if (/^music-/.test(base)) return '音乐';
+      // —— 形象 / 设置 / 外观 / 通话 ——
+      if (/^(avatar-|cs-avatar-|lbl-)/.test(base)) return '头像/昵称';
+      if (/^(cs-|sysmsg-|more-|desk-msg-en|chat-unread|hide-ta-sticker)/.test(base)) return '聊天设置';
+      if (/^(phone-bg|page-bg|card-bg|desk-bg|desk-image-src-|chat-bg|wallpaper|widget-|bg-blur|bg-mask-op|beauty-|chat-beauty-schemes|theme-mode|accent-color|desk-images|desk-texts|desk-countdowns)/.test(base)) return '桌面美化/壁纸';
+      if (/^(call-|sfx-)/.test(base)) return '通话/音效';
+      if (/^(fullscreen-|fs-edge-guard)/.test(base)) return '全屏';
+      if (/^(bg-keepalive|bg-notify)/.test(base)) return '后台保持/通知';
+      return '设置与其他';
+    }
+    function lsStats() {
+      const cats = {};
+      let total = 0, count = 0;
+      try {
+        for (let i = 0; i < localStorage.length; i++) {
+          const k = localStorage.key(i);
+          if (!k || k.indexOf(G) !== 0) continue;
+          const sz = (k.length + String(localStorage.getItem(k) || '').length) * 2;
+          total += sz; count++;
+          const c = catOf(k.slice(G.length));
+          if (!cats[c]) cats[c] = { n: 0, size: 0, keys: [] };
+          cats[c].n++; cats[c].size += sz;
+          if (cats[c].keys.length < 20) cats[c].keys.push(k);
+        }
+      } catch (e) {}
+      return { cats: cats, total: total, count: count };
+    }
+    // IndexedDB：列出键后分批读取体积（用 idbGetMany 批量事务，比逐键快得多；
+    // Blob/ArrayBuffer 只取 size 不读数据，字符串读完即弃，峰值内存=最大单键）
+    function idbStats(onProgress, cb) {
+      if (!window.idbGetAllKeys) { cb(null); return; }
+      window.idbGetAllKeys().then(function (keys) {
+        const cats = {};
+        const list = (keys || []).filter(function (k) { return String(k || '').indexOf(G) === 0; });
+        list.forEach(function (k) {
+          const c = catOf(String(k).slice(G.length));
+          if (!cats[c]) cats[c] = { n: 0, size: 0, keys: [] };
+          cats[c].n++;
+          if (cats[c].keys.length < 20) cats[c].keys.push(String(k));
+        });
+        const measure = function (v) {
+          let sz = 0;
+          try {
+            if (v instanceof Blob) sz = v.size;
+            else if (v instanceof ArrayBuffer) sz = v.byteLength;
+            else if (typeof v === 'string') sz = v.length * 2;
+            else if (v !== undefined && v !== null) sz = JSON.stringify(v).length * 2;
+          } catch (e) { sz = 0; }
+          return sz;
+        };
+        if (!window.idbGetMany) { cb({ cats: cats, count: list.length, total: 0 }); return; }
+        const BATCH = 80;
+        let pos = 0, total = 0, done = 0;
+        function nextBatch() {
+          if (pos >= list.length) { cb({ cats: cats, count: list.length, total: total }); return; }
+          const batch = list.slice(pos, pos + BATCH);
+          pos += batch.length;
+          window.idbGetMany(batch).then(function (map) {
+            batch.forEach(function (k) {
+              const sz = measure(map[k]);
+              const c = catOf(String(k).slice(G.length));
+              if (cats[c]) cats[c].size += sz;
+              total += sz;
+            });
+            done += batch.length;
+            try { if (onProgress) onProgress(done, list.length); } catch (e) {}
+            setTimeout(nextBatch, 0);
+          }).catch(function () { done += batch.length; setTimeout(nextBatch, 0); });
+        }
+        setTimeout(nextBatch, 0);
+      }).catch(function () { cb(null); });
+    }
+    function renderCatTable(lsCats, idbCats) {
+      const el = document.getElementById('st-cat');
+      if (!el) return;
+      const all = {};
+      const add = function (map) {
+        if (!map) return;
+        Object.keys(map).forEach(function (c) {
+          if (!all[c]) all[c] = { n: 0, size: 0, keys: [] };
+          all[c].n += map[c].n; all[c].size += map[c].size;
+          (map[c].keys || []).forEach(function (kk) { if (all[c].keys.length < 20) all[c].keys.push(kk); });
+        });
+      };
+      add(lsCats); add(idbCats);
+      const rows = Object.keys(all).map(function (c) {
+        return { name: c, n: all[c].n, size: all[c].size, keys: all[c].keys };
+      }).sort(function (a, b) { return b.size - a.size; });
+      el.innerHTML = '';
+      if (!rows.length) { el.innerHTML = '<div class="storage-hint">暂未统计到数据。</div>'; return; }
+      rows.forEach(function (r) {
+        const d = document.createElement('div');
+        d.className = 'storage-cat-row' + (r.keys && r.keys.length ? ' has-keys' : '') + (r.name === '自动备份快照' ? ' snap' : '');
+        d.innerHTML = '<div class="storage-cat-line"><span class="storage-cat-name"></span><span class="storage-cat-num"></span><span class="storage-cat-size"></span></div>';
+        d.querySelector('.storage-cat-name').textContent = r.name;
+        d.querySelector('.storage-cat-num').textContent = r.n + ' 键';
+        d.querySelector('.storage-cat-size').textContent = fmtBytes(r.size);
+        if (r.keys && r.keys.length) {
+          const sub = document.createElement('div');
+          sub.className = 'storage-cat-keys';
+          sub.textContent = r.keys.join('、');
+          d.appendChild(sub);
+        }
+        el.appendChild(d);
+      });
+    }
+    function diagSummary() {
+      let items = 0, bytes = 0, errs = 0;
+      try {
+        DIAG_KEYS.forEach(function (k) {
+          const v = localStorage.getItem(k);
+          if (v) { items++; bytes += (k.length + v.length) * 2; }
+        });
+        const o = JSON.parse(localStorage.getItem(DIAG_KEYS[0]) || '[]');
+        if (Array.isArray(o)) errs = o.length;
+      } catch (e) {}
+      return { items: items, bytes: bytes, errs: errs };
+    }
+    function renderDiagCount() {
+      const el = document.getElementById('st-err');
+      if (!el) return;
+      const d = diagSummary();
+      el.textContent = (d.items ? d.items + ' 项缓存' : '无缓存') + (d.errs ? ' · ' + d.errs + ' 条错误' : '') + (d.items ? ' · 约 ' + fmtBytes(d.bytes) : '');
+    }
+    // v3.26.x：自动备份快照 = LS + IDB 两处之和；同步刷新「当前快照大小」、顶部警示和删除按钮。
+    // IndexedDB 未扫完则按钮禁用并显示「统计中…」，避免打开页面瞬间就点删除拿到不准的数字；
+    // 扫描完成后若快照存在则启用按钮（自愈：删除后又重新导出重建了快照，也能再次删除）。
+    function renderSnap() {
+      const size = (snapLs || 0) + (snapIdb || 0);
+      snapText = size ? fmtBytes(size) : '(无)';
+      const el = document.getElementById('st-snap');
+      if (el) el.textContent = idbDone ? (snapText + (size ? '（一份完整副本）' : '')) : '统计中…';
+      const hintEl = document.getElementById('st-snap-hint');
+      if (hintEl) hintEl.style.display = (idbDone && size) ? 'block' : 'none';
+      const btn = document.getElementById('st-clear-snap');
+      if (btn) {
+        btn.disabled = !(idbDone && size > 0);
+        btn.textContent = !idbDone ? '统计中…' : (size > 0 ? '删除自动备份快照（释放空间）' : '（暂无自动备份快照）');
+      }
+    }
+    function renderStorage() {
+      const quotaEl = document.getElementById('st-quota');
+      if (quotaEl && navigator.storage && navigator.storage.estimate) {
+        navigator.storage.estimate().then(function (r) {
+          if (quotaEl) quotaEl.textContent = '已用 ' + fmtBytes(r && r.usage) + ' / 共 ' + fmtBytes(r && r.quota);
+        }).catch(function () { if (quotaEl) quotaEl.textContent = '读取失败'; });
+      } else if (quotaEl) quotaEl.textContent = '接口不可用';
+      const ls = lsStats();
+      const lsEl = document.getElementById('st-ls');
+      if (lsEl) lsEl.textContent = fmtBytes(ls.total) + '（' + ls.count + ' 键）';
+      const idbEl = document.getElementById('st-idb');
+      if (idbEl) idbEl.textContent = '统计中…';
+      // 重新开始一次完整扫描：先标记未完成，按钮回到「统计中…」禁用态，扫完再启用
+      idbDone = false;
+      // 先渲染 localStorage 明细，IndexedDB 异步补齐
+      renderCatTable(ls.cats, null);
+      snapLs = (ls.cats['自动备份快照'] || {}).size || 0;
+      snapIdb = 0;
+      renderSnap();
+      idbStats(function (done, totalN) {
+        if (idbEl) idbEl.textContent = '统计中…（' + done + '/' + totalN + '）';
+      }, function (res) {
+        if (idbEl) idbEl.textContent = res ? fmtBytes(res.total) + '（' + res.count + ' 键）' : '不可用';
+        snapIdb = (res && res.cats && res.cats['自动备份快照'] || {}).size || 0;
+        idbDone = true;
+        renderSnap();
+        renderCatTable(ls.cats, res ? res.cats : null);
+      });
+      renderDiagCount();
+    }
+    function clearDiag() {
+      DIAG_KEYS.forEach(function (k) {
+        try { localStorage.removeItem(k); } catch (e) {}
+        try { if (window.idbDelete) window.idbDelete(k); } catch (e) {}
+      });
+      // 诊断角标归零（device.js 暴露的刷新接口）
+      try { if (window.mochiRefreshDiagBadge) window.mochiRefreshDiagBadge(); } catch (e) {}
+      renderDiagCount();
+      try { if (typeof toast === 'function') toast('错误诊断记录已清理'); } catch (e) {}
+    }
+    // v3.26.x：删除自动备份快照（副本，仅删这一份备份，真实数据全部保留）
+    async function deleteSnapshot() {
+      const k = 'xy-home-v2:__auto-backup-snapshot';
+      try { localStorage.removeItem(k); } catch (e) {}
+      // 等 IDB 删除事务落库后再重扫，避免刚删完又扫到旧快照显示"没删掉"
+      try { if (window.idbDelete) await window.idbDelete(k); } catch (e) {}
+      snapLs = 0; snapIdb = 0; idbDone = true;
+      const el = document.getElementById('st-snap');
+      if (el) el.textContent = '(已删除)';
+      renderSnap();
+      renderStorage();
+      try { if (typeof toast === 'function') toast('自动备份快照已删除，空间已释放'); } catch (e) {}
+    }
+    const clearBtn = document.getElementById('st-clear-err');
+    if (clearBtn) {
+      clearBtn.addEventListener('click', function () {
+        if (window.openModal) {
+          window.openModal('确认清理错误诊断记录？', '', function () {
+            clearDiag();
+          }, {
+            noInput: true,
+            staticText: '将删除最近错误、环境变化、长任务卡顿、网络失败、交互轨迹等诊断缓存（__diag-*）。清理后诊断角标归零，不影响聊天、字卡、头像、音乐等任何业务数据。'
+          });
+        } else {
+          clearDiag();
+        }
+      });
+    }
+    // v3.26.x：删除自动备份快照按钮——二次确认后才删（只删副本，真实数据无损）
+    const snapBtn = document.getElementById('st-clear-snap');
+    if (snapBtn) {
+      snapBtn.addEventListener('click', function () {
+        if (window.openModal) {
+          window.openModal('删除自动备份快照？', '', function () { deleteSnapshot(); }, {
+            noInput: true,
+            staticText: '自动备份快照是全部数据的一份完整副本（当前约 ' + snapText + '，约占近一半空间）。\n删除它不会影响聊天、字卡、头像、音乐等任何真实数据，可立即释放约 ' + snapText + ' 的空间。\n注意：下次你再「导出数据」时会自动重建这份快照。'
+          });
+        } else {
+          deleteSnapshot();
+        }
+      });
+    }
+    if (row) {
+      row.addEventListener('click', function () {
+        document.querySelectorAll('.page').forEach(function (p) { p.hidden = true; });
+        page.hidden = false;
+        renderStorage();
+      });
+    }
+    if (back) {
+      back.addEventListener('click', function () {
+        document.querySelectorAll('.page').forEach(function (p) { p.hidden = true; });
+        const setPage = document.getElementById('page-setting');
+        if (setPage) setPage.hidden = false;
+      });
+    }
+    // 点击分类行展开/收起该分类下的存储键名（事件委托，行是动态渲染的）
+    const stCat = document.getElementById('st-cat');
+    if (stCat) {
+      stCat.addEventListener('click', function (ev) {
+        const row = ev.target && ev.target.closest ? ev.target.closest('.storage-cat-row.has-keys') : null;
+        if (!row) return;
+        row.classList.toggle('open');
+      });
+    }
+  })();
 
   // 通话设置：点设置行 → 全屏设置页
   const callSettingsRow = document.getElementById('row-call-settings');

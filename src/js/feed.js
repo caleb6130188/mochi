@@ -12,7 +12,9 @@
   // 副本一次性搬回根命名空间（根键已有值不覆盖，搬完删副本），幂等；等 restore-done
   // 后跑（大键已从 IDB 回填再搬，避免读到空）。EXCLUDE 已补，此后不会再产生新滞留。
   (function feedRootRescue() {
-    const KEYS = ['feed-notices', 'feed-app-unread', 'feed-cover-bg', 'feed-ta-cover', 'feed-ta-name', 'feed-ta-avatar', 'feed-user-name', 'feed-user-avatar', 'feed-last', 'feed-next', 'feed-day-count'];
+    // v3.25.x：feed-last/feed-next/feed-day-count 不在此列——它们是【按联系人桌面】
+    // 独立存取的 TA 发帖调度状态（见 deskSchedRescue 与 maybeAutoPostFor），不是全局共享键
+    const KEYS = ['feed-notices', 'feed-app-unread', 'feed-cover-bg', 'feed-ta-cover', 'feed-ta-name', 'feed-ta-avatar', 'feed-user-name', 'feed-user-avatar'];
     function run() {
       try {
         const root = window.xyStore('xy-home-v2');
@@ -28,6 +30,39 @@
             try { def.remove(k); } catch (e) {}
           }
         });
+        // v3.25.x：TA 发帖调度键反向归位（修复用户反馈「回复设置里设了联系人每天最多发
+        // N 条朋友圈，联系人照样无限发」）——上面 KEYS 的回收逻辑曾把 default 桌面命名
+        // 空间里的这三个键当滞留旧键搬去根键并删本地副本（根键已有值时更是直接删副本），
+        // 而它们自 v3.7.x 起只按 storeFor(cid) 存取、根命名空间没有任何读取方 →
+        // 主联系人的「今日已发条数 + 上次发帖时间 + 下次间隔」每次刷新清零，日上限和
+        // 发帖间隔对 default 桌面完全失效（其他联系人桌面正常，表现为「只有默认桌面的
+        // TA 无限发」）。改为一次性归位：default 缺值时把根键历史值搬回 default，随后
+        // 删根键（无读取方，留着只会被反复回收），幂等。
+        (function deskSchedRescue() {
+          const today = feedToday();
+          ['feed-last', 'feed-next', 'feed-day-count'].forEach(function (k) {
+            let rv = null, dv = null;
+            try { rv = root.get(k); } catch (e) {}
+            if (rv === null || rv === undefined || rv === '') return;
+            try { dv = def.get(k); } catch (e) {}
+            if (dv === null || dv === undefined || dv === '') {
+              try { def.set(k, rv); } catch (e) {}
+            } else if (k === 'feed-day-count') {
+              // 两边都有值 = 归位前 default 已被本轮调度写过一条——保守取「今天已发条数」
+              // 较大者（宁多少发，不可无限重发）；非今天的陈旧根键值直接丢弃
+              try {
+                const ro = JSON.parse(rv), dfo = JSON.parse(dv);
+                const rn = ro && ro.t === today ? (ro.n || 0) : -1;
+                const dn = dfo && dfo.t === today ? (dfo.n || 0) : -1;
+                if (rn > dn) def.set(k, rv);
+              } catch (e) {}
+            } else if (k === 'feed-last') {
+              // 上次发帖时间取更近的一次（feed-next 与该时间配对，保留 default 现用值）
+              try { if (parseFloat(rv) > parseFloat(dv)) def.set(k, rv); } catch (e) {}
+            }
+            try { root.remove(k); } catch (e) {}
+          });
+        })();
         try { renderNoticeBadge(); } catch (e) {}
       } catch (e) {}
     }
@@ -65,7 +100,7 @@
     c.authorAv = '';
     c.taAv = '';
     if (typeof c.content === 'string') {
-      c.content = c.content.replace(/data:image\/[a-zA-Z0-9.+-]+;base64,[A-Za-z0-9+/=]+/g, '[图片]');
+      c.content = c.content.replace(/data:image\/[a-zA-Z0-9.+-]+(?:;[a-zA-Z0-9.+-]*(?:=[^;,]*)?)*,[^\s"'<>]+/g, '[图片]');
       if (c.content.length > 8192) c.content = c.content.slice(0, 8192) + '…';
     }
     if (Array.isArray(c.comments)) {
@@ -73,7 +108,7 @@
         if (!co || typeof co !== 'object') return co;
         const cc = Object.assign({}, co);
         if (typeof cc.content === 'string') {
-          cc.content = cc.content.replace(/data:image\/[a-zA-Z0-9.+-]+;base64,[A-Za-z0-9+/=]+/g, '[图片]');
+          cc.content = cc.content.replace(/data:image\/[a-zA-Z0-9.+-]+(?:;[a-zA-Z0-9.+-]*(?:=[^;,]*)?)*,[^\s"'<>]+/g, '[图片]');
           if (cc.content.length > 8192) cc.content = cc.content.slice(0, 8192) + '…';
         }
         if (Array.isArray(cc.replies)) {
@@ -81,7 +116,7 @@
             if (!r || typeof r !== 'object') return r;
             const rr = Object.assign({}, r);
             if (typeof rr.content === 'string') {
-              rr.content = rr.content.replace(/data:image\/[a-zA-Z0-9.+-]+;base64,[A-Za-z0-9+/=]+/g, '[图片]');
+              rr.content = rr.content.replace(/data:image\/[a-zA-Z0-9.+-]+(?:;[a-zA-Z0-9.+-]*(?:=[^;,]*)?)*,[^\s"'<>]+/g, '[图片]');
               if (rr.content.length > 8192) rr.content = rr.content.slice(0, 8192) + '…';
             }
             return rr;
@@ -108,7 +143,12 @@
     try {
       const o = owner || 'default';
       const s = window.storeFor(o);
+      // v3.20.x：与 taFeedAv()/feedAllStore 渲染保持一致——default 联系人的朋友圈 TA
+      // 头像历史标准归属是根命名空间 store，storeFor('default') 读「default 桌面」会取不到，
+      // 导致「联系人发送朋友圈」的通知弹窗右侧不显示发布者头像（用户反馈）。未取到且为
+      // default 时补根键回退；非 default 联系人仍只读各自桌面，不串头像。
       let v = s.get('feed-ta-avatar') || s.get('avatar-partner') || '';
+      if (!v && o === 'default') v = store.get('feed-ta-avatar') || store.get('avatar-partner') || '';
       if (v && typeof v === 'string' && v.length > 500 * 1024) return '';
       return v || '';
     } catch (e) { return ''; }
@@ -118,7 +158,9 @@
     try {
       const o = owner || 'default';
       const s = window.storeFor(o);
-      const v = s.get('feed-ta-name') || s.get('lbl-partner') || '';
+      // v3.20.x：与 taFeedName() 一致补根键回退（default 联系人昵称历史在根命名空间）
+      let v = s.get('feed-ta-name') || s.get('lbl-partner') || '';
+      if (!v && o === 'default') v = store.get('feed-ta-name') || store.get('lbl-partner') || '';
       if (v) return v;
       // 回退：该联系人的注册名（联系人管理里设的名字），避免 lbl-partner 空时显示"TA"
       if (window.getContacts) {
@@ -187,7 +229,36 @@
     const p = (n) => (n < 10 ? '0' + n : '' + n);
     return (d.getMonth() + 1) + '月' + d.getDate() + '日 ' + p(d.getHours()) + ':' + p(d.getMinutes());
   }
-  function normPost(p) { if (p.by && !p.role) { p.role = p.by; if (!p.owner) p.owner = 'default'; } return p; }
+  function normPost(p) {
+    if (p.by && !p.role) { p.role = p.by; if (!p.owner) p.owner = 'default'; }
+    // v3.20.x：评论/回复去重——历史数据（iOS 键盘/重复触发等）可能把同一内容重复入库，
+    //   load() 若不合并，评论区每条评论就会显示成两条（两端重复）。按 ts+身份+作者+内容
+    //   精确去重，仅折叠完全相同的重复副本；不同评论不受影响。merge 路径已有 deeperList，
+    //   这里补上常规 load/render 路径，任何来源的重复都被消除。
+    const dedupArrBy = (arr, keyFn) => {
+      if (!Array.isArray(arr)) return arr;
+      const seen = {}, out = [];
+      for (let i = 0; i < arr.length; i++) {
+        const o = arr[i];
+        if (!o || typeof o !== 'object') { out.push(o); continue; }
+        const k = keyFn(o);
+        if (k != null && seen[k]) continue;
+        if (k != null) seen[k] = 1;
+        out.push(o);
+      }
+      return out;
+    };
+    if (Array.isArray(p.comments)) {
+      p.comments = dedupArrBy(p.comments, c => (c && c.ts ? c.ts : 0) + '|' + (c.role || c.by || '') + '|' + (c.authorName || '') + '|' + (c.content || ''));
+      for (let i = 0; i < p.comments.length; i++) {
+        const c = p.comments[i];
+        if (c && Array.isArray(c.replies)) {
+          c.replies = dedupArrBy(c.replies, r => (r && r.ts ? r.ts : 0) + '|' + (r.role || r.by || '') + '|' + (r.authorName || '') + '|' + (r.content || ''));
+        }
+      }
+    }
+    return p;
+  }
   // v3.7.x：feedDbReady 门槛——对齐 mail.js mailDbReady。Edge/OPPO 上 IndexedDB 打开/
   //   读取慢或挂起时，启动早期 store.get(KEY) 返回 null（大键不在 LS、memoryCache 未回填）、
   //   快照也缺失 → load() 返回 []。此时任何 save（maybeAutoPost 定时器/用户发布/点赞）都会
@@ -201,7 +272,12 @@
   //   剥图快照超 200KB 会静默停写冻结在旧时刻，iOS 还可能在存储压力下清 LS 键——
   //   陈旧本地版本整条盖掉 IDB 里带全部后续评论的新版本并随即写回 IDB，旧评论永久丢失。
   //   改为字段择优 + 评论/回复/点赞按内容并集，任一侧的新数据都不再被整条挤掉。
-  function itemKey(o) { return (o && o.ts ? o.ts : 0) + '|' + (o.role || o.by || '') + '|' + (o.authorName || '') + '|' + (o.content || ''); }
+  // v3.26.x：剥图回填——itemKey 不含 content。朋友圈数据超 200KB 时 LS 快照会把评论/回复
+  //   里的图片 dataURL 剥成 [图片]（stripPostImg），而 IDB 里是完整版；原 key 含 content
+  //   导致【同一条】被当成两条合并并存（一条缩略图、一条 [图片] 文字），用户反馈
+  //   「回复有时是表情包缩略图、有时只剩 图片 两个字」。改为按 ts+作者 收敛为同一条，
+  //   并入时优先保留含真实 data:image 的那版（删掉剥图占位）。
+  function itemKey(o) { return (o && o.ts ? o.ts : 0) + '|' + (o.role || o.by || '') + '|' + (o.authorName || ''); }
   function deeperList(a, b) {
     const byKey = {};
     const put = (o) => {
@@ -211,6 +287,9 @@
       if (!prev) { byKey[k] = Object.assign({}, o); return; }
       if (Array.isArray(o.replies) && o.replies.length) prev.replies = deeperList(prev.replies || [], o.replies);
       else if (!Array.isArray(prev.replies) && Array.isArray(o.replies)) prev.replies = o.replies;
+      const prevImg = /data:image\//.test(String(prev.content || ''));
+      const oImg = /data:image\//.test(String(o.content || ''));
+      if (!prevImg && oImg) prev.content = o.content;
     };
     (a || []).forEach(put);
     (b || []).forEach(put);
@@ -396,22 +475,24 @@
   function attrEsc(s) { return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/'/g, '&#39;'); }
   // 图文混排正文渲染（与聊天一致）：data:image 段 → 内联图片，其余文字保留空格
   // v3.x.x：称呼跟随——文字段按动态所属联系人(owner cid)在显示层替换 TA/他
+  // v3.26.x：独立附图识别——表情包/图片既支持 base64 dataURL，也支持 svg 类非 base64
+  //   的 dataURL 与带 sticker:/image: 前缀的外链图（与聊天附件同批字卡这里也按缩略图
+  //   渲染，解决「聊天正常、朋友圈/评论表情包只显示图片文字」）。无附图前缀的 http
+  //   链接仍当普通文本（避免把正文里的网址误当图片）。用 replace 一次成稿，避免
+  //   大量 dataURL 逐段 exec 的重复解码。
   function inlineBody(s, cid) {
     const str = String(s || '');
-    let html = '';
-    const re = /(data:image\/[a-zA-Z0-9.+-]+;base64,[A-Za-z0-9+/=]+)/g;
-    let last = 0, m;
     const fitSeg = (seg) => {
-      seg = seg.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+      seg = String(seg).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
       return (cid && window.taFit) ? window.taFit(seg, cid) : seg;
     };
-    while ((m = re.exec(str))) {
-      html += fitSeg(str.slice(last, m.index));
-      html += '<img class="feed-inline-img" src="' + m[0] + '" alt="图片">';
-      last = m.index + m[0].length;
-    }
-    html += fitSeg(str.slice(last));
-    return html;
+    const RE = /((?:sticker|image):)?(https?:\/\/[^\s"'<>]+|data:image\/[a-zA-Z0-9.+-]+(?:;[a-zA-Z0-9.+-]*(?:=[^;,]*)?)*,[^\s"'<>]+)/g;
+    return str.replace(RE, function (all, pre, src) {
+      if (src.indexOf('http') === 0 && pre !== 'sticker:' && pre !== 'image:') {
+        return fitSeg(all); // 普通网址（无附图前缀）按文本保留
+      }
+      return '<img class="feed-inline-img" src="' + attrEsc(src) + '" alt="表情">';
+    });
   }
   // 无重复抽取器：同一轮生成内不重复抽同一张卡（池子抽完一轮后重新洗牌再继续），
   // 修复小字卡池下同一条动态/评论连续重复同一张卡（如「爱你爱你爱你…」）
@@ -505,7 +586,8 @@
     // 前缀与 dataURL 必须整体作为一个可选分组（冒号在分组内）——若写成 (?:sticker|image):?
     // 引擎会在 'data:image' 中间误匹配 'image'，导致后面 (data:image…) 整体匹配失败
     // （mail.js renderBody 同款已生效模式）
-    content = content.replace(/((?:sticker|image):)?(data:image\/[a-zA-Z0-9.+-]+;base64,[A-Za-z0-9+/=]+)/g, (m, pre, u) => { imgs.push(u); return ' '; });
+    // v3.26.x：对齐 inlineBody——base64、svg 类非 base64 dataURL 与带前缀外链图都并入图片网格
+    content = content.replace(/((?:sticker|image):)?(https?:\/\/[^\s"'<>]+|data:image\/[a-zA-Z0-9.+-]+(?:;[a-zA-Z0-9.+-]*(?:=[^;,]*)?)*,[^\s"'<>]+)/g, (m, pre, u) => { if (u.indexOf('http') === 0 && pre !== 'sticker:' && pre !== 'image:') return m; imgs.push(u); return ' '; });
     let html = inlineBody(content, (p.role || p.by) === 'me' ? '' : p.owner);
     if (imgs.length) {
       html += '<div class="feed-imgs">' + imgs.map(u => '<img src="' + attrEsc(u) + '" alt="图片" loading="lazy">').join('') + '</div>';
@@ -626,6 +708,13 @@
     if (v) return safeBg(v, 'feed-ta-cover', s);
     return safeBg(store.get('feed-ta-cover'), 'feed-ta-cover', store);
   }
+  // 该动态是否已收藏到桌面收藏夹（我的收藏-朋友圈），用于收藏按钮高亮
+  function favFeedHas(p) {
+    try {
+      const fav = JSON.parse(window.activeStore().get('fav-msgs') || '[]');
+      return Array.isArray(fav) && fav.some(f => (f.kind || '') === 'feed' && f.by !== 'ta' && f.ts === (p.ts || 0));
+    } catch (e) { return false; }
+  }
   // v3.10.x：单张动态卡片 HTML（主列表模板）——render 全量渲染与评论/点赞后的
   //   局部刷新（refreshPostCard）共用同一模板，避免两处 markup 漂移
   function postCardHtml(p, name) {
@@ -642,13 +731,15 @@
       ? '<div class="feed-likes"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" style="width:12px;height:12px;vertical-align:-2px;margin-right:5px"><path d="M12 21s-7.5-4.7-9.3-9A5.3 5.3 0 0112 6.4a5.3 5.3 0 019.3 5.6c-1.8 4.3-9.3 9-9.3 9z"/></svg>' + esc(p.likes.join('、')) + ' 觉得很赞</div>'
       : '';
     const liked = p.likes && p.likes.some(l => l === feedUserName());
+    const faved = favFeedHas(p);
     return '<div class="feed-post" id="feed-post-' + p.id + '"><div class="feed-head">' + avWrap +
       '<div class="feed-who"><div class="feed-name">' + esc(author) + '</div><div class="feed-time">' + fmtDT(p.ts) + '</div></div>' +
       '<button class="feed-del" data-id="' + p.id + '" title="删除"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:14px;height:14px"><path d="M3 6h18M8 6V4a1 1 0 011-1h6a1 1 0 011 1v2"/><path d="M6 6l1 14a2 2 0 002 2h6a2 2 0 002-2l1-14"/></svg></button>' + '</div>' +
       '<div class="feed-content">' + contentHtmlFor(p) + '</div>' +
       '<div class="feed-actions">' +
-      '<button class="feed-act' + (liked ? ' liked' : '') + '" data-like="' + p.id + '"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:15px;height:15px;vertical-align:-3px;margin-right:4px"><path d="M12 21s-7.5-4.7-9.3-9A5.3 5.3 0 0112 6.4a5.3 5.3 0 019.3 5.6c-1.8 4.3-9.3 9-9.3 9z"/></svg>赞</button>' +
-      '<button class="feed-act" data-comment="' + p.id + '"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:15px;height:15px;vertical-align:-3px;margin-right:4px"><path d="M21 11.5a8.38 8.38 0 01-.9 3.8 8.5 8.5 0 01-7.6 4.7 8.38 8.38 0 01-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 01-.9-3.8 8.5 8.5 0 014.7-7.6 8.38 8.38 0 018 8v.5z"/></svg>评论</button>' +
+      '<button class="feed-act' + (liked ? ' liked' : '') + '" data-like="' + p.id + '"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:15px;height:15px"><path d="M12 21s-7.5-4.7-9.3-9A5.3 5.3 0 0112 6.4a5.3 5.3 0 019.3 5.6c-1.8 4.3-9.3 9-9.3 9z"/></svg>赞</button>' +
+      '<button class="feed-act" data-comment="' + p.id + '"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:15px;height:15px"><path d="M21 15a4 4 0 01-4 4H8l-5 3V7a4 4 0 014-4h10a4 4 0 014 4v8z"/><circle cx="8.5" cy="10.5" r="1.2" fill="currentColor" stroke="none"/><circle cx="12" cy="10.5" r="1.2" fill="currentColor" stroke="none"/><circle cx="15.5" cy="10.5" r="1.2" fill="currentColor" stroke="none"/></svg>评论</button>' +
+      '<button class="feed-act feed-fav' + (faved ? ' faved' : '') + '" data-fav="' + p.id + '"><svg viewBox="0 0 24 24" fill="' + (faved ? 'currentColor' : 'none') + '" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:15px;height:15px"><path d="M12 2l2.4 5 5.6.8-4 4 .9 5.6-4.9-2.6-4.9 2.6.9-5.6-4-4 5.6-.8z"/></svg>收藏</button>' +
       '</div>' + likes + commentsHtmlFor(p, name) + '</div>';
   }
   // 渲染动态列表
@@ -704,7 +795,7 @@
       ? posts.slice(0, feedShownMain).map(p => postCardHtml(p, name)).join('') +
         (posts.length > feedShownMain ? feedMoreBtnHtml(posts.length - feedShownMain) : '')
       : '<div class="ta-empty">还没有动态，TA 会不定期分享生活</div>';
-    const clearBtn = document.getElementById('feed-page-clear');
+    const clearBtn = document.getElementById('feed-head-clear');
     if (clearBtn) clearBtn.hidden = !posts.length;
     bindEvents(listEl);
   }
@@ -797,6 +888,25 @@
 
     listEl.querySelectorAll('.feed-act[data-comment]').forEach(b => b.addEventListener('click', () => {
       showCommentBar(b.dataset.comment);
+    }));
+    // 收藏：收藏到桌面收藏夹（我的收藏-朋友圈），按动态 ts 去重
+    listEl.querySelectorAll('.feed-act[data-fav]').forEach(b => b.addEventListener('click', () => {
+      const pid = b.dataset.fav;
+      const list = load();
+      const p = list.find(x => x.id === pid);
+      // v3.26.x：addMyFavItem 未就绪时不再静默 return（否则点击毫无反应），给明确反馈
+      if (!window.addMyFavItem) { toast('收藏功能暂不可用'); return; }
+      if (!p) { toast('未找到这条动态'); return; }
+      const isMine = (p.role || p.by) === 'me';
+      const ok = window.addMyFavItem({
+        kind: 'feed',
+        text: p.content || '',
+        imgs: (p.imgs || []).slice(),
+        ts: p.ts || Date.now(),
+        side: isMine ? 'out' : 'in'
+      });
+      toast(ok ? '已收藏这条动态' : '这条动态已收藏过');
+      refreshPostCard(pid); // 刷新收藏按钮高亮态
     }));
     // 点击评论 → 回复（TA 的评论可回复）：复用页面内评论条（v3.5.58 不再用独立弹窗）
     listEl.querySelectorAll('.feed-comment').forEach(c => c.addEventListener('click', () => {
@@ -1539,20 +1649,33 @@ if (comInput) comInput.addEventListener('keydown', (e) => { if (e.key === 'Enter
         }, (ccfg.commentSpeedMin + Math.random() * Math.max(1, ccfg.commentSpeedMax - ccfg.commentSpeedMin)) * 1000);
       }
     });
-    // v3.6.x：TA 收藏我发布的动态（概率可调，与聊天消息收藏一致，延迟同点赞节奏）——
-    // 收藏写入当前桌面（各桌面收藏隔离），保持只由当前桌面 TA 触发
-    // v3.7.x：概率由收藏设置页控制，默认 30%
-    if (Math.random() * 100 < (window.favCfg ? window.favCfg().taFeed : 30) && window.addTaFavItem) {
-      const cfg = feedCfg();
-      setTimeout(() => {
-        const list2 = load();
-        const p2 = list2.find(x => x.id === id);
-        if (!p2) return;
-        if (window.addTaFavItem({ kind: 'feed', text: p2.content || '', imgs: (p2.imgs || []).slice(), ts: Date.now() })) {
-          toast(window.taFit ? window.taFit('TA 收藏了你的朋友圈动态') : 'TA 收藏了你的朋友圈动态');
-        }
-      }, (cfg.likeSpeedMin + Math.random() * Math.max(1, cfg.likeSpeedMax - cfg.likeSpeedMin)) * 1000);
-    }
+    // v3.26.x：TA 收藏我的朋友圈动态——朋友圈数据全局互通（feed-posts 全局共享层），
+    // 我【任意一条】动态（含历史）都可能被收藏，不限于刚发布的这条；遍历所有桌面
+    // 联系人，各桌面 TA 按自己桌面的 taFeed 概率触发，收藏写入【该桌面自己】的
+    // 收藏（by:'ta'，各桌面收藏隔离）；收藏 ts 用动态发布时间便于按动态判重。
+    allContacts.forEach(ct => {
+      const cid = ct && ct.id ? ct.id : 'default';
+      const ccfg = feedCfgFor(cid);
+      if (Math.random() * 100 < favFeedProbFor(cid)) {
+        setTimeout(() => {
+          const list2 = load();
+          const mine = list2.filter(x => (x.role || x.by) === 'me');
+          if (!mine.length) return;
+          const pick = mine[Math.floor(Math.random() * mine.length)];
+          const f = { kind: 'feed', text: pick.content || '', imgs: (pick.imgs || []).slice(), ts: pick.ts || Date.now() };
+          const s = window.storeFor(cid);
+          let fav = [];
+          try { fav = JSON.parse(s.get('fav-msgs') || '[]'); } catch (e) { fav = []; }
+          if (!Array.isArray(fav)) fav = [];
+          if (fav.some(x => (x.by || 'me') === 'ta' && (x.kind || 'msg') === 'feed' && x.ts === f.ts)) return;
+          fav.push(Object.assign({ by: 'ta' }, f));
+          s.set('fav-msgs', JSON.stringify(fav));
+          if (cid === (window.__activeCid || 'default')) {
+            toast(window.taFit ? window.taFit('TA 收藏了你的朋友圈动态') : 'TA 收藏了你的朋友圈动态');
+          }
+        }, (ccfg.likeSpeedMin + Math.random() * Math.max(1, ccfg.likeSpeedMax - ccfg.likeSpeedMin)) * 1000);
+      }
+    });
   }
   // 暴露给外部模块发帖（period.js 月度报告分享等）
   window.feedAddPost = function (text, imgs) {
@@ -1574,8 +1697,11 @@ if (comInput) comInput.addEventListener('keydown', (e) => { if (e.key === 'Enter
   // ================= TA 自动发布（定时机制，概率在回复设置-朋友圈调整，星言朋友圈机制） =================
   // v3.7.x：按「指定联系人桌面」读朋友圈回复设置（fd-*）——多桌面下各联系人
   // TA 用各自桌面的设置回应我的动态/回复；feedCfg() = 当前桌面
+  // v3.23.x：default 也固定读 default 桌面——原实现 default 走 activeStore()，
+  // 人停在别的桌面时 maybeAutoPostFor('default') 会拿【别桌】的 fd-* 设置
+  // （fd-post-daily-max 日上限串台回默认 5 条，表现为「设了 2 条照样狂发」）
   function feedCfgFor(cid) {
-    const s = (cid && cid !== 'default') ? window.storeFor(cid) : window.activeStore();
+    const s = window.storeFor(cid || 'default');
     const c = {};
     ['fd-like-prob', 'fd-like-speed-min', 'fd-like-speed-max', 'fd-comment-prob', 'fd-comment-speed-min', 'fd-comment-speed-max',
      'fd-reply-prob', 'fd-reply-speed-min', 'fd-reply-speed-max', 'fd-likeback-prob', 'fd-card-prob', 'fd-max-cards', 'fd-image-prob',
@@ -1605,9 +1731,17 @@ if (comInput) comInput.addEventListener('keydown', (e) => { if (e.key === 'Enter
   function feedCfg() {
     return feedCfgFor(window.__activeCid || 'default');
   }
-  function feedLast() { const v = parseInt(store.get('feed-last'), 10); return isNaN(v) ? 0 : v; }
-  function feedNext() { const v = parseFloat(store.get('feed-next')); return isNaN(v) ? 0 : v; }
-  function feedDayCount() { try { return JSON.parse(store.get('feed-day-count') || '0'); } catch (e) { return 0; } }
+  // v3.26.x：按指定桌面读 TA 收藏我动态的概率（fav-ta-feed，收藏设置页每桌面独立），
+  // 供跨桌面遍历时各桌面的 TA 按各自设置掷概率，默认 30%
+  function favFeedProbFor(cid) {
+    try {
+      const s = window.storeFor(cid);
+      const v = s.get('fav-ta-feed');
+      if (v === null || v === undefined || v === '') return 30;
+      const n = Number(v);
+      return isNaN(n) ? 30 : n;
+    } catch (e) { return 30; }
+  }
   function feedToday() {
     const d = new Date();
     return d.getFullYear() + '-' + (d.getMonth() + 1) + '-' + d.getDate();
@@ -1721,14 +1855,16 @@ if (comInput) comInput.addEventListener('keydown', (e) => { if (e.key === 'Enter
       ? '<div class="feed-likes" style="font-size:11px;color:var(--muted);padding:6px 2px">' + esc(p.likes.join('、')) + ' 觉得很赞</div>'
       : '';
     const liked = p.likes && p.likes.some(l => l === feedUserName());
+    const faved = favFeedHas(p);
     // v3.7.x：与主列表一致的点赞/评论入口（原全部朋友圈页缺这两个按钮）
     return '<div class="feed-post" id="feed-post-' + p.id + '"><div class="feed-head">' + avHtml(av) +
       '<div class="feed-who"><div class="feed-name">' + esc(author) + '</div><div class="feed-time">' + fmtDT(p.ts) + '</div></div>' +
       '<button class="feed-del" data-id="' + p.id + '" title="删除"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:14px;height:14px"><path d="M3 6h18M8 6V4a1 1 0 011-1h6a1 1 0 011 1v2"/><path d="M6 6l1 14a2 2 0 002 2h6a2 2 0 002-2l1-14"/></svg></button></div>' +
       '<div class="feed-content">' + contentHtmlFor(p) + '</div>' +
       '<div class="feed-actions">' +
-      '<button class="feed-act' + (liked ? ' liked' : '') + '" data-like="' + p.id + '"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:15px;height:15px;vertical-align:-3px;margin-right:4px"><path d="M12 21s-7.5-4.7-9.3-9A5.3 5.3 0 0112 6.4a5.3 5.3 0 019.3 5.6c-1.8 4.3-9.3 9-9.3 9z"/></svg>赞</button>' +
-      '<button class="feed-act" data-comment="' + p.id + '"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:15px;height:15px;vertical-align:-3px;margin-right:4px"><path d="M21 11.5a8.38 8.38 0 01-.9 3.8 8.5 8.5 0 01-7.6 4.7 8.38 8.38 0 01-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 01-.9-3.8 8.5 8.5 0 014.7-7.6 8.38 8.38 0 018 8v.5z"/></svg>评论</button>' +
+      '<button class="feed-act' + (liked ? ' liked' : '') + '" data-like="' + p.id + '"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:15px;height:15px"><path d="M12 21s-7.5-4.7-9.3-9A5.3 5.3 0 0112 6.4a5.3 5.3 0 019.3 5.6c-1.8 4.3-9.3 9-9.3 9z"/></svg>赞</button>' +
+      '<button class="feed-act" data-comment="' + p.id + '"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:15px;height:15px"><path d="M21 15a4 4 0 01-4 4H8l-5 3V7a4 4 0 014-4h10a4 4 0 014 4v8z"/><circle cx="8.5" cy="10.5" r="1.2" fill="currentColor" stroke="none"/><circle cx="12" cy="10.5" r="1.2" fill="currentColor" stroke="none"/><circle cx="15.5" cy="10.5" r="1.2" fill="currentColor" stroke="none"/></svg>评论</button>' +
+      '<button class="feed-act feed-fav' + (faved ? ' faved' : '') + '" data-fav="' + p.id + '"><svg viewBox="0 0 24 24" fill="' + (faved ? 'currentColor' : 'none') + '" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:15px;height:15px"><path d="M12 2l2.4 5 5.6.8-4 4 .9 5.6-4.9-2.6-4.9 2.6.9-5.6-4-4 5.6-.8z"/></svg>收藏</button>' +
       '</div>' + likes +
       commentsHtmlFor(p, author) + '</div>';
   }
@@ -2063,10 +2199,12 @@ if (comInput) comInput.addEventListener('keydown', (e) => { if (e.key === 'Enter
       }, { noInput: true, staticText: '将删除全部动态（我的与 TA 的）、评论、点赞和通知提醒，且无法恢复。确定继续吗？' });
     });
   }
-  // v3.6.x：朋友圈页底部「删除全部动态」——可只删我的动态 / 只删联系人的动态 / 全部删除
-  const feedPageClear = document.getElementById('feed-page-clear');
-  if (feedPageClear) {
-    feedPageClear.addEventListener('click', () => {
+  // v3.6.x：朋友圈页顶部「删除全部动态」——可只删我的动态 / 只删联系人的动态 / 全部删除
+  // v3.27.x：入口从页底移到顶部栏（feed-head-clear），无需滑动到页底
+  const feedHeadClear = document.getElementById('feed-head-clear');
+  if (feedHeadClear) {
+    feedHeadClear.addEventListener('click', (e) => {
+      e.stopPropagation();
       if (!window.openModal) return;
       window.openModal('删除朋友圈动态', '', (v) => {
         const mode = v || 'all';

@@ -1,4 +1,4 @@
-﻿// ===== 桌面第三页【存钱罐】功能冒烟验证 =====
+// ===== 桌面第三页【存钱罐】功能冒烟验证 =====
 // 覆盖：图标智能放置（默认第三页 / 装修过留第三页 / 布局不含时整组建新页）、打开页面、
 //       空罐取出拦截、存入（金额+留言两步弹窗）、取出、超额拦截、设目标进度条、
 //       攒够目标庆祝、TA 塞硬币纯彩蛋不入账（页内 Math.random 桩确定性命中）、
@@ -71,6 +71,16 @@ async function gotoApp(hash) {
 }
 const results = [];
 function check(desc, ok, detail) { results.push({ desc, ok: !!ok }); console.log((ok ? 'PASS' : 'FAIL') + '  ' + desc + (detail ? '  [' + detail + ']' : '')); }
+// 等待条件成立（桌面布局迁移是异步级联，直接断言会踩到中间态，需轮询稳定）
+async function waitFor(expr, timeoutMs = 6000) {
+  const t0 = Date.now();
+  while (Date.now() - t0 < timeoutMs) {
+    const v = await evalJs(expr);
+    if (v) return true;
+    await sleep(250);
+  }
+  return false;
+}
 
 // 页面状态快照
 const snap = `(() => {
@@ -94,7 +104,7 @@ const snap = `(() => {
     rowCount: rows.length,
     newRowTxt: newRow ? newRow.textContent : '',
     histHasEmpty: !!(document.querySelector('#piggy-hist .piggy-empty')),
-    toast: (document.getElementById('tp-ss-toast') || {}).textContent || '',
+    toast: (document.getElementById('cc-toast') || {}).textContent || '',
     modalOpen: !(document.getElementById('modal-mask') || {}).hidden,
     modalTitle: (document.getElementById('modal-title') || {}).textContent || '',
     replyOpen: !(document.getElementById('piggy-reply') || {}).hidden,

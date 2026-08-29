@@ -594,7 +594,7 @@
       '<div class="pong-end-stat">完成层数 ' + doneLv + ' · 历史最佳 ' + best + ' 分' + (isBest ? ' 🎉新纪录' : '') + '</div>' +
       (coinLineBrick ? '<div class="pong-end-stat">' + coinLineBrick + '</div>' : '');
     showOverlay(T('游戏结束'), body, '再来一局');
-    if (overlayCloseBtn) overlayCloseBtn.hidden = false;
+    if (overlayCloseBtn) { overlayCloseBtn.hidden = false; overlayCloseBtn.textContent = '返回小游戏'; }
     // 写聊天记录（居中小卡片）+ TA 回应（固定发送，语气随机二选一）
     try {
       if (window.chatAddSystem) {
@@ -881,8 +881,16 @@
       const cs = getComputedStyle(panel);
       const availW = window.innerWidth - 20 - (parseFloat(cs.paddingLeft) || 0) - (parseFloat(cs.paddingRight) || 0);
       const availH = Math.max(160, window.innerHeight - used - (parseFloat(cs.paddingTop) || 0) - (parseFloat(cs.paddingBottom) || 0) - 14);
-      let cw = availW, ch = Math.round(cw * H / W);
-      if (ch > availH) { ch = availH; cw = Math.round(ch * W / H); }
+      // 竖屏：优先按可用高度放大（纵向吃满、横向居中），超宽时回退宽度主导；
+      // 横屏：维持宽度主导（横向吃满）。保证画布尽量铺满且不变形。
+      let cw, ch;
+      if (window.innerHeight >= window.innerWidth) {
+        ch = availH; cw = Math.round(ch * W / H);
+        if (cw > availW) { cw = availW; ch = Math.round(cw * H / W); }
+      } else {
+        cw = availW; ch = Math.round(cw * H / W);
+        if (ch > availH) { ch = availH; cw = Math.round(ch * W / H); }
+      }
       canvas.style.width = cw + 'px';
       canvas.style.height = ch + 'px';
       if (box) { box.style.width = cw + 'px'; box.style.height = ch + 'px'; }
@@ -1084,8 +1092,23 @@
     if (state && state.status !== 'over') state.params = DIFFS[diffSel.value] || DIFFS.easy;
   });
   if (ballsSel) ballsSel.addEventListener('change', () => {
-    // 球数量在下次发球/补发时生效（不打断当前球）；选择随联系人记忆
-    try { localStorage.setItem(ballsPrefKey(), String(targetBallCount())); } catch (e) {}
+    const target = targetBallCount();
+    // 选择随联系人记忆（下次打开面板恢复）
+    try { localStorage.setItem(ballsPrefKey(), String(target)); } catch (e) {}
+    // 进行中即时生效（不打断当前对局）：按新目标数补发缺的球 / 剪除多出的球。
+    // 只从数组尾部增减、恒不动 balls[0]，维持「s.ball === s.balls[0]」不变量；
+    // 剪掉的球若是梦角当前锁定目标则清空，planDescent 下一帧自动重选。
+    if (state && state.status === 'rally' && state.lives > 0) {
+      while (state.balls.length > target) {
+        const extra = state.balls.pop();
+        if (state.aiBall === extra) { state.aiBall = null; state.prevAiVy = 0; }
+      }
+      while (state.balls.length < target) {
+        const nb = newBallObj();
+        launchBall(state, nb, state.balls.length, target, performance.now());
+        state.balls.push(nb);
+      }
+    }
   });
   if (soundBtn) soundBtn.addEventListener('click', (e) => {
     e.stopPropagation();
@@ -1102,7 +1125,12 @@
     else startGame();
   });
   function armResume(fn) { resumeFn = fn; }
-  if (overlayCloseBtn) overlayCloseBtn.addEventListener('click', (e) => { e.stopPropagation(); closeBrickPanel(); });
+  if (overlayCloseBtn) overlayCloseBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    // 进行中副按钮 =「新开局」（放弃旧局、按当前选择重开）；初始/结束时 = 关闭面板
+    if (resumeFn) { resumeFn = null; startGame(); }
+    else closeBrickPanel();
+  });
   if (pauseBtn) pauseBtn.addEventListener('click', (e) => { e.stopPropagation(); togglePause(); });
   if (fsBtn) fsBtn.addEventListener('click', (e) => { e.stopPropagation(); toggleFs(); });
 
@@ -1146,7 +1174,8 @@
         rafId = requestAnimationFrame(loop);
         if (pauseBtn) pauseBtn.textContent = '⏸';
       });
-      if (overlayCloseBtn) overlayCloseBtn.hidden = true;
+      // 进行中也可放弃旧局重新开局（球数/难度按当前选择即时生效）
+      if (overlayCloseBtn) { overlayCloseBtn.hidden = false; overlayCloseBtn.textContent = '新开局'; }
       return;
     }
     const best = loadBest();
@@ -1159,7 +1188,7 @@
     const bn = targetBallCount();
     showOverlay(T('双人打砖块'),
       '<div class="pong-start-tip">你和' + T('TA') + '各守半场共接' + (bn > 1 ? bn + ' 颗球' : '同一颗球') + '<br>清光砖块进入下一层 · 共 3 次失误机会</div>' +
-      '<div class="pong-start-ctrl">手机：按住画面左右拖动<br>电脑：A/D 或 ← →</div>' +
+      '<div class="pong-start-ctrl">按住画面左右拖动</div>' +
       (best > 0 ? '<div class="pong-end-stat">历史最佳 ' + best + ' 分</div>' : ''),
       '开始');
     if (overlayCloseBtn) overlayCloseBtn.hidden = true;

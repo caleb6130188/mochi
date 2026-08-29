@@ -33,7 +33,7 @@
   // v3.14.x：梦角主动控制概率可调——taNextProb/taRandProb/taModeProb=歌曲播完时
   // 梦角接动作（切下一首/随机挑一首/换播放模式）的概率；taFavProb=我播放歌曲时
   // 联系人把歌收进「TA的收藏」的概率。默认值与原硬编码行为一致（15/10/5）。
-  const DEF_SETTINGS = { floatEn: true, reqProb: 5, cooldownMs: 600000, widgetCoverMode: 'song', taNextProb: 15, taRandProb: 10, taModeProb: 5, taFavProb: 20 };
+  const DEF_SETTINGS = { floatEn: true, reqProb: 5, cooldownMs: 600000, widgetCoverMode: 'song', taNextProb: 15, taRandProb: 10, taModeProb: 5, taFavProb: 20, taReserveProb: 6, taPauseProb: 3, taPauseEn: true };
   let settings = Object.assign({}, DEF_SETTINGS);
   // 概率取值兜底：非数字/越界时回退默认值并夹在 0~100
   function probOf(v, def) { const n = (typeof v === 'number' && !isNaN(v)) ? v : def; return Math.max(0, Math.min(100, n)); }
@@ -42,13 +42,19 @@
   let audio = null;
   let progressTimer = null;
   let floatClosed = false;   // 悬浮小框手动收起
+  let floatMin = false;      // 悬浮小框是否处于最小（最初版最小单行小框）状态
+  let floatHideByWidget = false; // 桌面小组件触发播放时抑制悬浮小框自动唤出（小组件本身就是控制器，避免重复弹出）
   let taActive = false;      // TA 请求过一起听歌后置 true，歌曲结束 TA 可能接动作
   let cooldownAt = 0;        // TA 音乐请求冷却时间戳
   let reqData = null;        // 待确认的 TA 请求 {trackId}
   let curTab = 'lib';
+  let playQueue = [];        // 播放队列：用户点「下一首播放」加入的歌曲 id 列表，播完当前手动/自动切歌时优先按序播放
+  let localPlId = 'default'; // 本地上传的目标播放列表（歌单），单选歌曲时由弹窗决定
+  let failMap = {};          // 连续播放失败计数（songId→次数），每次成功播放清零；用于区分临时/网络失败与真坏链
 
   function loadArr(k) { try { const v = JSON.parse(store.get(k) || 'null'); return Array.isArray(v) ? v : []; } catch(e){ return []; } }
   function saveArr(k, a) { store.set(k, JSON.stringify(a)); }
+
   function partnerName() { return window.activeStore().get('lbl-partner') || 'TA'; }
   function findTrack(id) { return library.find(m => m.id === id) || null; }
   function fmtDur(sec) {
@@ -858,7 +864,8 @@
     } catch (e) { finish(0); }
   }
   function probeAllMissingDurations() {
-    library.forEach(m => { if (m && m.neteaseId && !m.duration) enqueueDurProbe(m); });
+    // v3.26.x：只探测已渲染（窗口化）歌曲的时长，避免对几千首歌发起网络请求导致 ERR_INSUFFICIENT_RESOURCES
+    libSongsFor(libFilter).slice(0, libRenderShown).forEach(m => { if (m && m.neteaseId && !m.duration) enqueueDurProbe(m); });
   }
   // ================= 网易云歌曲封面补全（列表/小组件共用，并发节流） =================
   // v3.9.x：链接添加/批量导入的单曲没有封面 → 导入后/播放时/打开音乐页时后台拉取
@@ -898,7 +905,8 @@
   }
   function ensureSongCover(m) { enqueueCoverFetch(m); }
   function ensureMissingCovers() {
-    library.forEach(m => { if (m && m.neteaseId && !m.cover) enqueueCoverFetch(m); });
+    // v3.26.x：只补已渲染（窗口化）歌曲的封面，避免对几千首歌发起网络请求导致 ERR_INSUFFICIENT_RESOURCES
+    libSongsFor(libFilter).slice(0, libRenderShown).forEach(m => { if (m && m.neteaseId && !m.cover) enqueueCoverFetch(m); });
   }
   // 局部刷新某首歌曲在列表/歌单面板里的封面图标（has-cov 与正常渲染一致，图标丢弃）
   function updateCoverUI(id) {
@@ -937,12 +945,27 @@
   // v3.6.x：改存 Blob（不再存 base64 dataURL 字符串）——夸克等浏览器对
   // `<audio src="data:...">`（尤其大段 base64）播放失效，Blob + 对象 URL 是标准播放方案
   function triggerUpload() {
-    const inp = document.createElement('input');
-    inp.type = 'file';
-    inp.accept = 'audio/*,.mp3,.m4a,.aac,.ogg,.wav,.flac';
-    inp.multiple = true;
-    inp.onchange = function () { if (this.files && this.files.length) uploadFiles(this.files); };
-    inp.click();
+    if (!window.openTCPanel) { localPlId = 'default'; }
+    // v3.x：本地上传前先选目标「播放列表（歌单）」——不再一律存进默认「我的音乐库」
+    window.openTCPanel('添加本地音乐', '' +
+      '<div class="sm-form">' +
+      '<div class="sm-fld"><label>上传到播放列表</label><select class="tc-input" id="sm-local-pl">' + targetPlOptions() + '</select></div>' +
+      '<div class="sm-fld-hint">选择一首或多首本地音频（mp3 / m4a / aac / ogg / wav / flac）存放进上面的歌单；选「新建歌单」可先建一个歌单再上传。</div>' +
+      '</div>' +
+      '<div class="mail-actions"><button class="cc-tool" id="sm-local-cancel">取消</button><button class="cc-tool" id="sm-local-ok">选择文件上传</button></div>');
+    document.getElementById('sm-local-cancel').addEventListener('click', () => { document.getElementById('tc-mask').hidden = true; });
+    document.getElementById('sm-local-ok').addEventListener('click', () => {
+      resolveTargetPlSel('sm-local-pl', (pid) => {
+        localPlId = pid || 'default';
+        document.getElementById('tc-mask').hidden = true;
+        const inp = document.createElement('input');
+        inp.type = 'file';
+        inp.accept = 'audio/*,.mp3,.m4a,.aac,.ogg,.wav,.flac';
+        inp.multiple = true;
+        inp.onchange = function () { if (this.files && this.files.length) uploadFiles(this.files); };
+        inp.click();
+      });
+    });
   }
   function uploadFiles(files) {
     const list = Array.from(files);
@@ -987,19 +1010,19 @@
       // 播放读取路径（store.get('music-file:'+id)）会查 localStorage，数据不丢。
       // 超 5MB 配额时写失败 → 明确提示，用户知道原因而不是无声失败
       const saveToLocal = (dv) => {
-        if (!dv) { saveLibrary(); return; }
+        if (!dv) { saveLibrarySoon(); return; }
         try {
           localStorage.setItem(key, dv);
         } catch (e) {
           try { toast('存储空间不足，部分音乐可能无法播放'); } catch (e2) {}
         }
-        saveLibrary();
+        saveLibrarySoon();
       };
       // dataURL 字符串 → 先试 IDB，失败再落 localStorage
       const saveStrFallback = (dv) => {
-        if (!dv) { saveLibrary(); return; }
+        if (!dv) { saveLibrarySoon(); return; }
         if (window.idbSet) {
-          window.idbSet(key, dv).then(ok2 => { if (ok2) saveLibrary(); else saveToLocal(dv); }).catch(() => saveToLocal(dv));
+          window.idbSet(key, dv).then(ok2 => { if (ok2) saveLibrarySoon(); else saveToLocal(dv); }).catch(() => saveToLocal(dv));
         } else {
           saveToLocal(dv);
         }
@@ -1010,7 +1033,7 @@
         return;
       }
       window.idbSet(key, payload).then(ok => {
-        if (ok) { saveLibrary(); return; }
+        if (ok) { saveLibrarySoon(); return; }
         // Blob 写入失败（老内核不支持 Blob 克隆）→ 转 dataURL 字符串重存
         toDataUrl(saveStrFallback);
       }).catch(() => {
@@ -1024,7 +1047,7 @@
       readFile(file, function (buf) {
         const id = 'sm_' + Date.now() + '_' + Math.random().toString(36).substr(2, 6);
         const name = file.name.replace(/\.[^.]+$/, '');
-        const item = { id: id, name: name, artist: '', url: '', source: 'local', duration: 0, playlistId: 'default', addedAt: Date.now() };
+        const item = { id: id, name: name, artist: '', url: '', source: 'local', duration: 0, playlistId: localPlId || 'default', addedAt: Date.now() };
         library.push(item);
         const payload = buf instanceof ArrayBuffer ? new Blob([buf], { type: file.type || 'audio/mpeg' }) : buf;
         // 尝试读取时长（读不到也能播放；3s 超时兜底，不阻塞队列）
@@ -1094,6 +1117,25 @@
   // 解析目标歌单：选"新建"时弹窗输入歌单名，创建后回调新歌单 id；否则直接回调选中 id
   function resolveTargetPlaylist(cb) {
     const sel = document.getElementById('sm-target-pl');
+    if (!sel) { cb('default'); return; }
+    const pid = sel.value;
+    if (pid === '__new__') {
+      if (!window.openModal) { cb('default'); return; }
+      window.openModal('新建歌单', '', (name) => {
+        name = (name || '').trim();
+        if (!name) { toast('请输入歌单名称'); return; }
+        const newId = 'spl_' + Date.now();
+        playlists.push({ id: newId, name: name, createdAt: Date.now() });
+        savePlaylists();
+        cb(newId);
+      });
+    } else {
+      cb(pid);
+    }
+  }
+  // 解析指定下拉（按 id）的目标歌单：选"新建"时弹窗建歌单，否则回调所选 id（本地上传用）
+  function resolveTargetPlSel(selId, cb) {
+    const sel = document.getElementById(selId);
     if (!sel) { cb('default'); return; }
     const pid = sel.value;
     if (pid === '__new__') {
@@ -1494,6 +1536,11 @@
   const batchSel = new Set();
   // v3.9.x：我的音乐库分类筛选——'all' 全部 / 'default' 未分类 / 具体歌单 id
   let libFilter = 'all';
+  // v3.26.x：窗口化渲染——大量歌曲时一次性 innerHTML 全量渲染会创建海量 DOM 节点 + 逐节点
+  // 绑定事件监听器，内存峰值激增触发 ERR_INSUFFICIENT_RESOURCES 资源耗尽导致闪退。
+  // 默认只渲染前 LIB_RENDER_LIMIT 首，超出部分显示"加载更多"按钮按需追加。
+  const LIB_RENDER_LIMIT = 300;
+  let libRenderShown = LIB_RENDER_LIMIT;
   function libSongsFor(filter) {
     if (filter === 'default') return library.filter(m => !m.playlistId || m.playlistId === 'default');
     if (filter && filter !== 'all') return library.filter(m => m.playlistId === filter);
@@ -1512,8 +1559,10 @@
           : (libFilter === 'default' ? '还没有未分类的音乐' : '这个歌单还没有歌曲');
       }
     }
-    listEl.innerHTML = songs.length
-      ? songs.map(m => {
+    // v3.26.x：窗口化渲染——只渲染前 libRenderShown 首，避免一次性 innerHTML 海量 DOM 节点导致闪退
+    const renderSongs = songs.slice(0, libRenderShown);
+    listEl.innerHTML = renderSongs.length
+      ? renderSongs.map(m => {
           const active = m.id === currentId;
           const icon = active && audio && !audio.paused
             ? '<path d="M7 5.5h3.5v13H7zM13.5 5.5H17v13h-3.5z"/>'
@@ -1533,6 +1582,15 @@
             '</div>';
         }).join('')
       : '';
+    // 还有更多歌曲 → 追加"加载更多"按钮，按需追加渲染而非一次性全量
+    if (songs.length > renderSongs.length) {
+      const more = document.createElement('div');
+      more.className = 'sm-load-more';
+      more.style.cssText = 'text-align:center;padding:14px;color:var(--accent,#e74c5e);font-size:14px;cursor:pointer;border-radius:8px;margin:6px 0;background:rgba(255,255,255,.06)';
+      more.textContent = '还有 ' + (songs.length - renderSongs.length) + ' 首，点击加载更多';
+      more.addEventListener('click', () => { libRenderShown += LIB_RENDER_LIMIT; renderLibrary(); });
+      listEl.appendChild(more);
+    }
     listEl.querySelectorAll('.sm-song').forEach(row => {
       row.addEventListener('click', (e) => {
         if (musicBatch) {
@@ -1562,14 +1620,21 @@
     const chip = (key, name, count) =>
       '<button class="mlf-chip' + (libFilter === key ? ' sel' : '') + '" data-mlf="' + key + '">' +
       '<span class="mlf-name">' + name + '</span><span class="mlf-cnt">' + count + '</span></button>';
-    let html = chip('all', '全部音乐', library.length);
+    let html = '<button class="mlf-chip mlf-queue" id="sm-lib-queue" title="查看播放队列">' +
+      '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M3 12h18M3 18h9"/></svg>' +
+      '<span class="mlf-name">播放列表</span>' + (playQueue.length ? '<span class="mlf-cnt">' + playQueue.length + '</span>' : '') + '</button>';
+    html += chip('all', '全部音乐', library.length);
     if (unclassified.length) html += chip('default', '未分类音乐', unclassified.length);
     html += playlists.map(p => chip(p.id, esc(p.name), library.filter(m => m.playlistId === p.id).length)).join('');
     wrap.innerHTML = html;
+    const libQueue = document.getElementById('sm-lib-queue');
+    if (libQueue) libQueue.addEventListener('click', openQueuePanel);
     wrap.querySelectorAll('.mlf-chip').forEach(b => {
       b.addEventListener('click', () => {
+        if (!b.dataset.mlf) return;
         if (libFilter === b.dataset.mlf) return;
         libFilter = b.dataset.mlf;
+        libRenderShown = LIB_RENDER_LIMIT; // 切换分类时重置窗口化渲染计数
         if (musicBatch) batchSel.clear();
         renderLibFilter();
         renderLibrary();
@@ -1843,6 +1908,8 @@
     clearStallGuard();
     // v3.14.x：停止/切歌后不再判定联系人收藏（新播放会重新调度）
     clearTaFavTimer();
+    // v3.27.x：停止/切歌取消 TA 暂停互动（未触发的延迟计划、进行中的恢复计划一并清）
+    cancelTaPause();
     if (progressTimer) { clearInterval(progressTimer); progressTimer = null; }
     // v3.9.x：真正停止（非切歌）后让 bg-keep 恢复"后台保活"媒体会话条；
     // 切歌时 currentId 已指向新歌，此处不触发
@@ -1917,6 +1984,8 @@
     addMyRecord(m.id);
     // v3.14.x：联系人按概率收藏正在播的歌（听 10~25s 后判定，切歌/暂停即取消）
     scheduleTaFavCheck(m);
+    // v3.27.x：TA 暂停再播放互动掷骰子（taPauseProb 概率，每首歌一次）
+    scheduleTaPauseIfLucky();
     updateMediaSession(true);
   }
   // v3.6.x：自动播放被拒后的手势恢复——移动端 play() 被拒（异步链丢手势）后，
@@ -1982,6 +2051,8 @@
   }
   function tryResumePlayback() {
     if (!wantPlay || callHoldPending || bgResumeFails >= 6) return;
+    // v3.27.x：TA 暂停再播放互动进行中不补播（暂停 3.5s 由 TA 自己恢复）
+    if (taPauseActive) return;
     // v3.10.x：换源/兜底窗口期不补播——!audio 分支会用旧 URL 造野元素，
     // 与即将回来的直链播放形成双声（弱网双播放器根因之一），还抢弱网带宽
     if (httpsRetrying || demoFallbackBusy) return;
@@ -2021,10 +2092,12 @@
   ['visibilitychange', 'focus'].forEach(function (ev) {
     document.addEventListener(ev, function () {
       if (document.visibilityState !== 'visible') return;
+      failMap = {}; bgResumeFails = 0; // v3.x：从别的应用切回浏览器时，后台停滞触发的播放失败不算连续失败，避免误报"会员/移出"；v3.26.x：补播失败封顶一并清零，回前台才真正发起续播
       setTimeout(function () { try { tryResumePlayback(); } catch (e) {} }, 200);
     });
   });
   window.addEventListener('pageshow', function () {
+    failMap = {}; bgResumeFails = 0; // v3.26.x：见 visibilitychange 同款——回前台重置补播失败封顶
     setTimeout(function () { try { tryResumePlayback(); } catch (e) {} }, 200);
   });
   // 后台看门狗：hidden 下若有「想播却被暂停」的元素，周期性尝试拉起
@@ -2096,10 +2169,7 @@
           toast('外链播放失败，已改用内置示例旋律');
           playDemoFor(m, idx);
         } else if (idx < 0) {
-          toast('播放失败：网络链接可能已失效，或该歌曲为VIP付费歌曲');
-          wantPlay = false; clearBgResume(); // v3.10.x：真失败＝停止意图，不再自动续播
-          try { audio.pause(); } catch (e) {}
-          try { syncPlayIcons(false); } catch (e) {}
+          offerRemoveDamagedSong(m);
         }
       } catch (e) {}
     }, 12000);
@@ -2181,6 +2251,40 @@
     return true;
   }
 
+  // v3.14.x：外链/会员歌曲播放失败 → 弹窗让用户一键把它移出音乐库。
+  // 背景：会员状态检测依赖的第三方 CORS 代理（proxy.cors.sh / allorigins / corsproxy.io）
+  // 已整体失效，「清理会员歌曲」批量检测删不掉会员歌。播放失败这个时刻本身就是最可信
+  // 的判定——见一次弹一次「是否移除」，替代原来只弹 toast 却无处删除的困境。
+  function offerRemoveDamagedSong(m) {
+    if (!m) return;
+    // v3.26.x：后台（document.hidden）的播放失败不弹「移出」窗、也不累计失败次数——
+    // Chrome/安卓冻结后台标签页或网络停顿会中断音频流触发 onerror，把普通免费歌误判
+    // 成「会员/坏链」弹窗（用户红米 K80 后台听歌被弹「会员音乐失效」）。后台失败是
+    // 瞬态：保持 wantPlay 不重置，回前台由 failMap 清零 + 补播兜底自动续播；真·坏链
+    // 在前台手动播放时仍照常累计（toast → 连续 2 次 → 移出窗）。
+    if (document.hidden) return; // v3.26.x：后台冻结/断流误触发 onerror，不弹「移出」窗不计数
+    wantPlay = false; clearBgResume(); // v3.10.x：真失败＝停止意图，不再自动续播
+    try { if (audio) audio.pause(); } catch (e) {}
+    try { syncPlayIcons(false); } catch (e) {}
+    // v3.x：修复误报——播放失败不一定就是会员/付费歌曲。首次失败只有轻提示、不弹「移出」窗，
+    // 否则会把网络/链接临时失效的普通歌曲误判成会员并催删。连续失败才确认为坏链再提示移除。
+    const cnt = (failMap[m.id] || 0) + 1;
+    failMap[m.id] = cnt;
+    if (cnt < 2) {
+      try { toast('播放失败：可能是会员/付费歌曲或链接失效，可再点一次重试'); } catch (e) {}
+      return;
+    }
+    if (!window.openModal) return;
+    try {
+      window.openModal('「' + (m.name || '这首歌') + '」播放失败', '', () => {
+        library = library.filter(function (x) { return x.id !== m.id; });
+        if (currentId === m.id) { teardownAudio(); currentId = null; }
+        saveLibrary();
+        renderPage();
+        toast('已移出音乐库');
+      }, { noInput: true, staticText: '连续播放失败，可能是链接失效或会员/付费歌曲（也可能是网络临时问题）。确定把它移出音乐库吗？' });
+    } catch (e) {}
+  }
   function demoFallbackOrError(m) {
     const idx = seedIdxOf(m);
     if (idx >= 0 && !demoFallbackBusy) {
@@ -2190,8 +2294,7 @@
       return;
     }
     if (idx >= 0) return; // 兜底合成/播放进行中，静默等待结果
-    toast('播放失败：网络链接可能已失效，或该歌曲为VIP付费歌曲');
-    wantPlay = false; clearBgResume(); // v3.10.x：真失败＝停止意图，不再自动续播
+    offerRemoveDamagedSong(m);
   }
   // v3.9.x：onended 兜底——网易云 meting 外链某些流不触发 ended 事件（duration=Infinity
   // 或 chunked 流无 Content-Length），导致自动下一首/循环/随机全失效，只能手动切歌。
@@ -2201,6 +2304,8 @@
     if (endedHandled) return;
     endedHandled = true;
     revokeObjectUrl();
+    // v3.x：播放队列优先——用户排好「下一首」时直接按序切，TA 不抢播
+    if (playQueue.length) { next(); return; }
     let handled = false;
     try { handled = maybeTAAutoAction(); } catch(e) {}
     if (!handled) next();
@@ -2280,13 +2385,17 @@
         } else { armAutoResume(); }
       }
     };
-    audio.onplay = function () { playRejected = false; bgResumeFails = 0; clearStallGuard(); disarmAutoResume(); clearBgResume(); wantPlay = true; syncPlayIcons(true); try { if (navigator.mediaSession) navigator.mediaSession.playbackState = 'playing'; } catch (e) {} try { window.__musicPlaying = true; } catch (e) {} };
+    audio.onplay = function () { playRejected = false; bgResumeFails = 0; clearStallGuard(); disarmAutoResume(); clearBgResume(); wantPlay = true; syncPlayIcons(true); if (m) failMap[m.id] = 0; try { if (navigator.mediaSession) navigator.mediaSession.playbackState = 'playing'; } catch (e) {} try { window.__musicPlaying = true; } catch (e) {} };
     audio.onpause = function () { syncPlayIcons(false); try { if (navigator.mediaSession) navigator.mediaSession.playbackState = 'paused'; } catch (e) {} try { window.__musicPlaying = false; } catch (e) {} // v3.10.x：非用户暂停（后台省电/音频焦点抢占/系统打断）→ 定时补播反击
-      if (wantPlay && !callHoldPending) scheduleBgResume(); };
+      // v3.27.x：TA 暂停再播放互动进行中不补播（TA 稍后会自己点播放恢复）
+      if (wantPlay && !callHoldPending && !taPauseActive) scheduleBgResume(); };
   }
-  function playTrack(id) {
+  function playTrack(id, fromWidget) {
     const m = findTrack(id);
     if (!m) return;
+    markFloatSource(fromWidget);
+    // v3.27.x：用户切歌取消 TA 暂停互动（未触发的计划 / 进行中的恢复一并作废）
+    cancelTaPause();
     // v3.6.x：重置 https 重试标记——_httpsRetried 在 retryWithHttpsUrl 里设 true 后
     // 永不重置，导致后续每次播放都先尝试失败的原始 URL 被混合内容拦截，
     // catch 不区分错误类型当"自动播放拦截"处理 → toast"被浏览器拦截"。
@@ -2297,6 +2406,12 @@
     ensureSongCover(m);
     teardownAudio();
     if (progressTimer) { clearInterval(progressTimer); progressTimer = null; }
+    // v3.22.x：切歌瞬间立即同步所有音乐 UI（聊天悬浮小框 / 音乐页底部播放条 / 桌面
+    // 音乐小组件）。此前悬浮小框/小组件只在音频真正 onplay(或本地歌异步加载完成后)
+    // 才刷新——从通知栏/后台切歌、或播放本地歌时，UI 会停留在旧歌直到出声。
+    // 这里提前刷新歌曲名/封面/小组件，与后续 startPlayback 内的刷新互相幂等；此时
+    // audio 已 teardown 置空，syncPlayIcons 显示暂停态，待起播再由 onplay 纠正。
+    updatePlayerBar();
     if (m.source === 'local' || (!m.url && m.source !== 'url')) {
       // 本地文件：从 IndexedDB 读取 Blob（新版）或 dataURL 字符串（旧版数据）
       const key = MUSIC_PREFIX + ':music-file:' + m.id;
@@ -2372,16 +2487,23 @@
       if (cur) cur.textContent = fmtDur(audio.currentTime);
       const fill = document.getElementById('sm-f-fill');
       if (fill) fill.style.width = Math.min(100, audio.currentTime / audio.duration * 100) + '%';
+      const fCur = document.getElementById('sm-f-cur');
+      if (fCur) fCur.textContent = fmtDur(audio.currentTime);
+      const fDur = document.getElementById('sm-f-dur');
+      if (fDur) fDur.textContent = fmtDur(audio.duration);
     }, 500);
   }
-  function toggle() {
+  function toggle(fromWidget) {
+    markFloatSource(fromWidget);
     if (!audio || !currentId) {
       const songs = library.filter(m => !m.playlistId || m.playlistId === 'default');
-      if (songs.length) { playTrack(songs[0].id); return; }
+      if (songs.length) { playTrack(songs[0].id, fromWidget); return; }
       toast('音乐库还没有歌曲');
       return;
     }
     if (audio.paused) {
+      // v3.27.x：用户手动点播放——TA 的暂停互动作废（避免 TA 恢复计划重复播放/重复字卡）
+      cancelTaPause();
       // v3.6.x：按钮点击本身是用户手势，正常可播；个别浏览器仍拒 → muted 静音解锁
       const p = audio.play();
       if (p && p.catch) p.catch(() => {
@@ -2398,7 +2520,7 @@
         } else { armAutoResume(); }
       });
     }
-    else { wantPlay = false; clearBgResume(); audio.pause(); } // v3.10.x：用户主动暂停＝清除意图，后台补播不得打扰
+    else { wantPlay = false; clearBgResume(); cancelTaPause(); audio.pause(); } // v3.10.x：用户主动暂停＝清除意图，后台补播不得打扰；v3.27.x：TA 暂停互动一并作废
   }
   // v3.5.129：来电联动——暂停音乐 + 隐藏悬浮小框（否则铃声和音乐同时响、
   // 悬浮小框 z-index 9999 会盖在通话面板上遮挡接听按钮）；通话结束恢复
@@ -2421,6 +2543,8 @@
         // 有当前曲目但 audio 还没创建（本地文件异步从 IDB 读取中）→ 标记，
         // startPlayback 时检查并跳过播放，避免通话期间音频加载完自动响起
         callHoldPending = !audio && !!currentId;
+        // v3.27.x：来电打断 TA 暂停互动（通话中不恢复播放）
+        cancelTaPause();
         if (audio && !audio.paused) { wantPlay = false; clearBgResume(); audio.pause(); } // v3.10.x：来电 hold＝清除意图，通话期间不自动续播
         if (el) el.hidden = true;
       } else {
@@ -2451,11 +2575,223 @@
   function playableList() {
     // 当前歌曲所在歌单优先，否则默认列表
     const m = findTrack(currentId);
-    let list = library.filter(x => x.playlistId === (m ? m.playlistId : 'default'));
+    const pid = m ? m.playlistId : 'default';
+    let list = library.filter(x => x.playlistId === pid);
     if (!list.length) list = library.slice();
+    // v3.22.x：按用户在播放列表面板里长按拖动保存的播放顺序重排（顺序播放/自动切歌遵循）
+    const order = loadPlayOrder(pid);
+    if (order && order.length) {
+      const byId = {};
+      list.forEach(x => { byId[x.id] = x; });
+      const seen = {};
+      const sorted = [];
+      order.forEach(id => { if (byId[id] && !seen[id]) { sorted.push(byId[id]); seen[id] = true; } });
+      list.forEach(x => { if (!seen[x.id]) sorted.push(x); });
+      list = sorted;
+    }
     return list;
   }
-  function next() {
+  // ================= 播放顺序（自定义顺序播放） =================
+  // 播放列表面板「当前播放列表」长按拖动后保存每歌单的播放顺序，键 music-playorder
+  function loadPlayOrder(pid) {
+    try { const o = JSON.parse(store.get('music-playorder') || '{}'); return (o && Array.isArray(o[pid])) ? o[pid] : null; } catch (e) { return null; }
+  }
+  function sessionPlayListId() {
+    const m = findTrack(currentId);
+    return (m && (m.playlistId || 'default')) || 'default';
+  }
+  function naturalPlayOrder() {
+    const pid = sessionPlayListId();
+    let list = library.filter(x => x.playlistId === pid);
+    if (!list.length) list = library.slice();
+    return list.map(x => x.id);
+  }
+  // 面板里的可见行只包含「未排队的」当前列表；把拖完的可见顺序按排队位合并回完整歌单顺序再保存
+  function setPlayOrderView(newView) {
+    const pid = sessionPlayListId();
+    const queued = {};
+    playQueue.forEach(id => { queued[id] = true; });
+    let full = loadPlayOrder(pid) || naturalPlayOrder();
+    const newFull = [];
+    let vi = 0;
+    for (let o = 0; o < full.length; o++) {
+      const id = full[o];
+      if (queued[id]) newFull.push(id);
+      else { if (vi < newView.length) newFull.push(newView[vi]); vi++; }
+    }
+    for (; vi < newView.length; vi++) newFull.push(newView[vi]);
+    try {
+      const o = JSON.parse(store.get('music-playorder') || '{}');
+      o[pid] = newFull;
+      store.set('music-playorder', JSON.stringify(o));
+    } catch (e) {}
+  }
+  // ================= 播放队列（下一首播放） =================
+  function addToQueue(id) {
+    const m = findTrack(id);
+    if (!m) return;
+    if (playQueue.indexOf(id) >= 0) { toast('这首歌已在播放队列'); return; }
+    if (currentId === id) { toast('这就是正在播放的歌'); return; }
+    playQueue.push(id);
+    renderQueueBadge();
+  }
+  // v3.x：队列数量黑色小圆点角标已按用户要求移除，保留调用点以兼容后续扩展
+  function renderQueueBadge() {}
+  // ================= 播放列表面板：长按拖动排序 + 自动定位当前歌 =================
+  const qd = { active: null, timer: null, dragging: false, section: null, sx: 0, sy: 0, notMoved: false, bound: false, suppressClick: false };
+  function qdBindGlobals() {
+    if (qd.bound) return; qd.bound = true;
+    document.addEventListener('touchmove', qdOnMove, { passive: false });
+    document.addEventListener('mousemove', qdOnMove);
+    document.addEventListener('touchend', qdOnEnd);
+    document.addEventListener('touchcancel', qdOnEnd);
+    document.addEventListener('mouseup', qdOnEnd);
+  }
+  function qdPoint(e) { return (e.touches && e.touches[0]) || e; }
+  function qdOnMove(e) {
+    if (!qd.dragging) {
+      if (qd.notMoved && qd.active) {
+        const p = qdPoint(e);
+        if (Math.abs(p.clientX - qd.sx) > 10 || Math.abs(p.clientY - qd.sy) > 10) {
+          qd.notMoved = false;
+          if (qd.timer) { clearTimeout(qd.timer); qd.timer = null; }
+        }
+      }
+      return;
+    }
+    e.preventDefault();
+    const sec = qd.section;
+    if (!sec || !qd.active) return;
+    const p = qdPoint(e);
+    const rows = sec.querySelectorAll('.sm-song[data-qid]');
+    for (const r of rows) {
+      if (r === qd.active) continue;
+      const b = r.getBoundingClientRect();
+      if (p.clientY >= b.top && p.clientY <= b.bottom) { qdSwap(qd.active, r); break; }
+    }
+  }
+  function qdSwap(a, b) {
+    const pa = a.parentNode;
+    if (!pa) return;
+    const children = Array.from(pa.children);
+    const ai = children.indexOf(a), bi = children.indexOf(b);
+    if (ai < 0 || bi < 0) return;
+    if (ai < bi) pa.insertBefore(b, a); else pa.insertBefore(a, b);
+  }
+  function qdOnEnd() {
+    if (qd.timer) { clearTimeout(qd.timer); qd.timer = null; }
+    if (qd.dragging && qd.active) {
+      qd.active.classList.remove('dragging');
+      try { document.removeAttribute('aria-grabbed'); } catch (e) {}
+      const sec = qd.section;
+      if (sec) {
+        const view = Array.from(sec.querySelectorAll('.sm-song[data-qid]')).map(r => r.dataset.qid);
+        setPlayOrderView(view);
+      }
+      qd.suppressClick = true;
+    }
+    qd.dragging = false; qd.active = null; qd.notMoved = false;
+    document.body.style.userSelect = '';
+  }
+  function qdStart(e, row) {
+    if (e.target.closest('[data-qrm]')) return;
+    const p = qdPoint(e);
+    qd.sx = p.clientX; qd.sy = p.clientY; qd.notMoved = true;
+    qd.active = row;
+    if (qd.timer) clearTimeout(qd.timer);
+    qd.timer = setTimeout(function () {
+      qd.dragging = true;
+      try { document.setAttribute('aria-grabbed', 'true'); } catch (err) {}
+      row.classList.add('dragging');
+      document.body.style.userSelect = 'none';
+    }, 320);
+  }
+  function setupQueueDrag() {
+    const sec = document.getElementById('td-qlist');
+    if (!sec) return;
+    qd.suppressClick = false;
+    qd.section = sec;
+    sec.querySelectorAll('.sm-song[data-qid]').forEach(function (row) {
+      row.classList.add('draggable');
+      row.addEventListener('touchstart', function (e) { qdStart(e, row); }, { passive: true });
+      row.addEventListener('mousedown', function (e) { qdStart(e, row); });
+    });
+  }
+  function scrollToCurrentSong() {
+    const tcb = document.getElementById('tc-body');
+    if (!tcb) return;
+    const act = tcb.querySelector('.sm-song.active');
+    if (!act) return;
+    const tr = tcb.getBoundingClientRect(), ar = act.getBoundingClientRect();
+    const top = (ar.top - tr.top) - tcb.clientHeight / 2 + ar.height / 2;
+    tcb.scrollTop = Math.max(0, Math.min(top, tcb.scrollHeight - tcb.clientHeight));
+  }
+  function openQueuePanel() {
+    if (!window.openTCPanel) return;
+    const rowFor = (m, extra, withRm) => '<div class="sm-song' + (extra || '') + '" data-qid="' + m.id + '">' + songIcoHtml(m) +
+      '<div class="sm-song-info"><div class="sm-song-name">' + esc(m.name || '未知歌曲') + '</div>' +
+      '<div class="sm-song-sub">' + esc(m.artist || '未知歌手') + '</div></div>' +
+      (withRm ? '<button class="sm-song-more" data-qrm="' + m.id + '" title="移出队列"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"/></svg></button>' : '') + '</div>';
+    let html = '';
+    // 一、待播队列（歌曲上点「⋯ → 下一首播放」加入，依次优先播放）
+    html += '<div class="sm-req-hint" style="padding:2px 0;font-weight:700">待播队列</div>';
+    if (playQueue.length) {
+      html += playQueue.map(id => { const m = findTrack(id); return m ? rowFor(m, '', true) : ''; }).join('');
+    } else {
+      html += '<div class="sm-req-hint" style="padding:4px 0 2px">还没有排队的歌——在歌曲上点「⋯」选「下一首播放」即可加入</div>';
+    }
+    // 二、当前播放列表（正在听的歌单，正在播放的歌高亮）
+    const queuedId = {};
+    playQueue.forEach(id => { queuedId[id] = true; });
+    let list = playableList();
+    if (playQueue.length) list = list.filter(m => !queuedId[m.id]);
+    html += '<div class="sm-req-hint" style="padding:10px 0 2px;font-weight:700;display:flex;align-items:center;gap:4px">当前播放列表<span class="sm-q-drag-hint"></span></div>';
+    if (!list.length && !currentId) {
+      html += '<div class="sm-req-hint" style="padding:4px 0 2px">音乐库暂无歌曲</div>';
+    } else if (!list.length) {
+      html += '<div class="sm-req-hint" style="padding:4px 0 2px">当前正在播放《' + esc(findTrack(currentId) ? findTrack(currentId).name : '') + '》，其余歌曲正在其他歌单</div>';
+    } else {
+      html += '<div id="td-qlist">' + list.map(m => rowFor(m, m.id === currentId ? ' active' : '', false)).join('') + '</div>';
+    }
+    window.openTCPanel('音乐播放列表', html +
+      '<div class="mail-actions">' +
+      (playQueue.length ? '<button class="cc-tool" id="sm-q-clear">清空队列</button>' : '') +
+      '<button class="cc-tool" id="sm-q-close">关闭</button></div>');
+    qdBindGlobals();
+    setupQueueDrag();
+    scrollToCurrentSong();
+    document.getElementById('sm-q-close').addEventListener('click', function () { document.getElementById('tc-mask').hidden = true; });
+    const clr = document.getElementById('sm-q-clear');
+    if (clr) clr.addEventListener('click', function () { playQueue = []; renderQueueBadge(); toast('已清空播放队列'); openQueuePanel(); });
+    // 点待播队列整行＝立刻播放并从队列移除；点 × 仅移除；点当前播放列表任一行＝直接切到这首歌
+    document.querySelectorAll('#tc-body .sm-song[data-qid]').forEach(function (row) {
+      row.addEventListener('click', function (e) {
+        if (qd.suppressClick) { qd.suppressClick = false; return; }
+        if (e.target.closest('[data-qrm]')) return;
+        const id = row.dataset.qid;
+        playQueue = playQueue.filter(function (x) { return x !== id; });
+        renderQueueBadge();
+        document.getElementById('tc-mask').hidden = true;
+        playTrack(id);
+      });
+    });
+    document.querySelectorAll('#tc-body [data-qrm]').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        playQueue = playQueue.filter(function (x) { return x !== btn.dataset.qrm; });
+        renderQueueBadge();
+        openQueuePanel();
+      });
+    });
+  }
+  function next(fromWidget) {
+    markFloatSource(fromWidget);
+    // v3.x：播放队列优先——用户点「下一首播放」加入的歌先播，逐首弹出直至清空，
+    // 才回到按播放模式切歌。队列里的歌被删则跳过继续取下一首。
+    while (playQueue.length) {
+      const qid = playQueue.shift();
+      if (findTrack(qid)) { playTrack(qid); return; }
+    }
+    renderQueueBadge();
     const list = playableList();
     if (!list.length) return;
     let idx = list.findIndex(x => x.id === currentId);
@@ -2466,15 +2802,16 @@
       idx = idx < 0 ? -1 : idx;
       nid = list[(idx + 1) % list.length].id;
     }
-    playTrack(nid);
+    playTrack(nid, fromWidget);
   }
-  function prev() {
+  function prev(fromWidget) {
+    markFloatSource(fromWidget);
     const list = playableList();
     if (!list.length) return;
     const idx = list.findIndex(x => x.id === currentId);
     // v3.6.x：当前歌不在可播列表（idx=-1）时取最后一首，而不是 (idx-1+len)%len=len-2 的倒数第二首
-    if (idx < 0) { playTrack(list[list.length - 1].id); return; }
-    playTrack(list[(idx - 1 + list.length) % list.length].id);
+    if (idx < 0) { playTrack(list[list.length - 1].id, fromWidget); return; }
+    playTrack(list[(idx - 1 + list.length) % list.length].id, fromWidget);
   }
   function cycleMode() {
     const order = ['list', 'shuffle', 'single'];
@@ -2486,17 +2823,17 @@
   }
   function updateModeIcon() {
     const paths = {
-      list: '<path d="M17 1l4 4-4 4"/><path d="M3 11V9a4 4 0 014-4h14"/><path d="M7 23l-4-4 4-4"/><path d="M21 13v2a4 4 0 01-4 4H3"/>',
-      shuffle: '<path d="M17 1l4 4-4 4"/><path d="M3 11V9a4 4 0 014-4h14"/><path d="M7 23l-4-4 4-4"/><path d="M21 13v2a4 4 0 01-4 4H3"/>',
+      list: '<path d="M8 6h13M8 12h13M8 18h13"/><path d="M3 6h.01M3 12h.01M3 18h.01"/>',
+      shuffle: '<path d="M2 11a5 5 0 0 1 5-5h13"/><path d="m16 3 4 3-4 3"/><path d="M22 13a5 5 0 0 1-5 5H4"/><path d="m8 21-4-3 4-3"/>',
       single: '<circle cx="12" cy="12" r="9"/><path d="M12 8v8M9.5 8.5h5"/>'
     };
-    document.querySelectorAll('#sm-mode-ico').forEach(el => { el.innerHTML = paths[mode] || paths.list; });
+    document.querySelectorAll('#sm-mode-ico, #sm-f-mode-ico, #mw-mode-ico').forEach(el => { el.innerHTML = paths[mode] || paths.list; });
   }
   function syncPlayIcons(playing) {
     const playPath = playing
       ? '<path d="M7 5.5h3.5v13H7zM13.5 5.5H17v13h-3.5z"/>'
       : '<path d="M8 5.5v13l11-6.5z"/>';
-    ['sm-play-ico', 'sm-f-play-ico'].forEach(id => {
+    ['sm-play-ico', 'sm-f-play-ico', 'sm-f-mini-play-ico'].forEach(id => {
       const el = document.getElementById(id);
       if (el) el.innerHTML = playPath;
     });
@@ -2520,6 +2857,7 @@
     document.getElementById('sm-pb-cur').textContent = '00:00';
     syncPlayIcons(audio && !audio.paused);
     updateModeIcon();
+    renderQueueBadge();
     // 桌面小部件同步
     const wSong = document.getElementById('mw-song');
     const wArtist = document.getElementById('mw-artist');
@@ -2562,13 +2900,39 @@
 
   // ================= 悬浮小框 =================
   function isFloatOn() { return settings.floatEn && !floatClosed && currentId && audio; }
+  // 播放入口标记：桌面小组件本身就是播放控制器，凡由小组件触发的播放/暂停/切歌，
+  // 一律抑制悬浮小框自动唤出（无论当前小框是否可见），避免「在桌面第二页小组件上点
+  // 播放，还叠加弹出一个小浮窗」的重复控制；来自其他任何入口（音乐页/底部播放条/
+  // 队列/列表/小框本身）→ 清除抑制，恢复正常显隐
+  function markFloatSource(fromWidget) {
+    floatHideByWidget = !!fromWidget;
+  }
+  // 悬浮小框 收起/展开：在新版多行小框 与 最初版最小单行小框 之间切换
+  function applyFloatMin() {
+    const el = document.getElementById('sm-float');
+    if (el) el.classList.toggle('min', floatMin);
+  }
+  function toggleFloatMin() {
+    floatMin = !floatMin;
+    applyFloatMin();
+    syncPlayIcons(audio && !audio.paused);
+  }
   function renderFloat() {
     const el = document.getElementById('sm-float');
     if (!el) return;
     const m = findTrack(currentId);
-    el.hidden = !(settings.floatEn && !floatClosed && currentId && audio && m);
+    el.hidden = !(settings.floatEn && !floatClosed && currentId && audio && m) || floatHideByWidget;
+    applyFloatMin();
     if (!m) return;
-    document.getElementById('sm-f-name').textContent = (m.name || '未知歌曲') + (m.artist ? ' · ' + m.artist : '');
+    document.getElementById('sm-f-name').textContent = m.name || '未知歌曲';
+    const miniName = document.getElementById('sm-f-mini-name');
+    if (miniName) miniName.textContent = m.name || '未知歌曲';
+    const fArtist = document.getElementById('sm-f-artist');
+    if (fArtist) fArtist.textContent = m.artist || '';
+    const fDur = document.getElementById('sm-f-dur');
+    if (fDur) fDur.textContent = fmtDur(m.duration || (audio && audio.duration) || 0);
+    const fCur = document.getElementById('sm-f-cur');
+    if (fCur) fCur.textContent = '00:00';
     syncPlayIcons(audio && !audio.paused);
     syncHeartIcons();
   }
@@ -2579,6 +2943,7 @@
   window.musicFloatSet = function (en) {
     settings.floatEn = !!en;
     floatClosed = false;
+    floatHideByWidget = false; // 用户显式操作悬浮小窗开关 → 清除小组件抑制
     saveSettings();
     syncFloatToggle();
     renderFloat();
@@ -2834,6 +3199,10 @@
     if (!window.openTCPanel) return;
     const plOpts = playlists.map(p => '<option value="' + p.id + '"' + (m.playlistId === p.id ? ' selected' : '') + '>' + esc(p.name) + '</option>').join('');
     window.openTCPanel('管理音乐', '' +
+      '<div class="sm-fld"><label>快捷操作</label><div class="sm-quick-actions">' +
+      '<button class="cc-tool" id="sm-e-qnext">下一首播放</button>' +
+      '<button class="cc-tool" id="sm-e-qpl">加入播放列表</button>' +
+      '</div></div>' +
       // v3.6.x：回填值做属性级转义——歌名/歌手含 " 会提前闭合 value 属性破坏表单（esc 只转义 <）
       '<div class="sm-fld"><label>歌曲名称</label><input class="tc-input" id="sm-e-name" value="' + String(m.name || '').replace(/"/g, '&quot;').replace(/</g, '&lt;') + '"></div>' +
       '<div class="sm-fld"><label>歌手</label><input class="tc-input" id="sm-e-artist" value="' + String(m.artist || '').replace(/"/g, '&quot;').replace(/</g, '&lt;') + '"></div>' +
@@ -2881,6 +3250,28 @@
       toast('已清除封面');
     });
     document.getElementById('sm-e-cancel').addEventListener('click', () => { document.getElementById('tc-mask').hidden = true; });
+    // v3.x：快捷操作——下一首播放（加入播放队列）/ 加入播放列表（移动到所选歌单）
+    const qnext = document.getElementById('sm-e-qnext');
+    if (qnext) qnext.addEventListener('click', () => {
+      addToQueue(id);
+      document.getElementById('tc-mask').hidden = true;
+      toast('已加入播放队列，播完当前将播放');
+    });
+    const qpl = document.getElementById('sm-e-qpl');
+    if (qpl) qpl.addEventListener('click', () => {
+      if (!window.openTCPanel) return;
+      const opts = playlists.map(p => '<option value="' + p.id + '">' + esc(p.name) + '</option>').join('');
+      window.openTCPanel('加入播放列表', '<div class="sm-fld"><label>选择歌单</label><select class="tc-input" id="sm-qpl-sel"><option value="default">我的音乐库</option>' + opts + '</select></div>' +
+        '<div class="mail-actions"><button class="cc-tool" id="sm-qpl-cancel">取消</button><button class="cc-tool" id="sm-qpl-ok">加入</button></div>');
+      document.getElementById('sm-qpl-cancel').addEventListener('click', () => { document.getElementById('tc-mask').hidden = true; });
+      document.getElementById('sm-qpl-ok').addEventListener('click', () => {
+        m.playlistId = document.getElementById('sm-qpl-sel').value;
+        saveLibrary();
+        document.getElementById('tc-mask').hidden = true;
+        renderPage();
+        toast('已加入播放列表');
+      });
+    });
     document.getElementById('sm-e-ok').addEventListener('click', () => {
       m.name = (document.getElementById('sm-e-name').value || '').trim() || m.name;
       m.artist = (document.getElementById('sm-e-artist').value || '').trim();
@@ -2924,29 +3315,37 @@
       console.log('[music-req] called', { libLen: library.length, cooldownAt: cooldownAt, cooldownMs: settings.cooldownMs, reqProb: settings.reqProb, prob: prob, now: Date.now() });
       if (!library.length) { console.log('[music-req] return: library empty'); return; }
       const now = Date.now();
-      if (now - cooldownAt < settings.cooldownMs) { console.log('[music-req] return: cooldown', { remain: settings.cooldownMs - (now - cooldownAt) }); return; }
-      if (Math.random() * 100 >= prob) { console.log('[music-req] return: prob miss', { prob: prob }); return; }
-      console.log('[music-req] TRIGGER');
-      cooldownAt = now;
+      const cooling = now - cooldownAt < settings.cooldownMs;
+      // v3.x：「一起去听」请求（弹窗）——触发后直接 return，同一次调用不再判断「预订下一首」
+      if (!cooling) {
+        const prob = (typeof settings.reqProb === 'number' ? settings.reqProb : 5);
+        if (Math.random() * 100 < prob) {
+          console.log('[music-req] TRIGGER');
+          cooldownAt = now;
       const candidates = library.slice();
       if (!candidates.length) return;
       const track = candidates[Math.floor(Math.random() * candidates.length)];
       // 多桌面：弹窗期间切换联系人后点按钮会把接受/拒绝写到新桌面 → 捕获 cid 校验
       const myCid = window.__activeCid || 'default';
-      reqData = { trackId: track.id };
+      // v3.x：正有音乐在播时，邀请语义＝「切换去听这首歌」；无播放时＝「开始一起听这首歌」
+      const switching = !!currentId;
+      reqData = { trackId: track.id, switching: switching };
       taActive = true;
       const name = partnerName();
       const trackName = track.name || '未知歌曲';
       const artist = track.artist ? ' - ' + track.artist : '';
-      if (window.chatAddSystem) window.chatAddSystem(name + ' 想和你一起听《' + trackName + '》' + artist);
+      const askMsg = switching
+        ? name + ' 想邀请你切换到《' + trackName + '》' + artist
+        : name + ' 想和你一起听《' + trackName + '》' + artist;
+      if (window.chatAddSystem) window.chatAddSystem(askMsg);
       if (window.openTCPanel) {
         window.openTCPanel('音乐', '' +
           '<div class="sm-req">' +
           '<div class="sm-req-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg></div>' +
-          '<div class="sm-req-hint">' + (window.taFit ? window.taFit(name + ' 想和你一起听：') : (name + ' 想和你一起听：')) + '</div>' +
+          '<div class="sm-req-hint">' + (window.taFit ? window.taFit(name + (switching ? ' 想邀请你切到这首歌：' : ' 想和你一起听：')) : (name + (switching ? ' 想邀请你切到这首歌：' : ' 想和你一起听：'))) + '</div>' +
           '<div class="sm-req-name">《' + esc(trackName) + '》</div>' +
           '</div>' +
-          '<div class="mail-actions"><button class="cc-tool" id="sm-req-no">稍后</button><button class="cc-tool" id="sm-req-yes">一起听</button></div>');
+          '<div class="mail-actions"><button class="cc-tool" id="sm-req-no">稍后</button><button class="cc-tool" id="sm-req-yes">' + (switching ? '切过去' : '一起听') + '</button></div>');
         document.getElementById('sm-req-no').addEventListener('click', () => {
           document.getElementById('tc-mask').hidden = true;
           if ((window.__activeCid || 'default') !== myCid) { reqData = null; return; }
@@ -2961,13 +3360,44 @@
           document.getElementById('tc-mask').hidden = true;
           if ((window.__activeCid || 'default') !== myCid) { reqData = null; return; }
           if (!reqData) return;
+          const switchNow = !!reqData.switching;
           playTrack(reqData.trackId);
           addRecord(reqData.trackId, '接受了 TA 的听歌邀请');
-          if (window.chatAddSystem) window.chatAddSystem('你接受了 ' + name + ' 的听歌邀请，一起听《' + (track.name || '未知歌曲') + '》');
+          const accMsg = switchNow
+            ? '你接受了邀请，已切换到《' + (track.name || '未知歌曲') + '》'
+            : '你接受了 ' + name + ' 的听歌邀请，一起听《' + (track.name || '未知歌曲') + '》';
+          if (window.chatAddSystem) window.chatAddSystem(accMsg);
           reqData = null;
           toast('开始播放');
         });
       }
+        return; // 「一起去听」已触发，本次调用不再判断「预订下一首」
+      }
+    }
+    // v3.x：「预订下一首」——聊天中 TA 按独立概率把一首歌排进播放队列并发系统消息；
+    // 与「一起去听」共用冷却（同一冷却窗内互斥，任一生效即进入冷却，不会同一条消息里同时发生）
+    // v3.24.x：只有正在播放时才允许「预订下一首」——没播放时预订下一首无意义，
+    // 且会让用户看到"预订下一首"系统消息却以为本该是"邀请一起听"弹窗（用户反馈）。
+    // 没播放时只走上面的「一起去听」弹窗分支（switching=false，"想和你一起听"）。
+    const rProb = probOf(settings.taReserveProb, 6);
+    if (currentId && !(now - cooldownAt < settings.cooldownMs) && Math.random() * 100 < rProb && library.length) {
+      // 挑一首「既没在播、也不在播放队列」的歌作为下一首目标（重试若干次）
+      let candidate = null;
+      for (let i = 0; i < 8; i++) {
+        const c = library[Math.floor(Math.random() * library.length)];
+        if (c && c.id !== currentId && playQueue.indexOf(c.id) < 0) { candidate = c; break; }
+      }
+      if (candidate) {
+        cooldownAt = now;
+        playQueue.push(candidate.id);
+        renderQueueBadge();
+        const name = partnerName();
+        const trackName = candidate.name || '未知歌曲';
+        const artist = candidate.artist ? ' - ' + candidate.artist : '';
+        if (window.chatAddSystem) window.chatAddSystem(name + ' 预订了下一首要听的歌：《' + trackName + '》' + artist);
+        addRecord(candidate.id, 'TA 预订了下一首');
+      }
+    }
     } catch (e) {}
   };
   // 歌曲结束：TA 可能接动作（切歌/随机/换模式）
@@ -3015,6 +3445,77 @@
       addModeRecord(modeLabel);
     }
     return false;
+  }
+
+  // ================= v3.27.x：TA 暂停再播放互动 =================
+  // 播放中按 taPauseProb 小概率触发：TA 突然暂停播放 → 聊天发「TA 暂停播放」字卡，
+  // 约 3.5 秒后 TA 又帮你点播放恢复 → 再发「TA 恢复播放」字卡（保留播放进度）。
+  // 字卡文案来自系统预设字卡【其他互动功能字卡 → 音乐】tab（dc-off-music:* 逐张可关）。
+  // 防连发/防循环（用户明确要求不要"一直暂停又继续"）：
+  //   ① 同一首歌只互动一次（taPauseDoneId）；
+  //   ② 互动后进入冷却（cooldownMs，默认 10 分钟）——连续切歌/下一首也不会每首都触发；
+  //   ③ 互动进行中全局 taPauseActive 重入保护；
+  //   ④ 音乐设置「联系人可暂停你的播放」总开关（taPauseEn，关闭=彻底不触发）。
+  const DEF_TA_PAUSE_CARDS = ['先暂停一下，听我说句话', '嘘——让音乐停一会儿', '（TA 按下了暂停键）'];
+  const DEF_TA_RESUME_CARDS = ['好啦，继续听吧', '又帮你按了播放，接着听', '（TA 又按下了播放键）'];
+  let taPauseActive = false;      // TA 暂停进行中（禁止后台补播/手势补播打扰）
+  let taPauseTimer = null;        // 掷骰子命中后的延迟触发定时器
+  let taPauseResumeTimer = null;  // TA 恢复播放定时器
+  let taPauseDoneId = null;       // 已互动过的歌曲 id（同一首歌不重复触发）
+  let taPauseCooldownAt = 0;      // 上次互动完成时间戳（冷却期内不连发）
+  function cancelTaPause() {
+    taPauseActive = false;
+    if (taPauseTimer) { clearTimeout(taPauseTimer); taPauseTimer = null; }
+    if (taPauseResumeTimer) { clearTimeout(taPauseResumeTimer); taPauseResumeTimer = null; }
+  }
+  // 从系统预设字卡「音乐」分类抽字卡发进聊天（过滤已关闭单卡，全关回退内置兜底）
+  function taPauseSendCard(group, fallback) {
+    try {
+      let arr = window.getLibPool ? window.getLibPool('music', group, fallback) : (fallback || []);
+      if (window.isDefaultCardOff) arr = arr.filter(c => !window.isDefaultCardOff('music', c));
+      if (!arr.length) arr = (fallback || []).slice();
+      if (!arr.length) return;
+      let m = arr[Math.floor(Math.random() * arr.length)];
+      if (window.taFit) m = window.taFit(m);
+      if (window.chatAddIn) window.chatAddIn(m);
+    } catch (e) {}
+  }
+  // 开始播放一首歌时掷一次骰子；命中则在该歌播放 10~25s 后执行「暂停→恢复」互动。
+  // 任一防连发守卫命中即整首不触发：开关关闭 / 同歌已互动过 / 冷却期内 / 概率未中。
+  function scheduleTaPauseIfLucky() {
+    cancelTaPause();
+    if (!settings.taPauseEn) return;                                  // 权限开关关闭：彻底不触发
+    if (currentId && currentId === taPauseDoneId) return;             // 同一首歌只互动一次
+    if (Date.now() - taPauseCooldownAt < (settings.cooldownMs || 600000)) return; // 冷却期内不连发
+    const p = probOf(settings.taPauseProb, 3);
+    if (p <= 0 || Math.random() * 100 >= p) return;
+    if (!currentId || !audio) return;
+    const endedId = currentId;
+    taPauseTimer = setTimeout(function () {
+      taPauseTimer = null;
+      if (taPauseActive || !audio || !currentId || currentId !== endedId || audio.paused) return;
+      if (callHoldPending || document.hidden) return; // 通话/后台不打扰
+      taPauseActive = true;
+      wantPlay = true; // 保留播放意图（TA 稍后会恢复，不按「用户主动暂停」处理）
+      try { audio.pause(); } catch (e) {}
+      taPauseSendCard('TA 暂停播放', DEF_TA_PAUSE_CARDS);
+      // 3.5s 后 TA 点播放恢复（校验仍是同一首歌；非手势播放被拒走 muted 解锁兜底）
+      taPauseResumeTimer = setTimeout(function () {
+        taPauseResumeTimer = null;
+        if (!taPauseActive || !audio || !currentId || currentId !== endedId) { taPauseActive = false; return; }
+        taPauseActive = false;
+        // 防连发：互动完成——该歌标记已互动、进入冷却（切歌后 currentId 变化自然重置）
+        taPauseDoneId = endedId;
+        taPauseCooldownAt = Date.now();
+        const p2 = audio.play();
+        if (p2 && p2.catch) p2.catch(function () {
+          try { audio.muted = true; } catch (e) {}
+          const p3 = audio.play();
+          if (p3 && p3.then) p3.then(function () { try { if (audio) audio.muted = false; } catch (e) {} }).catch(function () {});
+        });
+        taPauseSendCard('TA 恢复播放', DEF_TA_RESUME_CARDS);
+      }, 3500);
+    }, 10000 + Math.floor(Math.random() * 15000));
   }
 
   // ================= 星音设置 =================
@@ -3101,10 +3602,15 @@
       '<div class="gs-row"><span>请求冷却时间</span><select class="tc-input" id="sm-set-cool" style="width:110px">' + cooldownOpts + '</select></div>' +
       '<div class="gs-row"><span>桌面小组件封面</span><select class="tc-input" id="sm-set-wcov" style="width:120px"><option value="song"' + (settings.widgetCoverMode !== 'playlist' ? ' selected' : '') + '>歌曲封面</option><option value="playlist"' + (settings.widgetCoverMode === 'playlist' ? ' selected' : '') + '>歌单封面</option></select></div>' +
       '<div class="sm-set-hint">聊天过程中 TA 会按概率请求和你一起听歌；播放时右上角出现可拖动的悬浮小框</div>' +
+      '<div class="gs-row"><span>预订下一首概率</span><div class="stepper" id="sm-set-reserve" data-min="0" data-max="100" data-step="5"><button class="stp-min">−</button><input class="stp-val" id="sm-set-reserve-val" readonly><button class="stp-max">+</button></div></div>' +
+      '<div class="sm-set-hint">聊天过程中 TA 有概率「预订」下一首要播的音乐：把这首歌排进播放队列（底部播放条的「播放队列」里可见），并在聊天里发送系统消息；被预订的歌会按你排的顺序先播（设 0 = TA 从不预订下一首）</div>' +
       '<div class="gs-row"><span>歌曲播完·切下一首概率</span><div class="stepper" id="sm-set-next" data-min="0" data-max="100" data-step="5"><button class="stp-min">−</button><input class="stp-val" id="sm-set-next-val" readonly><button class="stp-max">+</button></div></div>' +
       '<div class="gs-row"><span>歌曲播完·随机挑歌概率</span><div class="stepper" id="sm-set-rand" data-min="0" data-max="100" data-step="5"><button class="stp-min">−</button><input class="stp-val" id="sm-set-rand-val" readonly><button class="stp-max">+</button></div></div>' +
       '<div class="gs-row"><span>歌曲播完·换播放模式概率</span><div class="stepper" id="sm-set-modep" data-min="0" data-max="100" data-step="5"><button class="stp-min">−</button><input class="stp-val" id="sm-set-modep-val" readonly><button class="stp-max">+</button></div></div>' +
       '<div class="sm-set-hint">一起听完一首歌时，TA 按上面三个概率主动控制播放：切到下一首 / 随机挑一首 / 把播放模式换成顺序播放·列表循环·随机播放·单曲循环；三个都不中就正常自动切下一首（全设 0 = TA 从不主动控制）</div>' +
+      '<div class="sm-set-row"><span>联系人可暂停你的播放</span><label class="toggle"><input type="checkbox" id="sm-set-pause-en"' + (settings.taPauseEn ? ' checked' : '') + '><span class="tk"></span></label></div>' +
+      '<div class="gs-row"><span>播放中·TA 暂停再播放概率</span><div class="stepper" id="sm-set-pauseprob" data-min="0" data-max="100" data-step="5"><button class="stp-min">−</button><input class="stp-val" id="sm-set-pauseprob-val" readonly><button class="stp-max">+</button></div></div>' +
+      '<div class="sm-set-hint">播放歌曲时 TA 有小概率突然暂停播放（聊天里发一张字卡），几秒后再帮你点播放恢复（再发一张字卡）；字卡文案在【字卡库 → 其他互动功能字卡 → 音乐】可逐张开关。上方开关关闭或概率设 0 = 关闭 TA 暂停权限；同一首歌只触发一次、触发后 10 分钟内不重复（不会一直暂停又继续）</div>' +
       '<div class="gs-row"><span>TA 收藏歌曲概率</span><div class="stepper" id="sm-set-favprob" data-min="0" data-max="100" data-step="5"><button class="stp-min">−</button><input class="stp-val" id="sm-set-favprob-val" readonly><button class="stp-max">+</button></div></div>' +
       '<div class="sm-set-hint">你播放歌曲听一会儿后，TA 有概率把这首歌收进「TA的收藏」（音乐页收藏 tab 右边可查看；已收藏过的歌不重复判定，两次收藏间隔至少 90 秒）</div>' +
       '<div class="sm-set-row"><span>本地音频缓存</span><span id="sm-storage-use" style="color:var(--muted);font-size:12px">计算中…</span></div>' +
@@ -3159,14 +3665,32 @@
       });
     };
     bindProbStep('sm-set-prob', 'reqProb', 5, 30);
+    bindProbStep('sm-set-reserve', 'taReserveProb', 6, 100);
     bindProbStep('sm-set-next', 'taNextProb', 15, 100);
     bindProbStep('sm-set-rand', 'taRandProb', 10, 100);
     bindProbStep('sm-set-modep', 'taModeProb', 5, 100);
+    bindProbStep('sm-set-pauseprob', 'taPauseProb', 3, 100);
     bindProbStep('sm-set-favprob', 'taFavProb', 20, 100);
+    // v3.27.x：「联系人可暂停你的播放」权限开关——关闭时彻底不触发，步进器置灰
+    const syncPauseEn = function () {
+      const box = document.getElementById('sm-set-pauseprob');
+      if (box) box.style.opacity = settings.taPauseEn ? '' : '0.4';
+      const valEl = document.getElementById('sm-set-pauseprob-val');
+      if (valEl) valEl.style.pointerEvents = settings.taPauseEn ? '' : 'none';
+    };
+    const pauseEnCb = document.getElementById('sm-set-pause-en');
+    if (pauseEnCb) {
+      pauseEnCb.addEventListener('change', () => {
+        settings.taPauseEn = pauseEnCb.checked;
+        saveSettings();
+        syncPauseEn();
+      });
+    }
+    syncPauseEn();
     const cool = document.getElementById('sm-set-cool');
     if (cool) cool.addEventListener('change', () => { settings.cooldownMs = Number(cool.value); saveSettings(); });
     const floatCb = document.getElementById('sm-set-float');
-    if (floatCb) floatCb.addEventListener('change', () => { settings.floatEn = floatCb.checked; saveSettings(); syncFloatToggle(); renderFloat(); });
+    if (floatCb) floatCb.addEventListener('change', () => { settings.floatEn = floatCb.checked; floatHideByWidget = false; saveSettings(); syncFloatToggle(); renderFloat(); });
     const wcov = document.getElementById('sm-set-wcov');
     if (wcov) wcov.addEventListener('change', () => {
       settings.widgetCoverMode = wcov.value;
@@ -3182,14 +3706,18 @@
     const prevBtn = document.getElementById('mw-prev');
     const nextBtn = document.getElementById('mw-next');
     const heartBtn = document.getElementById('mw-heart');
+    const modeBtn = document.getElementById('mw-mode');
+    const queueBtn = document.getElementById('mw-queue');
     const bar = document.getElementById('mw-bar');
     const fill = document.getElementById('mw-fill');
     const knob = document.getElementById('mw-knob');
     const curEl = document.getElementById('mw-cur');
     const durEl = document.getElementById('mw-dur');
-    if (playBtn) playBtn.addEventListener('click', toggle);
-    if (prevBtn) prevBtn.addEventListener('click', prev);
-    if (nextBtn) nextBtn.addEventListener('click', next);
+    if (playBtn) playBtn.addEventListener('click', () => toggle(true));
+    if (modeBtn) modeBtn.addEventListener('click', cycleMode);
+    if (queueBtn) queueBtn.addEventListener('click', openQueuePanel);
+    if (prevBtn) prevBtn.addEventListener('click', () => prev(true));
+    if (nextBtn) nextBtn.addEventListener('click', () => next(true));
     if (heartBtn) {
       heartBtn.addEventListener('click', () => {
         const m = findTrack(currentId);
@@ -3300,10 +3828,14 @@
   if (playBtn) playBtn.addEventListener('click', toggle);
   const modeBtn = document.getElementById('sm-mode');
   if (modeBtn) modeBtn.addEventListener('click', cycleMode);
+  const fModeBtn = document.getElementById('sm-f-mode');
+  if (fModeBtn) fModeBtn.addEventListener('click', cycleMode);
   const prevBtn = document.getElementById('sm-prev');
   if (prevBtn) prevBtn.addEventListener('click', prev);
   const nextBtn = document.getElementById('sm-next');
   if (nextBtn) nextBtn.addEventListener('click', next);
+  const queueBtn = document.getElementById('sm-queue');
+  if (queueBtn) queueBtn.addEventListener('click', openQueuePanel);
   // 悬浮小框控制
   const fPlay = document.getElementById('sm-f-play');
   if (fPlay) fPlay.addEventListener('click', toggle);
@@ -3311,11 +3843,21 @@
   if (fPrev) fPrev.addEventListener('click', prev);
   const fNext = document.getElementById('sm-f-next');
   if (fNext) fNext.addEventListener('click', next);
+  const fQueue = document.getElementById('sm-f-queue');
+  if (fQueue) fQueue.addEventListener('click', openQueuePanel);
+  // 悬浮小框 收起/展开（新版多行 ⇄ 最初版最小单行）
+  const fCollapse = document.getElementById('sm-f-collapse');
+  if (fCollapse) fCollapse.addEventListener('click', toggleFloatMin);
+  const fMiniExpand = document.getElementById('sm-f-mini-expand');
+  if (fMiniExpand) fMiniExpand.addEventListener('click', toggleFloatMin);
+  const fMiniPlay = document.getElementById('sm-f-mini-play');
+  if (fMiniPlay) fMiniPlay.addEventListener('click', toggle);
   const fToggle = document.getElementById('music-float-en');
   if (fToggle) {
     fToggle.addEventListener('change', () => {
       settings.floatEn = fToggle.checked;
       floatClosed = false;
+      floatHideByWidget = false; // 用户显式操作悬浮小窗开关 → 清除小组件抑制
       saveSettings();
       renderFloat();
     });
@@ -3378,17 +3920,17 @@
     });
   }
 
-  // v3.9.x：音乐数据全局共享 default 桌面，切联系人无需 loadAll（数据不变）；
-  // 仅停止正在播放的旧桌面歌曲（防止串桌面继续放）+ 重置 TA 互动状态
+  // v3.9.x：音乐数据全局共享 default 桌面，切联系人无需 loadAll（数据不变）。
+  // 播放跨桌面延续（v3.25.x：不再因切桌面停歌——旧逻辑按桌面隔离音乐，库合并后停歌已无必要）；
+  // 仅重置 TA 互动状态（旧桌面的互动不带到新桌面）
   document.addEventListener('contact-switched', function () {
     try {
-      if (audio) { try { audio.pause(); } catch (e) {} audio = null; }
-      currentId = null;
       // 多桌面：TA 互动状态是模块级，残留会让新桌面误以为 TA 在一起听/冷却中/有待确认请求
       taActive = false;
       cooldownAt = 0;
       reqData = null;
       libFilter = 'all';
+      libRenderShown = LIB_RENDER_LIMIT; // 切联系人时重置窗口化渲染计数
       // v3.14.x：取消待判定的联系人收藏（旧桌面的歌不带到新桌面）
       clearTaFavTimer();
       try { renderFloat(); } catch (e) {}

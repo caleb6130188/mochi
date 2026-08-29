@@ -26,6 +26,7 @@
   // 优先仍可能超时回退旧缓存 → 永远卡旧版。SW 回执或 2.5s 兜底超时后刷新。
   let _prMsg = null;
   function refreshNow() {
+    // v3.26.x：ack 已在按钮 onclick 里写入（按版本 ts 免打扰），这里只管预取+刷新
     const doReload = function () { try { location.reload(); } catch (e) {} };
     try {
       if (navigator.serviceWorker && navigator.serviceWorker.controller) {
@@ -43,6 +44,53 @@
     } catch (e) { doReload(); }
   }
 
+  // ================= v3.26.x：更新条防重复（版本轮询 + SW 检测两通道共享） =================
+  // 用户反馈「刷新到新版后顶部还提醒」：根因是 SW 交接期（新 SW 刚装完接管）与弱网
+  // 旧缓存场景下，版本轮询 / SW updatefound 两条通道会在新页面上再次触发弹条。
+  // 这里统一收口：① 点「刷新使用新版」或「稍后」后，记下当时线上 version.json 的版本 ts，
+  // 之后只对「比这个版本更新」的部署再提醒——一天多次部署每次都会提醒一次，不会一天只弹一次；
+  // ② 弹条前若页面 data-build-ts 已等于线上 version.json ts，说明已是最新，跳过。
+  const VER_ACK_KEY = 'xy-home-v2:ver-update-ack-ts';
+  let _verBarShown = false;
+  // 用户上次已确认/已刷到的版本时间戳（0 = 从未确认过）
+  function verAckTs() {
+    try {
+      const v = localStorage.getItem(VER_ACK_KEY);
+      const n = Number(v);
+      return (v && !isNaN(n) && n > 0) ? n : 0;
+    } catch (e) { return 0; }
+  }
+  function verMarkAck(ts) {
+    try { localStorage.setItem(VER_ACK_KEY, String(ts > 0 ? ts : Date.now())); } catch (e) {}
+  }
+  // 是否提醒：线上 ts 比用户上次确认的版本更新才弹；ts 未知（拉版本文件失败）宁多勿漏照弹
+  function verShouldNotify(ts) {
+    const n = Number(ts);
+    if (!n || isNaN(n)) return true;
+    return n > verAckTs();
+  }
+  // v3.10.x：带超时的 fetch（5s），弱网不挂起；失败由调用方快速重试
+  function fetchJson(url, ms) {
+    const ctrl = (typeof AbortController !== 'undefined') ? new AbortController() : null;
+    const timer = ctrl ? setTimeout(function () { ctrl.abort(); }, ms) : null;
+    return fetch(url, { cache: 'no-store', signal: ctrl ? ctrl.signal : undefined })
+      .then(function (r) { if (timer) clearTimeout(timer); if (!r.ok) throw new Error('bad'); return r.json(); })
+      .catch(function (err) { if (timer) clearTimeout(timer); throw err; });
+  }
+  // 显示更新条（版本轮询 + SW 检测共用）：跨通道一次性去重 + 已确认过本版本不再提醒
+  function showVerBar(onlineTs) {
+    if (_verBarShown || !verShouldNotify(onlineTs)) return;
+    _verBarShown = true;
+    const barEl = document.getElementById('ver-update-bar');
+    if (!barEl) { toast('已检测到新版本，刷新页面即可更新'); return; }
+    barEl.hidden = false;
+    const actEl = document.getElementById('ver-update-refresh');
+    if (actEl) actEl.onclick = function () { verMarkAck(onlineTs); refreshNow(); };
+    // v3.5.134：可关闭（"稍后"）——不挡用户当前操作；关闭即记为已确认当前版本
+    const closeBtn = document.getElementById('ver-update-close');
+    if (closeBtn) closeBtn.onclick = function () { verMarkAck(onlineTs); barEl.hidden = true; };
+  }
+
   // ================= v3.6.x：新版本检测（版本文件轮询，iOS/安卓均可靠） =================
   // 纯 Service Worker 检测不可靠：sw 只在页面加载/导航时检查、iOS Safari 对 sw 更新
   // 事件支持差——用户开着旧页面永远收不到「新版本」提醒。
@@ -52,10 +100,8 @@
   (function () {
     const bar = document.getElementById('ver-update-bar');
     if (!bar) return;
-    const act = document.getElementById('ver-update-refresh');
     let baseTs = null;      // 当前页面的版本时间戳（基线）
     let baseGot = false;
-    let noticed = false;
     // v3.7.x：基线在页面加载时直接从 splash-ver data-build-ts 确定（构建时注入），
     // 不依赖「首次 fetch 的 version.json」——旧逻辑首次 fetch 只设基线就 return，
     // 必须等 30 秒后第二次轮询才会比较；且旧缓存页面 + 网络拿到最新 version.json
@@ -65,25 +111,8 @@
       const t = sv && Number(sv.getAttribute('data-build-ts'));
       if (t > 0) { baseTs = t; baseGot = true; }
     })();
-    // 防抖：检查到新版本后只提示一次，避免每次轮询都闪
+    // 防抖：检查到新版本后只提示一次，避免每次轮询都闪（跨通道去重在主作用域 showVerBar）
     let lastCheck = 0;
-    function showBar() {
-      if (noticed) return;
-      noticed = true;
-      bar.hidden = false;
-      if (act) act.onclick = refreshNow;
-      // v3.5.134：可关闭（"稍后"）——不挡用户当前操作；关闭后本会话不再提示
-      const closeBtn = document.getElementById('ver-update-close');
-      if (closeBtn) closeBtn.onclick = function () { bar.hidden = true; };
-    }
-    // v3.10.x：带超时的 fetch（5s），弱网不挂起；失败由调用方快速重试
-    function fetchJson(url, ms) {
-      const ctrl = (typeof AbortController !== 'undefined') ? new AbortController() : null;
-      const timer = ctrl ? setTimeout(function () { ctrl.abort(); }, ms) : null;
-      return fetch(url, { cache: 'no-store', signal: ctrl ? ctrl.signal : undefined })
-        .then(function (r) { if (timer) clearTimeout(timer); if (!r.ok) throw new Error('bad'); return r.json(); })
-        .catch(function (err) { if (timer) clearTimeout(timer); throw err; });
-    }
     let failCount = 0;
     function checkVersion() {
       const now = Date.now();
@@ -100,7 +129,7 @@
           if (!ts || isNaN(ts)) return;
           // 老版本页面无 data-build-ts 注入时回退旧逻辑（首次 fetch 当基线）
           if (!baseGot) { baseTs = ts; baseGot = true; return; }
-          if (ts > baseTs) showBar();
+          if (ts > baseTs) showVerBar(ts);
         })
         .catch(function () { failCount++; });
     }
@@ -177,17 +206,18 @@
             if (newWorker.state === 'installed' && navigator.serviceWorker.controller) {
               // v3.10.x：检测到新 SW 直接显示常驻更新条（原逻辑只 toast 一闪而过，
               // 用户容易看不到）；与版本轮询（version.json）双通道互补，任一命中即提示。
+              // v3.26.x：防「刷新到新版后还提醒」——① 已确认过该版本（ack ts）不再弹；
+              // ② 页面已是线上最新（data-build-ts 等于 version.json ts）时，SW 交接期的
+              // updatefound 不再误报（新 SW 刚装完接管，页面其实已是最新）。
               try {
-                const barEl = document.getElementById('ver-update-bar');
-                if (barEl) {
-                  barEl.hidden = false;
-                  const actEl = document.getElementById('ver-update-refresh');
-                  if (actEl) actEl.onclick = refreshNow;
-                  const closeBtn = document.getElementById('ver-update-close');
-                  if (closeBtn) closeBtn.onclick = function () { barEl.hidden = true; };
-                } else {
-                  toast('已检测到新版本，刷新页面即可更新');
-                }
+                const sv = document.getElementById('splash-ver');
+                const localTs = (sv && Number(sv.getAttribute('data-build-ts'))) || 0;
+                fetchJson('./version.json?v=' + Date.now(), 5000)
+                  .then(function (d) {
+                    const ts = Number(d && d.ts);
+                    if (!ts || isNaN(ts) || ts > localTs) showVerBar(ts);
+                  })
+                  .catch(function () { showVerBar(); }); // 拉不到版本文件也照弹（宁多勿漏）
               } catch (e) {}
             }
           });

@@ -599,13 +599,25 @@
   }
   function refreshLibCounts(force) {
     if (force) { libCounts.pub = -1; libCounts.own = -1; pubInvalidate(); }
-    if (libCounts.pub < 0) libCounts.pub = countOf(buildGroupsFrom(pubStore().get(PUB_KEY)));
-    if (libCounts.own < 0) libCounts.own = countOf(ownGroupsRaw());
+    // v3.25.x：计数 0 不再缓存——iOS 慢回填场景角标先算成 0 并缓存，之后数据落进
+    // 内存缓存也没人失效它，列表页两行角标永远 0（点进作用域页却能看到字卡，真机反馈）。
+    // 空库重复 countOf 只是解析 null 零负担；大库计数 >0 仍走缓存，不会反复 JSON.parse。
+    if (libCounts.pub < 0) {
+      const n = countOf(buildGroupsFrom(pubStore().get(PUB_KEY)));
+      libCounts.pub = n > 0 ? n : -1;
+    }
+    if (libCounts.own < 0) {
+      const n = countOf(ownGroupsRaw());
+      libCounts.own = n > 0 ? n : -1;
+    }
     const pe = document.getElementById('cc-pub-count');
-    if (pe) pe.textContent = libCounts.pub;
+    if (pe) pe.textContent = libCounts.pub < 0 ? 0 : libCounts.pub;
     const oe = document.getElementById('cc-list-count');
-    if (oe) oe.textContent = libCounts.own;
+    if (oe) oe.textContent = libCounts.own < 0 ? 0 : libCounts.own;
   }
+  // v3.25.x：数据迟到重算——restore-done 时内存缓存才刚有数据（iOS 上常晚于首屏渲染），
+  // 此前没有任何时点会重算两行角标，0 就一直挂着。启动回填完成即强制重算一次。
+  document.addEventListener('mochi-restore-done', function () { refreshLibCounts(true); });
 
   // v3.6.x：只更新各类计数（tab 徽标/分组栏/总数），不重建列表 DOM——
   // 删除字卡/删除分组等高频操作改局部移除 DOM + 本函数，替代整页 render()
@@ -1559,19 +1571,28 @@
       }
     });
     function pickImportFile(mode) {
-      pickFiles('.json,application/json', false, (files) => {
+      // v3.23.x：accept 放开为全文件——vivo 自带/雨见等安卓浏览器对 accept=".json" 过滤
+      // 可能灰显/隐藏备份文件（同 v3.16.x 语音分类 accept 过滤的教训），格式由读取后的
+      // 内容校验兜底，选错文件会有明确提示
+      pickFiles('', false, (files) => {
         const f = files && files[0];
         if (!f) return;
         const reader = new FileReader();
         reader.onload = () => {
           try {
-            const data = JSON.parse(String(reader.result || ''));
+            let txt = String(reader.result || '');
+            // 部分安卓文件管理器/浏览器写入的 json 带 BOM，JSON.parse 会直接抛错
+            if (txt.charCodeAt(0) === 0xFEFF) txt = txt.slice(1);
+            const data = JSON.parse(txt);
             if (!data || typeof data !== 'object' || Array.isArray(data)) throw new Error('格式错误');
             applyImportData(data, mode);
           } catch (e) {
-            toast('导入失败：文件格式不正确');
+            // 带上文件名/大小：vivo/雨见偶发读到空内容（size>0 内容空）时用户能对照排查
+            toast('导入失败：文件格式不正确（' + (f.name || '未命名文件') + '·' + (f.size ? Math.max(1, Math.round(f.size / 1024)) + 'KB' : '空文件') + '）');
           }
         };
+        // 读取失败（onload 不触发）旧版无任何提示，像「点了没反应」
+        reader.onerror = () => toast('导入失败：文件读取失败，请重选文件再试');
         reader.readAsText(f);
       });
     }
@@ -1621,6 +1642,7 @@
       const byCat = {};
       let imported = 0;
       let fmt = '';
+      let fromBackup = false; // 全量备份提取标记：字卡计数由下方本应用格式分支统一做，计数后再补标签
       // v3.5.72：识别星言简约版聊天字卡库导出 json（globalCards + cardGroups 结构）
       //   v3.5.73 修正：专属字卡的字卡内容+分组也正常导入，仅不导入其绑定的联系人
       //   （Mochi 无专属联系人概念，天然忽略联系人；不跳过任何字卡）
@@ -1703,6 +1725,41 @@
           pairs.forEach(([name, cards]) => { byCat[mc.cat].push([name, cards.slice()]); imported += cards.length; });
         });
       }
+      // v3.23.x：识别「全量数据备份」json（设置→数据备份导出：{app:'mochi-zika', ls:{}, idb:{}}，
+      // 文件名 mochi数据备份_*.json）。用户常把它当字卡库文件直接导入 → 旧逻辑只认字卡库
+      // 导出格式，提示「文件里没有可导入的字卡」（公用/专属页表现一致）。这里按当前作用域
+      // 从备份里取出字卡库键（公用 xy-home-v2:cc-groups-public / 专属 <前缀>:cc-groups），
+      // 解析成标准格式后交给下方本应用格式分支正常导入
+      if (!fmt && data && typeof data === 'object' &&
+          ((data.ls && typeof data.ls === 'object') || (data.idb && typeof data.idb === 'object'))) {
+        const bag = {};
+        ['ls', 'idb'].forEach(k => {
+          if (data[k] && typeof data[k] === 'object' && !Array.isArray(data[k])) Object.assign(bag, data[k]);
+        });
+        let raw = '';
+        if (ccScope === 'public') {
+          raw = bag[PUB_PREFIX + ':' + PUB_KEY] || '';
+        } else {
+          const ap = (typeof window.activePrefix === 'function' && window.activePrefix()) || PUB_PREFIX;
+          raw = bag[ap + ':cc-groups'] || bag[PUB_PREFIX + ':cc-groups'] || '';
+          if (!raw) {
+            // 换机/重装后联系人前缀可能变化：兜底取内容最多的一个专属键
+            let best = '';
+            Object.keys(bag).forEach(k => {
+              if (/^xy-home-v2:.+:cc-groups$/.test(k) && typeof bag[k] === 'string' && bag[k].length > best.length) best = bag[k];
+            });
+            raw = best;
+          }
+        }
+        try {
+          const parsed = JSON.parse(String(raw || ''));
+          const hasCards = parsed && typeof parsed === 'object' && !Array.isArray(parsed) &&
+            CC_TYPES.some(t => Array.isArray(parsed[t]) && parsed[t].length);
+          // 不能在这里设 fmt——下方本应用格式分支以 !fmt 为条件做字卡计数，
+          // 提前置 fmt 会让 imported 恒为 0（「文件里没有可导入的字卡」误报）
+          if (hasCards) { data = parsed; fromBackup = true; }
+        } catch (e) {}
+      }
       // 本应用格式（mochi 字卡库导出 json）
       if (!fmt) {
         ['text', 'kaomoji', 'emoji', 'sticker', 'image', 'poke', 'voice'].forEach(k => {
@@ -1721,6 +1778,7 @@
           });
         });
       }
+      if (fromBackup) fmt = fmt || '（全量备份提取）';
       // v3.6.x：媒体类字卡 dataURL 白名单校验——导入 json 里混入的
       // `data:image/png" onerror=…` 之类（能通过 indexOf 前缀判断）会逃逸出
       // 聊天渲染的 src 属性注入 HTML；这里只放行 base64 图片/音频，其余丢弃。
@@ -2177,22 +2235,58 @@
 
   // ---- 回复池：给聊天页提供「自定义聊天字卡（公用+专属合并）」里所有字卡 ----
   // v3.11.x：公用字卡对所有桌面联系人生效——各回复池一律取当前作用域+公用合并视图
+  // v3.22.x：修复「自定义字卡不被聊天回复使用」——启动回填预算把大字卡库键挂起在
+  // IDB（__xyIdbDeferredKeys）时，回复池读成空库。此前只有打开字卡库列表页/表情包
+  // 拍一拍面板才按需取回，聊天自动回复路径从不触发，联系人因此不再用我加的字卡。
+  // 这里在各回复池 getter 里检测到数据缺失即按需取回（用户正在聊天=正在查看该字卡，
+  // 与表情包面板同一口径；hydrateLibScopes 内部带 in-flight 去重+链式排队），
+  // 取回后 store/memoryCache 立即可读，后续回复即用上字卡。
+  // v3.25.x：不再以挂起名单为前置条件（名单外的读丢键取不回，iOS 高发）——
+  // hydrateScope 已自带「有数据/已确认无键就跳过」，每次调用只多两次同步判断。
+  function maybeHydrateReplyPool() {
+    try {
+      if (window.hydrateLibScopes) window.hydrateLibScopes(['public', 'own']);
+    } catch (e) {}
+  }
+  // v3.28.x（修「还有手机没解决」第二层根因）：groups 变量在脚本加载期用 store 初始化，
+  // 而冷启动时 idbRestore 尚未把大键写进 memoryCache → groups 停在空值；restore 完成后
+  // applyRestored 只在「IDB 内容严格多于本地」时刷新 groups（本地已被回填、数量相等时
+  // 跳过）→ groups 整会话空、回复池 getter 只读得到公用字卡，自定义字卡（尤其专属库）
+  // 在用户没开过字卡库页前永不进入回复池，联系人只会发默认/兜底那几条系统预设字卡。
+  // 这里在回复池 getter 里兜底：groups 为空但当前作用域 store 已有数据时按需重载一次
+  //（重载后仍走缓存，不每次重新解析大键；编辑中 groups 非空时不动它，不打断未保存编辑）。
+  function replyScopeGroups() {
+    try {
+      let hasAny = false;
+      for (let i = 0; i < CC_TYPES.length; i++) { if ((groups[CC_TYPES[i]] || []).length) { hasAny = true; break; } }
+      if (!hasAny) {
+        const raw = curStore().get(curKey());
+        if (raw) {
+          const g = buildGroupsFrom(raw);
+          for (let i = 0; i < CC_TYPES.length; i++) { if ((g[CC_TYPES[i]] || []).length) { groups = g; break; } }
+        }
+      }
+    } catch (e) {}
+    return groups;
+  }
   window.getCustomCards = function () {
-    const g = mergeWithPublic(groups);
+    maybeHydrateReplyPool();
+    const g = mergeWithPublic(replyScopeGroups());
     const out = [];
     Object.keys(g).forEach(t => g[t].forEach(([name, arr]) => arr.forEach(c => out.push(c))));
     return out;
   };
   // 拍一拍字卡（自定义字卡里【拍一拍】分类）
   window.getPokeCards = function () {
-    const g = mergeWithPublic(groups);
+    maybeHydrateReplyPool();
+    const g = mergeWithPublic(replyScopeGroups());
     const out = [];
     (g['poke'] || []).forEach(([name, arr]) => arr.forEach(c => out.push(c)));
     return out;
   };
   // 拍一拍分组（分组名 + 字卡数组），供拍一拍页面展示
   window.getPokeGroups = function () {
-    return (mergeWithPublic(groups)['poke'] || []).slice();
+    return (mergeWithPublic(replyScopeGroups())['poke'] || []).slice();
   };
   // 媒体字卡：表情包/图片 的图片 dataURL 列表、语音（文件名|||音频）列表（供回复/表情面板）
   // v3.11.x：链接导入的 http(s) 图片字卡同样放行（聊天气泡按 type 渲染 <img src>，
@@ -2201,7 +2295,8 @@
     return typeof c === 'string' && (c.indexOf('data:image') === 0 || /^https?:\/\/[^\s"'<>]+$/i.test(c));
   }
   window.getMediaCards = function (type) {
-    const g = mergeWithPublic(groups);
+    maybeHydrateReplyPool();
+    const g = mergeWithPublic(replyScopeGroups());
     const out = [];
     (g[type] || []).forEach(([name, arr]) => arr.forEach(c => {
       if (type === 'voice') {
@@ -2215,9 +2310,74 @@
   };
   // 媒体分组：表情包/图片 的分组结构（供表情面板展示）
   window.getMediaGroups = function (type) {
-    const g = mergeWithPublic(groups);
+    const g = mergeWithPublic(replyScopeGroups());
     return (g[type] || []).map(([name, arr]) => [name, arr.filter(isMediaImg)]);
   };
+  // v3.26.x：把「要嵌进正文文本」的 dataURL 压缩成小图（信箱正文/朋友圈动态/评论区
+  //   TA 自动选表情包写信/发动态时都用它）。根因：自定义表情包常是几百 KB 的原图
+  //   PNG/GIF，直接 dataURL 拼进信件/动态 content 会把信箱/朋友圈主键撑过 200KB，
+  //   idb.js 把该键当大键只进 IndexedDB（localStorage 空）→ 页面走剥图快照渲染成
+  //   文字「图片」、联系人写信/回信/发评论表情包显示不出缩略图；同时超大量原图在
+  //   内存/启动回填里堆积还引发崩溃与一卡一卡。
+  //   这里统一在「贴进正文前」把超大 dataURL 压到小尺寸透明 PNG（sticker 保透明），
+  //   让单张降到几 KB，主键永远不超 200KB。聊天发表情走独立附件模式，不受影响，
+  //   故此处仅对打算内联进文本的 media 生效。
+  var SHRINK_EMBED_MAX = 120; // 内联表情包最长边（px）
+  var SHRINK_EMBED_QUOTA = 16 * 1024; // 超过此字节长度的 dataURL 才值得压（小图直接原样）
+  window.shrinkMediaUrl = function (src, cb) {
+    if (typeof src !== 'string' || src.indexOf('data:image') !== 0) { if (cb) cb(src); return; }
+    if (src.indexOf('base64') < 0 || src.length <= SHRINK_EMBED_QUOTA) { if (cb) cb(src); return; }
+    try {
+      var img = new Image();
+      img.onload = function () {
+        try {
+          var maxSide = SHRINK_EMBED_MAX;
+          var scale = Math.min(1, maxSide / Math.max(img.width || 1, img.height || 1));
+          var w = Math.max(1, Math.round((img.width || 1) * scale));
+          var h = Math.max(1, Math.round((img.height || 1) * scale));
+          var c = document.createElement('canvas');
+          c.width = w; c.height = h;
+          var ctx = c.getContext('2d');
+          ctx.clearRect(0, 0, w, h);
+          ctx.drawImage(img, 0, 0, w, h);
+          // 用 PNG 保透明（表情包常见透明底）；结果更小才采用，否则保留原图
+          var out = c.toDataURL('image/png');
+          if (out.length < src.length) { if (cb) cb(out); return; }
+        } catch (e) {}
+        if (cb) cb(src);
+      };
+      img.onerror = function () { if (cb) cb(src); };
+      img.src = src;
+    } catch (e) { if (cb) cb(src); }
+  };
+  // v3.26.x：超大表情包压缩缓存（供信箱 TA 写信/回信、朋友圈 TA 发动态/评论等「同步拼正文」
+  //   的场景拿小图）。启动数据就绪后异步对自定义 sticker/image 池逐张压缩建缓存，
+  //   之后 taLetterContent 等同步路径能直接取到压缩版，避免几百 KB 原图入库触发 200KB 剥图。
+  if (!window._shrunkStickerCache) window._shrunkStickerCache = {};
+  function warmShrunkCache() {
+    try {
+      const g = mergeWithPublic ? mergeWithPublic(replyScopeGroups()) : null;
+      if (!g) return;
+      ['sticker', 'image'].forEach(function (t) {
+        (g[t] || []).forEach(function (entry) {
+          (entry[1] || []).forEach(function (media) {
+            if (typeof media !== 'string' || media.indexOf('data:') !== 0) return;
+            if (window._shrunkStickerCache[media]) return;
+            window.shrinkMediaUrl(media, function (small) {
+              if (small !== media) { window._shrunkStickerCache[media] = small; }
+            });
+          });
+        });
+      });
+    } catch (e) {}
+  }
+  document.addEventListener('mochi-restore-done', function warmOnce() {
+    document.removeEventListener('mochi-restore-done', warmOnce);
+    setTimeout(warmShrunkCache, 600); // 让出主线程再扫，避免启动卡顿
+  });
+  document.addEventListener('contact-switched', function warmCid() {
+    setTimeout(warmShrunkCache, 300);
+  });
   // v3.11.x：按作用域取分组（不合并）——聊天页拍一拍/表情包面板三分区展示：
   //   scope='public' 只读公用键；scope='own' 只读当前桌面专属键。
   //   回复池仍走合并视图（getPokeCards/getMediaCards/getMediaGroups 不变），
@@ -2254,6 +2414,7 @@
   // v3.11.x：For 系列同样合并公用字卡——朋友圈/信箱/群聊等按联系人取池时，
   // 公用字卡对该联系人生效（专属部分仍读各自桌面）
   window.getCustomCardsFor = function (cid) {
+    try { if (window.hydrateLibForCid) window.hydrateLibForCid(cid); } catch (e) {}
     const raw = (window.storeFor && window.storeFor(cid) || window.xyStore('xy-home-v2:' + cid)).get('cc-groups');
     const g = mergeWithPublic(buildGroupsFrom(raw));
     const out = [];
@@ -2261,6 +2422,7 @@
     return out;
   };
   window.getPokeCardsFor = function (cid) {
+    try { if (window.hydrateLibForCid) window.hydrateLibForCid(cid); } catch (e) {}
     const raw = (window.storeFor && window.storeFor(cid) || window.xyStore('xy-home-v2:' + cid)).get('cc-groups');
     const g = mergeWithPublic(buildGroupsFrom(raw));
     const out = [];
@@ -2268,6 +2430,7 @@
     return out;
   };
   window.getMediaCardsFor = function (cid, type) {
+    try { if (window.hydrateLibForCid) window.hydrateLibForCid(cid); } catch (e) {}
     const raw = (window.storeFor && window.storeFor(cid) || window.xyStore('xy-home-v2:' + cid)).get('cc-groups');
     const g = mergeWithPublic(buildGroupsFrom(raw));
     const out = [];
@@ -2412,14 +2575,14 @@
   // 像「数据丢了」。打开管理页=用户正在看这份数据，先按需取回再渲染列表；
   // 只对「被挂起且确实读不到」的键生效，正常设备零等待。
   function hydrateCurScope() {
-    let fullKey = '', deferred = false;
-    try {
-      fullKey = ccScope === 'public' ? PUB_PREFIX + ':' + PUB_KEY : (window.activePrefix() + ':cc-groups');
-      deferred = Array.isArray(window.__xyIdbDeferredKeys) && window.__xyIdbDeferredKeys.indexOf(fullKey) >= 0;
-    } catch (e) {}
-    if (!deferred || !window.idbHydrateKey) return Promise.resolve(false);
+    if (!window.idbHydrateKey) return Promise.resolve(false);
     try { if (curStore().get(curKey())) return Promise.resolve(false); } catch (e) {}
-    try { toast('字卡较多，正在加载…'); } catch (e) {}
+    // v3.25.x：不再要求键在挂起名单——回填链被打断（iOS 挂后台杀 IDB 连接等）时
+    // 键读丢了也不在名单里，此前在这里被直接放行返回，字卡库永远空载。
+    // 统一交给 hydrateScope 判断（健康确认无键的 absent 缓存也在那边）。
+    let fk = '';
+    try { fk = ccScope === 'public' ? (PUB_PREFIX + ':' + PUB_KEY) : (window.activePrefix() + ':cc-groups'); } catch (e) {}
+    if (!hydAbsent[fk]) { try { toast('字卡较多，正在加载…'); } catch (e) {} }
     // v3.15.x：统一走 hydrateScope（成功后自动清缓存/刷新角标与界面）
     return hydrateScope(ccScope === 'public' ? 'public' : 'own');
   }
@@ -2557,21 +2720,40 @@
   // 大键在无人查看时被拉进堆压崩低端机（27MB 公用库真机案例）；只在用户正在看的
   // 场景按需拉一把，且多键顺序执行避免叠加峰值。会话内取回一次后常驻内存零开销。
   const hydInflight = {};
+  // v3.25.x：本会话已用健康连接确认「IDB 确实无此键」的键（新装/新联系人的正常空库）
+  // ——命中则不再空读，避免每次构建回复池都发一次 IDB get
+  const hydAbsent = {};
   function hydFullKey(scope) {
     return scope === 'public' ? (PUB_PREFIX + ':' + PUB_KEY) : (window.activePrefix() + ':cc-groups');
   }
-  function hydrateScope(scope) {
+  // v3.27.x：按指定联系人取回其字卡键——群聊/跨桌面取池时各成员桌面的 cc-groups
+  // 大键可能被启动回填挂起，For 系列 getter 此前只触发当前桌面取回，群聊成员回复
+  // 池因此读成空库落 FALLBACK_REPLIES。cid 传空时按当前桌面语义（hydrateScope）。
+  function hydrateScope(scope, cid) {
+    if (!window.idbHydrateKey) return Promise.resolve(false);
     let fullKey = '', deferred = false;
     try {
-      fullKey = hydFullKey(scope);
+      fullKey = cid ? ('xy-home-v2:' + cid + ':cc-groups') : hydFullKey(scope);
       deferred = Array.isArray(window.__xyIdbDeferredKeys) && window.__xyIdbDeferredKeys.indexOf(fullKey) >= 0;
     } catch (e) {}
-    // 不在挂起名单：要么已驻留（有数据），要么 IDB 本就没有此键——都不必取回
-    if (!deferred || !window.idbHydrateKey) return Promise.resolve(false);
+    // v3.25.x（修「字卡数据没有加载」iOS 高发）：此前只认挂起名单——回填链在 iOS
+    // 挂后台/事务失败被打断时，键读丢了也不进名单，三路读全空且永不取回，字卡库
+    // 空载、TA 回复没有自定义字卡。改为：数据读不到就取回（用户正在看的场景，
+    // 显式读不受回填预算限制）；健康连接确认 IDB 无此键才记 absent，此后跳过。
+    if (!deferred && hydAbsent[fullKey]) return Promise.resolve(false);
+    if (!deferred) {
+      let hasData = false;
+      try {
+        hasData = cid
+          ? !!(window.storeFor && window.storeFor(cid).get('cc-groups'))
+          : (scope === 'public' ? !!pubStore().get(PUB_KEY) : !!store.get('cc-groups'));
+      } catch (e) {}
+      if (hasData) return Promise.resolve(false);
+    }
     if (hydInflight[fullKey]) return hydInflight[fullKey];
     hydInflight[fullKey] = window.idbHydrateKey(fullKey).then(ok => {
       delete hydInflight[fullKey];
-      if (!ok) return false;
+      if (ok === null) { hydAbsent[fullKey] = true; return false; }
       pubInvalidate();
       libCounts.pub = -1; libCounts.own = -1;
       const scopeLive = (scope === 'public') ? (ccScope === 'public') : (ccScope === 'own');
@@ -2583,17 +2765,11 @@
     }).catch(() => { delete hydInflight[fullKey]; return false; });
     return hydInflight[fullKey];
   }
-  function hydrateScopeIfEmpty(scope) {
-    try {
-      const has = scope === 'public' ? !!pubStore().get(PUB_KEY) : !!store.get('cc-groups');
-      if (has) return Promise.resolve(false); // 已有数据，无需取回
-    } catch (e) {}
-    return hydrateScope(scope);
-  }
   let libHydChain = Promise.resolve();
   function hydrateLibScopes(scopes) {
     // 顺序链式取回（避免多把 MB 级大键同时进内存叠加峰值）
-    scopes.forEach(s => { libHydChain = libHydChain.then(() => hydrateScopeIfEmpty(s)).catch(() => {}); });
+    // v3.25.x：hydrateScope 自带「有数据/已确认无键就跳过」判断，直接排队即可
+    scopes.forEach(s => { libHydChain = libHydChain.then(() => hydrateScope(s)).catch(() => {}); });
     return libHydChain;
   }
   function libScopesDeferred(scopes) {
@@ -2603,15 +2779,65 @@
       return scopes.some(s => list.indexOf(hydFullKey(s)) >= 0);
     } catch (e) { return false; }
   }
+  // 对外暴露给聊天页表情包/拍一拍面板等场景：与字卡库列表页共用同一套链式取回
+  // （复用 libHydChain 排队+去重），取回完成后回调，供面板重绘。
+  // 仍是「用户正在看的场景按需拉一把」，不在启动链路/后台定时器自动取回。
+  window.hydrateLibScopes = function (scopes, done) {
+    if (!Array.isArray(scopes) || !scopes.length) scopes = ['public', 'own'];
+    return hydrateLibScopes(scopes).then(function () {
+      if (done) { try { done(); } catch (e) {} }
+      return true;
+    });
+  };
+  window.libScopesDeferred = function (scopes) {
+    return libScopesDeferred(Array.isArray(scopes) && scopes.length ? scopes : ['public', 'own']);
+  };
+  // v3.28.x：回复路径专用取回——单发聊天回复池只依赖 当前联系人专属字卡 + 公用字卡。
+  // hydrateLibScopes 按「公用→专属」串行链式排队，公用大键在慢 IDB（iOS 挂后台杀连接、
+  // 大图字卡库）上会拖住后续专属键，回复路径等不到专属键就绪，池子一直读空落兜底
+  // 预设卡（用户反馈「还是有手机没解决」）。这里直取指定作用域（own 优先），不等公用，
+  // 公用由调用方随后后台补取。仍走 hydrateScope 的 in-flight 去重 + absent 缓存。
+  window.hydrateReplyScope = function (scope, done) {
+    return hydrateScope(scope === 'public' ? 'public' : 'own').then(function (ok) {
+      if (done) { try { done(ok); } catch (e) {} }
+      return true;
+    });
+  };
+  // v3.27.x：按指定联系人取回其字卡键（群聊/跨桌面取池用）——某成员桌面 cc-groups
+  // 大键被启动回填挂起时，群聊成员回复池会读成空库落 FALLBACK_REPLIES。目标 cid
+  // 不是当前桌面时，只取回 公用键 + 该 cid 专属键（不扰动当前桌面）；是当前桌面
+  // 则与 hydrateLibScopes 同一语义。仍按需拉一把，不在启动链路/后台自动取回。
+  window.hydrateLibForCid = function (cid, done) {
+    const cur = window.__activeCid || 'default';
+    let p;
+    if (!cid || cid === cur) {
+      p = hydrateLibScopes(['public', 'own']);
+    } else {
+      libHydChain = libHydChain
+        .then(() => hydrateScope('public'))
+        .then(() => hydrateScope('own', cid))
+        .catch(() => {});
+      p = libHydChain;
+    }
+    return p.then(function () {
+      if (done) { try { done(); } catch (e) {} }
+      return true;
+    });
+  };
   // 字卡库列表页每次显示时兜底取回（覆盖「冷启动直接进字卡库」「切完桌面进字卡库」）
+  // v3.25.x：显示时无条件 hydrateLibScopes（内部自判断：有数据/已确认无键都是零开销跳过，
+  // 只对真缺数据的键取回）+ 强制重算两行角标——iOS 慢回填/读丢恢复后，进列表页是用户
+  // 最直观的查看时点，角标必须反映最新数据而不是首屏时的缓存 0。
   (function () {
     const libPage = document.getElementById('page-chatcard');
     if (libPage && typeof MutationObserver !== 'undefined') {
       new MutationObserver(() => {
-        if (!libPage.hidden && libScopesDeferred(['public', 'own'])) {
+        if (libPage.hidden) return;
+        refreshLibCounts(true);
+        if (libScopesDeferred(['public', 'own'])) {
           try { toast('字卡较多，正在加载…'); } catch (e) {}
-          hydrateLibScopes(['public', 'own']);
         }
+        hydrateLibScopes(['public', 'own']);
       }).observe(libPage, { attributes: true, attributeFilter: ['hidden'] });
     }
   })();

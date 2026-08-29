@@ -108,7 +108,7 @@
         const r = rows[i];
         html += '<div class="stats-item">' +
           '<span class="stats-item-name">' + r.main + '</span>' +
-          '<span class="stats-item-num">' + r.sub + '</span></div>';
+          '<span class="stats-item-num dt">' + r.sub + '</span></div>';
       }
       html += '</div>';
     }
@@ -147,7 +147,113 @@
     }
     return html + '</div>';
   }
+  // v3.24.x：文字字卡统计——只统计自定义字卡（公用 + 专属）里的内容，按「我发 / TA发」分开。
+  // 记录侧用「分类 + 分组 + 卡原文」识别（历史消息未存卡 id，只能按内容匹配）：
+  // ① 取当前桌面的 公用字卡(cc-groups-public) + 专属字卡(cc-groups) 合并，只取 text 分类的文字卡；
+  // ② 遍历聊天消息，只统计在字卡库里真实存在的卡（同一内容反复发也算多次）；
+  // ③ 侧边按 side 分：out = 我发的，in = 联系人发的（含自动回复池抽取的自定义文字卡）。
+  function ccCardSet() {
+    const set = {};
+    try {
+      const rawOwn = (window.storeFor && window.storeFor(window.__activeCid || 'default') || store).get('cc-groups');
+      const rawPub = (window.xyStore ? window.xyStore('xy-home-v2').get('cc-groups-public') : null);
+      [rawOwn, rawPub].forEach(raw => {
+        if (!raw) return;
+        const g = JSON.parse(raw);
+        if (!g || !g.text) return;
+        (g.text || []).forEach(([gname, arr]) => (arr || []).forEach(c => {
+          if (typeof c === 'string' && c.indexOf('|||') < 0 && c.indexOf('data:') !== 0) set[c] = 1;
+        }));
+      });
+    } catch (e) {}
+    return set;
+  }
+  function ccTextRankSection(icon, title, countMap, topLabel, emptyText, max, dataKey) {
+    const entries = [];
+    for (const k in countMap) if (countMap.hasOwnProperty(k)) entries.push({ name: k, count: countMap[k] });
+    entries.sort((a, b) => b.count - a.count);
+    let html = '<div class="stats-sec">' +
+      '<div class="stats-sec-head"><span class="stats-sec-title">' + icon + title + '</span>' +
+      '<span class="stats-sec-count">' + entries.length + ' 种</span></div>';
+    if (!entries.length) {
+      html += '<div class="ta-empty">' + emptyText + '</div>';
+    } else {
+      const top = entries[0].name;
+      const topCount = entries[0].count;
+      html += '<div class="stats-top">' +
+        '<div class="stats-top-tag">' + topLabel + '</div>' +
+        '<div class="stats-top-name">「' + String(top).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;') + '」</div>' +
+        '<div class="stats-top-num">' + topCount + ' 次</div></div>';
+      html += '<div class="stats-list">';
+      const shown = Math.min(max || 5, entries.length);
+      for (let i = 0; i < shown; i++) {
+        const e = entries[i];
+        html += '<div class="stats-item">' +
+          '<span class="stats-item-name">' + String(e.name).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;') + '</span>' +
+          '<span class="stats-item-num">' + e.count + ' 次</span></div>';
+      }
+      html += '</div>';
+      if (entries.length > shown) {
+        html += '<div class="stats-more" data-cc-more="' + title + '" data-cc-key="' + dataKey + '">查看更多 ' + entries.length + ' 种字卡 ▾</div>';
+      }
+    }
+    return html + '</div>';
+  }
+  // v3.24.x：自定义字卡（公用+专属）文字卡 Top100 全量弹层——内容只来自合并字卡库，
+  // 上榜的都是字卡库里存在的卡，点「查看更多」弹出完整排名（上限 100）。
+  function openCcTopModal(title, entries, emptyText) {
+    if (!entries || !entries.length) { toast(emptyText || '暂无使用记录'); return; }
+    const sorted = entries.slice().sort((a, b) => b.count - a.count);
+    const top = sorted.slice(0, 100);
+    let txt = '共 ' + sorted.length + ' 张自定义字卡使用过，按次数从高到低\n\n';
+    top.forEach((e, i) => {
+      txt += (i + 1) + '. ' + String(e.name) + '  ×' + e.count + '\n';
+    });
+    if (sorted.length > 100) txt += '\n… 仅显示前 100 名';
+    if (window.openModal) window.openModal(title, '', function () {}, { staticText: txt, noInput: true, okText: '知道了' });
+  }
+  // v3.24.x：渲染「文字字卡」tab——自定义字卡（公用+专属）使用统计，我发 / TA发 分开
+  function renderCcStats() {
+    const ccEl = document.getElementById('st-cc-content');
+    if (!ccEl) return;
+    let msgs2 = [];
+    try { msgs2 = (window.getChatMsgs ? window.getChatMsgs() : JSON.parse(store.get('chat-msgs') || '[]')); } catch (e) {}
+    if (!msgs2.length || !msgs2.some(m => m && m.side && m.text)) {
+      ccEl.innerHTML = '<div class="ta-empty">暂无聊天记录</div>';
+      return;
+    }
+    const cardSet = ccCardSet();
+    const mineCount = {}, taCount = {};
+    const name = store.get('lbl-partner') || 'TA';
+    const myName = store.get('lbl-user') || '我';
+    const EXPR_CORE_RE = /[^0-9A-Za-z\u00C0-\u024F\u0370-\u03FF\u0400-\u04FF\u3040-\u30FF\u3400-\u4DBF\u4E00-\u9FFF\uF900-\uFAFF\uAC00-\uD7AF]/g;
+    msgs2.forEach(m => {
+      if (!m || typeof m.text !== 'string' || !m.side) return;
+      if (m.special || m.retracted) return;
+      if (m.text.indexOf('data:') === 0 || m.text.indexOf('http') === 0) return;
+      const core = m.text.replace(EXPR_CORE_RE, '');
+      if (!core) return;
+      if (!(m.text in cardSet)) return;
+      if (m.side === 'out') mineCount[m.text] = (mineCount[m.text] || 0) + 1;
+      else taCount[m.text] = (taCount[m.text] || 0) + 1;
+    });
+    const mineN = Object.keys(mineCount).length, taN = Object.keys(taCount).length;
+    ccEl.innerHTML =
+      '<div style="margin-bottom:16px"><div style="font-size:13px;font-weight:700;color:#555;margin-bottom:8px">自定义字卡（公用 + 专属）使用统计</div>' +
+      '<div style="display:flex;align-items:center;gap:8px;margin-bottom:6px"><div style="font-size:12px;color:var(--muted);width:28px">' + escH(myName) + '</div>' +
+      '<div style="flex:1;height:8px;background:rgba(0,0,0,.06);border-radius:4px;overflow:hidden"><div style="height:100%;background:var(--ink);width:' + ((mineN + taN) ? Math.round(mineN / (mineN + taN) * 100) : 0) + '%;border-radius:4px"></div></div>' +
+      '<div style="font-size:12px;color:var(--ink);width:auto;text-align:right;white-space:nowrap">' + mineN + ' 种</div></div>' +
+      '<div style="display:flex;align-items:center;gap:8px"><div style="font-size:12px;color:var(--muted);width:28px">' + escH(name) + '</div>' +
+      '<div style="flex:1;height:8px;background:rgba(0,0,0,.06);border-radius:4px;overflow:hidden"><div style="height:100%;background:#999;width:' + ((mineN + taN) ? Math.round(taN / (mineN + taN) * 100) : 0) + '%;border-radius:4px"></div></div>' +
+      '<div style="font-size:12px;color:var(--ink);width:auto;text-align:right;white-space:nowrap">' + taN + ' 种</div></div></div>' +
+      ccTextRankSection('<svg class="st-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6h16M4 10h16M4 14h16M4 18h16"/></svg>', escH(myName) + ' 发的文字字卡', mineCount, '常用文字', '你还用过自定义字卡里的文字卡', 5, 'mine') +
+      ccTextRankSection('<svg class="st-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6h16M4 10h16M4 14h16M4 18h16"/></svg>', escH(name) + ' 发的文字字卡', taCount, '常用文字', '联系人还没用过自定义字卡里的文字卡', 5, 'ta');
+    // 供「查看更多」弹层读取完整数据
+    ccEl.__ccMine = []; for (const k in mineCount) if (mineCount.hasOwnProperty(k)) ccEl.__ccMine.push({ name: k, count: mineCount[k] });
+    ccEl.__ccTa = []; for (const k in taCount) if (taCount.hasOwnProperty(k)) ccEl.__ccTa.push({ name: k, count: taCount[k] });
+  }
   function renderStats() {
+    renderCcStats();
     let msgs = [];
     try { msgs = (window.getChatMsgs ? window.getChatMsgs() : JSON.parse(store.get('chat-msgs') || '[]')); } catch (e) {}
     const real = msgs.filter(m => m && m.side && m.text);
@@ -221,16 +327,19 @@
           statsInfoCard('<svg class="st-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><line x1="6" y1="20" x2="6" y2="14"/><line x1="12" y1="20" x2="12" y2="8"/><line x1="18" y1="20" x2="18" y2="11"/></svg>', '平均每日消息', Math.round(total / totalDays) + ' 条') +
           statsInfoCard('<svg class="st-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3c1 3-3 4-3 7a3 3 0 006 0c0-1-.3-2-.8-3 1.8 1 3 3 3 5a6 6 0 11-12 0c0-4 3-6 4.5-8.5z"/></svg>', '最长连续聊天', calcStreak(Object.keys(dateCount)) + ' 天') +
           statsInfoCard('<svg class="st-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 17l6-6 4 4 8-8"/><path d="M14 7h7v7"/></svg>', '单日最高消息', maxSingle + ' 条') +
-          // v3.16.x：联系人发红包——改为摘要（累计金额 + 次数），明细已移至主页「心意币红包记录」
+          // v3.16.x：红包记录——双向摘要（我发 + 联系人发，红包即心意币；累计金额 + 次数，明细已移至主页「心意币红包记录」）
           (function () {
-            const rps = msgs.filter(m => m && m.special === 'redpacket' && m.side === 'in');
-            let sum = 0; rps.forEach(m => { sum += Number(m.rpAmount || 0); });
-            const sec = '<div class="stats-sec"><div class="stats-sec-head"><span class="stats-sec-title">🧧 ' + escH(name) + ' 发红包</span>' +
-              '<span class="stats-sec-count">' + rps.length + ' 笔</span></div>' +
-              (rps.length ? '<div class="stats-top"><div class="stats-top-tag">累计心意币</div><div class="stats-top-name">¥' + sum.toFixed(2) + '</div><div class="stats-top-num">共 ' + rps.length + ' 次</div></div>'
-                : '<div class="ta-empty">还没有 ' + escH(name) + ' 发的红包</div>') +
-              '</div>';
-            return sec;
+            const myName = store.get('lbl-user') || '我';
+            function rpSec(title, list, emptyTxt) {
+              let sum = 0; list.forEach(m => { sum += Number(m.rpAmount || 0); });
+              return '<div class="stats-sec"><div class="stats-sec-head"><span class="stats-sec-title">🧧 ' + title + '</span>' +
+                '<span class="stats-sec-count">' + list.length + ' 笔</span></div>' +
+                (list.length ? '<div class="stats-top"><div class="stats-top-tag">累计心意币</div><div class="stats-top-name">¥' + sum.toFixed(2) + '</div><div class="stats-top-num">共 ' + list.length + ' 次</div></div>'
+                  : '<div class="ta-empty">' + emptyTxt + '</div>') +
+                '</div>';
+            }
+            return rpSec(myName + ' 发红包', msgs.filter(m => m && m.special === 'redpacket' && m.side === 'out'), '我还没有发过红包（红包也是心意币，去发一个试试）') +
+              rpSec(escH(name) + ' 发红包', msgs.filter(m => m && m.special === 'redpacket' && m.side === 'in'), '还没有 ' + escH(name) + ' 发的红包');
           })() +
           // v3.15.x：联系人申请心意币记录（askcoin 卡片）
           coinRecordSection('🪙', name + '申请心意币记录', '笔',
@@ -274,7 +383,7 @@
               html += '<div class="stats-list">';
               uniq.forEach(r => {
                 html += '<div class="stats-item"><span class="stats-item-name">' + r.main + '</span>' +
-                  '<span class="stats-item-num">' + r.sub + '</span></div>';
+                  '<span class="stats-item-num dt">' + r.sub + '</span></div>';
               });
               html += '</div>';
             }
@@ -287,25 +396,8 @@
     if (exprEl) {
       if (!real.length) { exprEl.innerHTML = '<div class="ta-empty">暂无聊天记录</div>'; }
       else {
-        const textCount = {}, emotion = {}, heart = {}, intent = {};
-        // v3.12.x：文字字卡排名剔除表情和颜文字——emoji/颜文字字卡发出时 type 就是 'text'
-        //   （chat.js 的分类只在发送端选卡用），只能按内容过滤：去掉符号后不含任何
-        //   可读文字（汉字/假名/字母/数字）的消息视为纯表情/颜文字，不入榜；
-        //   「常用文字」前五名才能反映联系人平时说得最多的话。
-        //   同时排除媒体消息（表情包/图片/语音）与链接，避免占位/乱码进榜。
-        const EXPR_CORE_RE = /[^0-9A-Za-z\u00C0-\u024F\u0370-\u03FF\u0400-\u04FF\u3040-\u30FF\u3400-\u4DBF\u4E00-\u9FFF\uF900-\uFAFF\uAC00-\uD7AF]/g;
+        const emotion = {}, heart = {}, intent = {};
         real.forEach(m => {
-          if (typeof m.text === 'string' && m.text.indexOf('data:') !== 0 && !m.special && !m.retracted) {
-            const t = m.text;
-            const isMediaMsg = m.type === 'sticker' || m.type === 'image' || m.type === 'voice';
-            const core = t.replace(EXPR_CORE_RE, '');
-            // 颜文字兜底：带括号特征且可读部分只剩假名（ヾノ等装饰符）的也算颜文字
-            const kaomojiShape = /[\(（｡◕(◕)(づ｡(¬]/.test(t) && /[\)）】)]/.test(t) &&
-              /^[\u3040-\u30FF\u31F0-\u31FF\uFF66-\uFF9D]*$/.test(core);
-            if (!isMediaMsg && t.indexOf('http') !== 0 && t.indexOf('|||') < 0 && core && !kaomojiShape) {
-              textCount[t] = (textCount[t] || 0) + 1;
-            }
-          }
           (m.mood || []).forEach(md => {
             // v3.6.x：脏数据防御——mood 条目非对象（导入/损坏数据）时跳过，避免统计页中断
             if (!md || typeof md !== 'object') return;
@@ -317,7 +409,6 @@
           });
         });
         exprEl.innerHTML =
-          statsBarSection('<svg class="st-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6h16M4 10h16M4 14h16M4 18h16"/></svg>', '文字字卡', textCount, '常用文字', '暂无使用记录') +
           statsBarSection('<svg class="st-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M8 14s1.5 2 4 2 4-2 4-2"/><path d="M9 9.5l.01.01M15 9.5l.01.01"/></svg>', '情绪字卡', emotion, '常见情绪', '暂无使用记录') +
           statsBarSection('<svg class="st-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20.5S4.5 15.2 4.5 9.9A4.9 4.9 0 0112 7.1a4.9 4.9 0 017.5 2.8c0 5.3-7.5 10.6-7.5 10.6z"/><path d="M19 3.5l.6 1.9 1.9.6-1.9.6-.6 1.9-.6-1.9-1.9-.6 1.9-.6z"/></svg>', '心意字卡', heart, '常传递心意', '暂无使用记录') +
           statsBarSection('<svg class="st-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a8.5 8.5 0 01-12.6 7.4L4 21l1.5-4.4A8.5 8.5 0 1121 12z"/><path d="M8.5 10h7M8.5 13h4.5"/></svg>', '交流意图', intent, '常用交流', '暂无使用记录');
@@ -334,7 +425,24 @@
       document.querySelectorAll('#page-stats .cal-card').forEach(c => {
         c.hidden = c.dataset.stpanel !== k;
       });
+      // v3.24.x：文字字卡 tab 每次进入时重算（字卡库/聊天可能刚变）
+      if (k === 'cc') renderCcStats();
     });
+  });
+  // v3.24.x：「查看更多」→ 弹出 Top100 完整排名
+  document.addEventListener('click', function (e) {
+    const more = e.target.closest('[data-cc-more]');
+    if (!more) return;
+    const title = more.getAttribute('data-cc-more');
+    const key = more.getAttribute('data-cc-key');
+    if (!title || !key) return;
+    const ccEl = document.getElementById('st-cc-content');
+    if (!ccEl) return;
+    const prop = key === 'mine' ? '__ccMine' : '__ccTa';
+    const entries = ccEl[prop] || [];
+    if (entries.length) {
+      openCcTopModal(title, entries, '暂无使用记录');
+    }
   });
 
   // ================= 提问记录页（原小互动页） =================
@@ -516,7 +624,7 @@ function renderCheckinHistory() {
     }
     // 概率触发「提醒你来寻踪」
     if (Math.random() * 100 < 30) {
-      window.chatAddIn(name + ' 提醒你快来寻踪');
+      window.chatAddIn(name + ' 提醒你来寻踪.查岗');
     }
     recordCheckin(ck);
     store.set('checkin-last', String(Date.now()));
@@ -598,26 +706,40 @@ function renderCheckinHistory() {
   // 数据就绪（IDB 回填完成）后启动；无事件兜底 3 秒（空数据场景 idbRestore 也会派发）
   document.addEventListener('mochi-restore-done', bootCheckin);
   setTimeout(bootCheckin, 3000);
+  // 全屏打开寻踪页：渲染当前日常（或生成一条）+ 记录；供桌面/聊天「更多功能」共用
+  window.openCheckinPage = function () {
+    if (!checkinPage) return;
+    document.querySelectorAll('.page').forEach(p => p.hidden = true);
+    checkinPage.hidden = false;
+    // 显示当前日常；从未生成过则立即生成一条
+    let cur = null;
+    try { cur = JSON.parse(store.get('checkin-current') || 'null'); } catch (e) {}
+    if (cur && cur.place) renderCheckinUI(cur);
+    else doCheckin();
+    renderCheckinHistory();
+  };
   if (checkinApp && checkinPage) {
     checkinApp.addEventListener('click', () => {
       const editing = Array.from(document.querySelectorAll('.app-grid')).some(g => g.classList.contains('editing'));
       if (editing) return;
-      document.querySelectorAll('.page').forEach(p => p.hidden = true);
-      checkinPage.hidden = false;
-      // 显示当前日常；从未生成过则立即生成一条
-      let cur = null;
-      try { cur = JSON.parse(store.get('checkin-current') || 'null'); } catch (e) {}
-      if (cur && cur.place) renderCheckinUI(cur);
-      else doCheckin();
-      renderCheckinHistory();
+      // 桌面进入：返回时回桌面（避免残留聊天来源）
+      window.__ckFrom = '';
+      window.openCheckinPage();
     });
   }
   const checkinBack = document.getElementById('checkin-back');
   if (checkinBack) {
     checkinBack.addEventListener('click', () => {
       document.querySelectorAll('.page').forEach(p => p.hidden = true);
-      const home = document.getElementById('page-phone');
-      if (home) home.hidden = false;
+      // 聊天「更多功能」进入则返回聊天，否则返回桌面
+      if (window.__ckFrom === 'chat') {
+        const chatPage = document.getElementById('page-chat');
+        if (chatPage) chatPage.hidden = false;
+      } else {
+        const home = document.getElementById('page-phone');
+        if (home) home.hidden = false;
+      }
+      window.__ckFrom = '';
     });
   }
 const ckRefresh = document.getElementById('ck-refresh');
@@ -1286,6 +1408,16 @@ if (ckRefresh) {
     store.set('loc-history', s);
     try { if (window.idbSet) window.idbSet(window.activePrefix() + ':loc-history', s); } catch (e) {}
   }
+  // v3.26.x：供方位感知「感知一下」把感知结果写入位置时间线（类型 sense，标签「感知」）
+  window.locAddHist = function (text, type, auto) {
+    try {
+      const hist = loadHist();
+      hist.unshift({ text: String(text == null ? '' : text), type: type || 'sense', ts: Date.now(), auto: !!auto });
+      saveHist(hist);
+    } catch (e) {}
+  };
+  // v3.26.x：感知写入后刷新位置面板（时间线/此刻位置）
+  window.locRefreshBody = function () { try { renderLocPanel(); } catch (e) {} };
   function eggLastTs() { return parseInt(store.get('loc-egg-last') || '0', 10) || 0; }
   function eggUsed() { return Date.now() - eggLastTs() < EGG_COOLDOWN; }
   // ---- 自定义位置卡（v3.13.x：存储并入字卡库 loc-lib「我的添加」，旧 loc-custom 首次读取自动迁移） ----
@@ -1349,6 +1481,8 @@ if (ckRefresh) {
     playLocFx(text, type);
     locViewDate = dayStr(new Date());
     renderLocPanel();
+    // v3.26.x：感知方向与位置卡对齐（新卡带方向时，感知圆立刻跟随）
+    if (window.refreshSense) window.refreshSense();
 
   }
 
@@ -1384,6 +1518,8 @@ if (ckRefresh) {
     pendingDir = null;
     locViewDate = dayStr(new Date());
     renderLocPanel();
+    // v3.26.x：感知方向与位置卡对齐（新卡带方向时，感知圆立刻跟随）
+    if (window.refreshSense) window.refreshSense();
 
   }
 
@@ -1446,16 +1582,19 @@ if (ckRefresh) {
     let html = '';
     // v3.13.x：分类标签统一走字卡库 loc-lib
     const LOC_LABEL = window.locLibLabel || function (t) { return t; };
-    // 感知描述
-    html += '<div class="loc-sense-box"><div class="loc-sense-title">你感觉到的</div><div class="loc-sense-text">' + esc(senseDesc(cur)) + '</div></div>';
+    // 感知描述（v3.26.x：加呼吸光点标题，卡片化）
+    html += '<div class="loc-sense-box"><div class="loc-sense-head"><span class="loc-sense-dot"></span><span class="loc-sense-title">你感觉到的</span></div><div class="loc-sense-text">' + esc(senseDesc(cur)) + '</div></div>';
     // 此刻位置
-    html += '<div class="loc-section"><div class="loc-sec-title">TA 此刻的位置</div>';
-    html += '<div class="loc-sec-value">' + (cur
-      ? esc(cur.text) + '<span class="loc-sec-sub">' + (LOC_LABEL[cur.type] || (cur.type === 'combo' ? '组合' : '')) + ' · ' + fmtT(cur.ts) + '</span>'
-      : '— 还没有位置卡') + '</div></div>';
+    html += '<div class="loc-section"><div class="loc-sec-title">此刻的位置</div>';
+    if (cur) {
+      html += '<div class="loc-now"><span class="loc-now-pin"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 21s-7-5.5-7-11a7 7 0 0114 0c0 5.5-7 11-7 11z"/><circle cx="12" cy="10" r="2.6"/></svg></span><div class="loc-now-main"><div class="loc-sec-value">' + esc(cur.text) + '</div><div class="loc-sec-sub">' + (LOC_LABEL[cur.type] || (cur.type === 'combo' ? '组合' : '位置卡')) + ' · ' + fmtT(cur.ts) + '</div></div></div>';
+    } else {
+      html += '<div class="loc-sec-value loc-empty">— 还没有位置卡</div>';
+    }
+    html += '</div>';
 
     // 时间线（按日切换）
-    html += '<div class="loc-section"><div class="loc-sec-title">位置时间线（按日查看）</div>';
+    html += '<div class="loc-section"><div class="loc-sec-title">位置时间线</div>';
     html += '<div class="loc-day-switch"><button class="loc-day-btn" id="loc-day-prev"' + (dayIdx >= days.length - 1 ? ' disabled' : '') + '>‹</button><span class="loc-day-label">' + dayLabel(locViewDate) + '</span><button class="loc-day-btn" id="loc-day-next"' + (dayIdx <= 0 ? ' disabled' : '') + '>›</button></div>';
     if (dayHist.length) {
       html += '<div class="loc-timeline">' + dayHist.map(h => {
@@ -1484,10 +1623,13 @@ if (ckRefresh) {
   }
 
   // ---- 打开/关闭 ----
+  // v3.26.x：两入口（聊天寻踪半框 / 桌面寻踪页）统一全屏打开——用户反馈聊天入口半屏不理想，
+  // 与桌面寻踪页入口（.loc-full 全屏）保持一致
   function openLocPanel() {
     const panel = document.getElementById('loc-panel');
     const nameEl = document.getElementById('loc-name');
     if (nameEl) nameEl.textContent = store.get('lbl-partner') || 'TA';
+    if (panel) panel.classList.add('loc-full');
     // v3.13.x：刷新方位感知（含漂移检查）+ 渲染感知圆
     if (window.refreshSense) window.refreshSense();
     renderLocPanel();
@@ -1497,16 +1639,17 @@ if (ckRefresh) {
   }
   function closeLocPanel() {
     const panel = document.getElementById('loc-panel');
-    if (panel) panel.hidden = true;
+    if (panel) { panel.hidden = true; panel.classList.remove('loc-full'); }
   }
 
   const entry = document.getElementById('ck-loc-entry');
-  if (entry) entry.addEventListener('click', openLocPanel);
-  // 桌面寻踪页同款入口（点「TA在身边 · 看看 TA 在哪」打开同一位置面板）
+  if (entry) entry.addEventListener('click', () => openLocPanel());
+  // 桌面寻踪页同款入口（点「TA在身边 · 看看 TA 在哪」全屏打开同一位置面板）
   const entryDesk = document.getElementById('ck-loc-entry-desk');
-  if (entryDesk) entryDesk.addEventListener('click', openLocPanel);
-  const closeBtn = document.getElementById('loc-close');
-  if (closeBtn) closeBtn.addEventListener('click', closeLocPanel);
+  if (entryDesk) entryDesk.addEventListener('click', () => openLocPanel());
+  // v3.26.x：全屏/半屏共用返回按钮（关闭位置面板；已移除右侧 ✕ 关闭按钮）
+  const locBack = document.getElementById('loc-back');
+  if (locBack) locBack.addEventListener('click', closeLocPanel);
 
   try {
     if (window.idbGet && !store.get('loc-history')) {
@@ -1585,8 +1728,17 @@ if (ckRefresh) {
     { k: '左侧',   arrow: '←', angle: 180 },
     { k: '左前方', arrow: '↖', angle: 225 }
   ];
-  const NEAR_WORDS = ['在你身边', '一直没走远', '隔着世界在你身边', '能摸到我吗', '陪你走着', '停下来等你', '抬头就能看到', '在你前面'];
+  const NEAR_WORDS = ['在你身边', '一直没走远', '隔着世界在你身边', '能摸到我吗', '陪你走着', '停下来等你', '抬头就能看到', '在你前面', '原地等你'];
   const FAR_WORDS = ['在你看不到的地方', '在你看不到的地方偷看你', '再远一点', '就停这儿'];
+  // v3.26.x：从位置卡文本推导 8 方向（消除「感知↗ 位置↘」矛盾——感知方向与最近位置卡对齐）
+  function dirFromText(t) {
+    if (!t) return '';
+    if (t.indexOf('左边') >= 0) return '左侧';
+    if (t.indexOf('右边') >= 0) return '右侧';
+    if (t.indexOf('身后') >= 0 || t.indexOf('后面') >= 0) return '后方';
+    if (t.indexOf('前面') >= 0 || t.indexOf('抬头') >= 0) return '正前方';
+    return '';
+  }
   function load() {
     try {
       const v = JSON.parse(store.get(KEY) || 'null');
@@ -1654,12 +1806,22 @@ if (ckRefresh) {
     }
     return { rangef: rf, power: pw };
   }
-  // 感知状态（懒初始化 + 漂移）
+  // 感知状态（懒初始化 + 漂移；v3.26.x：有位置卡时方向以位置卡为准，消除感知/位置矛盾）
   function getSense(force) {
     const s = load();
     const now = Date.now();
     let dirty = false;
-    if (!s.dir || (s.nextDirAt && now >= s.nextDirAt)) {
+    // 最近位置卡带方向 → 感知方向跟随（此刻的位置说右边，感知圆就显示右侧）
+    let cur = null;
+    try { cur = JSON.parse(store.get('loc-current') || 'null'); } catch (e) {}
+    const fixedDir = cur ? dirFromText(cur.text) : '';
+    if (fixedDir) {
+      if (s.dir !== fixedDir) {
+        s.dir = fixedDir;
+        s.nextDirAt = now + (15 + Math.floor(Math.random() * 31)) * 60000; // 15~45 分钟
+        dirty = true;
+      }
+    } else if (!s.dir || (s.nextDirAt && now >= s.nextDirAt)) {
       s.dir = rollDir();
       s.nextDirAt = now + (15 + Math.floor(Math.random() * 31)) * 60000; // 15~45 分钟
       dirty = true;
@@ -1759,6 +1921,19 @@ if (ckRefresh) {
       });
     }
     render();
+    // v3.26.x：感知结果写入位置时间线（类型「感知」，与位置卡分开标记）
+    try {
+      const arrows2 = DIRS.find(d => d.k === s.dir);
+      let tlText;
+      if (isUndirected(s.dir)) {
+        tlText = '方位感知：暂时无法判断方向';
+      } else {
+        tlText = '方位感知：' + (arrows2 ? arrows2.arrow + ' ' : '') + s.dir + ' · ' + s.rangef + ' · ' + s.power;
+      }
+      if (touched) tlText += ' · 好像有什么轻轻碰了你一下';
+      if (window.locAddHist) window.locAddHist(tlText, 'sense', false);
+      if (window.locRefreshBody) window.locRefreshBody();
+    } catch (e) {}
     setTimeout(() => {
       if (btn) { btn.classList.remove('busy'); btn.disabled = false; }
     }, 4000);
@@ -2286,7 +2461,7 @@ if (ckRefresh) {
   }
   // 概率触发入口——应用在前台期间每 8 分钟掷一次骰子：
   // 页面可见 + 频率控制（冷却 50 分钟 / 每日最多 4 次，taChime 统一管）
-  // + 基础 22% 概率（深夜 0-6 点降到 8%、清晨 6-9 点 15%，半夜不吵人）；
+  // + 基础 22% 概率（清晨 6-9 点 15%、其余白天 22%；23:00-06:00 静默期直接不发，深更半夜不吵人）；
   // 已打卡达标只按 1/4 概率改发夸奖（偶尔来夸一句不打扰）。实际节奏≈活跃
   // 半小时内第一催、之后至少隔 50 分钟一条、一天最多 4 条。
   // 打开喝水页时 waterMaybeRemind 里还有一次独立判定。
@@ -2294,6 +2469,7 @@ if (ckRefresh) {
   window.waterChimeTick = function () {
     if (document.hidden || editingNow()) return;
     const h = new Date().getHours();
+    if (h >= 23 || h < 6) return; // v3.26.x：23:00-06:00 静默期整天休息，不催喝水
     const base = h < 6 ? 0.08 : (h < 9 ? 0.15 : 0.22);
     const p = waterChatDone() ? base * 0.25 : base;
     if (Math.random() >= p) return;
@@ -2303,6 +2479,7 @@ if (ckRefresh) {
   };
   setInterval(window.waterChimeTick, 8 * 60 * 1000);
   function waterMaybeRemind() {
+    const h = new Date().getHours(); if (h >= 23 || h < 6) return; // v3.26.x：23:00-06:00 静默期，进页面也不催
     const s = curStore(); if (!s) return;
     let last = 0; try { last = parseInt(s.get('water-last-visit') || '0', 10) || 0; } catch (e) {}
     try { s.set('water-last-visit', '' + Date.now()); } catch (e) {}
@@ -2311,7 +2488,7 @@ if (ckRefresh) {
       // 世界观：偶尔他视角浮层（灵体在身边提醒），否则原系统语态
       if (window.taChimeAllow && window.taChimeAllow('water-ta', { cooldown: 30 * 60 * 1000, dailyMax: 3 }) && Math.random() < 0.5) {
         window.taChimeUse('water-ta');
-        const gentle = libPool('water', '他视角温柔提醒', DEF_WATER_TA_GENTLE);
+        const gentle = libPool('water', 'ta视角温柔提醒', DEF_WATER_TA_GENTLE);
         const m = gentle[Math.floor(Math.random() * gentle.length)];
         const miss = Math.random() < 0.2 ? '（字卡有限，他想说的比这张多）' : null;
         if (window.taChimeShow) window.taChimeShow(m, { miss: miss });
@@ -2410,7 +2587,9 @@ if (ckRefresh) {
       '</div>' +
       '<div class="eat-switch-overlay" id="eat-switch-overlay" hidden>' +
         '<div class="eat-switch-card glass">' +
-          '<div class="eat-switch-title">转盘选菜单</div>' +
+          '<div class="eat-switch-title">切换菜单</div>' +
+          '<div class="eat-switch-chips" id="eat-switch-chips"></div>' +
+          '<div class="eat-switch-or">或转盘随机选</div>' +
           '<div class="eat-wheel-wrap eat-wheel-wrap-sm"><canvas class="eat-wheel" id="eat-switch-wheel"></canvas><div class="eat-pointer" id="eat-switch-pointer"><svg viewBox="0 0 20 20" width="20" height="20"><polygon points="10,18 3,2 17,2" fill="#e8533d"/></svg></div></div>' +
           '<div class="eat-switch-name" id="eat-switch-name">点下方按钮开始转</div>' +
           '<div class="eat-switch-acts"><button class="eat-switch-cancel" id="eat-switch-cancel">取消</button><button class="eat-switch-go" id="eat-switch-go">开始转</button></div>' +
@@ -2427,7 +2606,7 @@ if (ckRefresh) {
   function eatSaveMenus(a) { const s = curStore(); if (s) try { s.set('eat-menus', JSON.stringify(a)); } catch (e) {} }
   function eatMenus() {
     const s = curStore();
-    try { const a = JSON.parse((s && s.get('eat-menus')) || '[]'); if (Array.isArray(a) && a.length) { const out = a.filter(m => m && m.name && Array.isArray(m.dishes) && m.dishes.length).map(m => ({ name: String(m.name), dishes: m.dishes.filter(d => d) })); if (out.length) return out; } } catch (e) {}
+    try { const a = JSON.parse((s && s.get('eat-menus')) || '[]'); if (Array.isArray(a) && a.length) { const out = a.filter(m => m && m.name && Array.isArray(m.dishes)).map(m => ({ name: String(m.name), dishes: m.dishes.filter(d => d) })); if (out.length) return out; } } catch (e) {}
     const oldMenu = eatMenu();
     if (oldMenu) { const migrated = [{ name: '我的菜单', dishes: oldMenu }]; eatSaveMenus(migrated); if (s) try { s.set('eat-menu', '[]'); } catch (e) {} return migrated; }
     let oldCards = []; try { const a = JSON.parse((s && s.get('eat-cards')) || '[]'); if (Array.isArray(a)) oldCards = a.filter(d => d); } catch (e) {}
@@ -2470,6 +2649,7 @@ if (ckRefresh) {
   function eatDrawWheel(dishes, hlIdx) { const c = document.getElementById('eat-wheel'); if (!c) return; eatDrawWheelCore(c, dishes, hlIdx, eatSpinAngle); }
   function eatSpinWheel(dishes, cb) {
     if (eatSpinning) return;
+    if (!dishes.length) { toast('当前菜单是空的，先添加菜名'); return; }
     eatSpinning = true; eatSetBtns(true);
     const totalAngle = eatSpinAngle + (3 + Math.random() * 4) * Math.PI * 2 + Math.random() * Math.PI * 2;
     const startAngle = eatSpinAngle; const duration = 3200; const startTime = Date.now();
@@ -2513,9 +2693,30 @@ if (ckRefresh) {
     if (menus.length < 2) { toast('只有 1 个菜单，先在「编辑菜单」里新建更多菜单吧'); return; }
     eatSwitchClear(); eatSwitchInitCanvas(); ov.hidden = false; eatSwAngle = 0;
     eatSwitchDraw(menus.map(m => m.name));
+    eatSwitchRenderChips();
     const nameEl = document.getElementById('eat-switch-name'); if (nameEl) nameEl.textContent = '点下方按钮开始转';
     const goBtn = document.getElementById('eat-switch-go'); if (goBtn) { goBtn.disabled = false; goBtn.textContent = '开始转'; }
   }
+  // 切换浮层·直接选菜单：点 chip 立即切到指定菜单（不用转盘随机）
+  function eatSwitchRenderChips() {
+    const box = document.getElementById('eat-switch-chips'); if (!box) return;
+    const menus = eatMenus(); const cur = eatCurMenuIdx();
+    box.innerHTML = menus.map((m, i) => '<span class="eat-chip' + (i === cur ? ' on' : '') + '" data-i="' + i + '">' + eatEsc(m.name) + '</span>').join('');
+  }
+  function eatSwitchTo(i) {
+    const menus = eatMenus(); if (i < 0 || i >= menus.length) return;
+    if (i === eatCurMenuIdx()) { eatSwitchClose(); return; }
+    const name = menus[i].name;
+    eatSwitchClose();
+    eatSaveCurMenuIdx(i); eatClearSpin(); eatSpinAngle = 0;
+    eatRenderCurName(); eatDrawWheel(eatDishes()); eatLastPick = eatPick(); eatRenderHistory();
+    toast('已切换到「' + name + '」');
+  }
+  document.getElementById('eat-switch-chips').addEventListener('click', (e) => {
+    const t = e.target.closest('.eat-chip'); if (!t) return;
+    const i = parseInt(t.getAttribute('data-i'), 10); if (isNaN(i)) return;
+    eatSwitchTo(i);
+  });
   function eatSwitchClose() { eatSwitchClear(); const ov = document.getElementById('eat-switch-overlay'); if (ov) ov.hidden = true; }
   function eatSwitchSpin() {
     if (eatSwSpinning) return;
@@ -2560,7 +2761,14 @@ if (ckRefresh) {
     eatSwTimer = requestAnimationFrame(tick);
   }
   function eatPick() {
-    const dishes = eatDishes(); const dish = dishes[Math.floor(Math.random() * dishes.length)];
+    const dishes = eatDishes();
+    if (!dishes.length) {
+      const de2 = document.getElementById('eat-dish'); const ce2 = document.getElementById('eat-comment');
+      if (de2) { de2.classList.add('fade'); setTimeout(() => { de2.textContent = '空菜单，先添加菜名'; de2.classList.remove('fade'); }, 200); }
+      if (ce2) { ce2.classList.add('fade'); setTimeout(() => { ce2.textContent = ''; ce2.classList.remove('fade'); }, 200); }
+      return '';
+    }
+    const dish = dishes[Math.floor(Math.random() * dishes.length)];
     const comments = DEF_EAT_COMMENTS; const comment = comments[Math.floor(Math.random() * comments.length)];
     const de = document.getElementById('eat-dish'); const ce = document.getElementById('eat-comment');
     if (de) { de.classList.add('fade'); setTimeout(() => { de.textContent = dish; de.classList.remove('fade'); }, 200); }
@@ -2598,7 +2806,7 @@ if (ckRefresh) {
   document.getElementById('eat-send').addEventListener('click', () => { if (editingNow() || eatSpinning) return; if (eatLastPick && window.chatAddIn) { try { window.chatAddIn(eatLastPick); } catch (e) {} toast('已发送'); } });
   document.getElementById('eat-add').addEventListener('click', () => { if (!window.openModal) return; window.openModal('添加菜名', '', (v) => { if (!v) return; const cur = eatCurMenu(); if (cur.menu.dishes.indexOf(v) >= 0) { toast('当前菜单已有「' + v + '」'); return; } cur.menu.dishes.push(v); cur.menus[cur.idx] = cur.menu; eatSaveMenus(cur.menus); eatDrawWheel(eatDishes()); toast('已添加到「' + cur.menu.name + '」'); }); });
   document.getElementById('eat-spin').addEventListener('click', () => { if (editingNow() || eatSpinning) return; const dishes = eatDishes(); eatSpinWheel(dishes, (dish) => { const de = document.getElementById('eat-dish'); if (de) { de.classList.add('fade'); setTimeout(() => { de.textContent = dish; de.classList.remove('fade'); }, 200); } const ce = document.getElementById('eat-comment'); const comments = DEF_EAT_COMMENTS; const comment = comments[Math.floor(Math.random() * comments.length)]; if (ce) { ce.classList.add('fade'); setTimeout(() => { ce.textContent = '\u201c' + comment + '\u201d'; ce.classList.remove('fade'); }, 200); } eatLastPick = dish + ' · ' + comment; eatPushHistory(dish); }); });
-  document.getElementById('eat-askta').addEventListener('click', () => { if (editingNow() || eatSpinning) return; if (!eatLastPick) { eatLastPick = eatPick(); } const m = eatLastPick.match(/^(.+?) ·/); const dish = m ? m[1] : eatLastPick; const msg = EAT_ASK_MSGS[Math.floor(Math.random() * EAT_ASK_MSGS.length)].replace('{0}', dish); if (window.chatAddIn) { try { window.chatAddIn(msg); } catch (e) {} toast('已发送'); } });
+  document.getElementById('eat-askta').addEventListener('click', () => { if (editingNow() || eatSpinning) return; if (!eatLastPick) { eatLastPick = eatPick(); } if (!eatLastPick) { toast('当前菜单是空的，先添加菜名'); return; } const m = eatLastPick.match(/^(.+?) ·/); const dish = m ? m[1] : eatLastPick; const msg = EAT_ASK_MSGS[Math.floor(Math.random() * EAT_ASK_MSGS.length)].replace('{0}', dish); if (window.chatAddIn) { try { window.chatAddIn(msg); } catch (e) {} toast('已发送'); } });
   let eatEditIdx = 0;
   function eatEsc(s) { return String(s).replace(/[<>&"]/g, c => ({'<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;'}[c])); }
   function eatRenderMenuChips() {
@@ -2636,8 +2844,8 @@ if (ckRefresh) {
     window.openModal('新建菜单', '', (v) => {
       if (!v) return; const menus = eatMenus();
       if (menus.some(m => m.name === v)) { toast('已有同名菜单'); return; }
-      menus.push({ name: v, dishes: DEF_EAT_DISHES.slice() }); eatSaveMenus(menus);
-      eatEditIdx = menus.length - 1; eatEditFill(); toast('已新建「' + v + '」（含默认菜品，可编辑）');
+      menus.push({ name: v, dishes: [] }); eatSaveMenus(menus);
+      eatEditIdx = menus.length - 1; eatEditFill(); toast('已新建「' + v + '」（空菜单，可在下方添加菜名）');
     }, { placeholder: '如：家常菜 / 外卖 / 夜宵' });
   });
   document.getElementById('eat-menu-rename').addEventListener('click', () => {
@@ -2676,6 +2884,10 @@ if (ckRefresh) {
   // 分组「提醒吃饭/追问关心」），逐张开关（dc-off-eat:*）经 libPool 过滤后参与抽取。
   const DEF_EAT_REMIND = ['到饭点啦，去吃饭吧', '该吃饭了哦，别饿着', '今天吃 {d} 怎么样？就它了', '{d} 挺好的，去吃这个吧', '记得吃热乎的，别随便对付一口', '去吃饭吧，吃完跟我说说吃了什么', '别忙忘了吃饭，胃是自己的', '我看着呢，快去吃饭', '放下手里的事，先吃饭好不好', '饭要按时吃，我才会放心', '好好吃饭的人，运气不会太差哦', '饿了就去做点吃的，别硬撑'];
   const DEF_EAT_REMIND_CARE = ['吃了什么呀？说给我听听', '吃饱了吗？没饱再去添一点', '吃得合胃口吗？', '慢慢吃，不着急', '记得配点汤汤水水', '吃完了就休息一会儿吧'];
+  // v3.26.x：夜宵窗口（21:30–23:30）专属话术——与字卡库【吃什么】tab「夜宵提醒/夜宵关心」
+  // 分组同源（default-cards-data.js），深夜不再复用「按时吃饭」文案；仍可逐张开关（dc-off-eat:*）
+  const DEF_EAT_REMIND_NIGHT = ['夜深了，饿不饿？想吃点夜宵吗', '这个点还没睡呀，要不要来点夜宵', '饿着肚子睡觉可不好，去弄点吃的吧', '夜宵别吃太撑，留点肚子给梦', '偷偷问一句，今晚想吃夜宵吗', '去煮碗热乎的面吧，我陪你吃', '深夜的胃，也该被好好对待', '别只啃饼干，夜宵也要认真吃', '吃夜宵的人，今晚会做甜甜的梦', '要不要我给你留一盏灯，你去觅食'];
+  const DEF_EAT_REMIND_NIGHT_CARE = ['夜宵吃的什么呀？说给我听听', '吃饱了就快去睡，别熬太晚', '吃完夜宵记得刷个牙再睡哦', '太晚就别吃太辣的，伤胃', '夜宵吃完了就躺下吧，我守着'];
   // 饭点窗口（分钟）：早 06:30–09:30 / 午 11:00–13:30 / 晚 17:00–19:30 / 夜宵 21:30–23:30
   const EAT_REMIND_WINDOWS = [['breakfast', 390, 570], ['lunch', 660, 810], ['dinner', 1020, 1170], ['nightcap', 1290, 1410]];
   function eatDayKey() { const d = new Date(); return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0'); }
@@ -2695,7 +2907,9 @@ if (ckRefresh) {
     const dishes = eatDishes();
     const dish = dishes.length ? dishes[Math.floor(Math.random() * dishes.length)] : '';
     let text = '';
-    const pool = libPool('eat', '提醒吃饭', DEF_EAT_REMIND);
+    // v3.26.x：夜宵窗口用专属话术池，其余窗口用通用「提醒吃饭」池（夜宵不再是"按时吃饭"语境）
+    const isNight = code === 'nightcap';
+    const pool = isNight ? libPool('eat', '夜宵提醒', DEF_EAT_REMIND_NIGHT) : libPool('eat', '提醒吃饭', DEF_EAT_REMIND);
     if (pool.length) text = pool[Math.floor(Math.random() * pool.length)] || '';
     if (!text) return;
     text = text.replace(/\{d\}/g, dish || '饭');
@@ -2707,7 +2921,7 @@ if (ckRefresh) {
     // 35% 概率隔一小会儿再补一句「追问关心」（第 2+ 条不重复响提示音，同回复链惯例）
     if (Math.random() < 0.35) {
       setTimeout(() => {
-        const care = libPool('eat', '追问关心', DEF_EAT_REMIND_CARE);
+        const care = isNight ? libPool('eat', '夜宵关心', DEF_EAT_REMIND_NIGHT_CARE) : libPool('eat', '追问关心', DEF_EAT_REMIND_CARE);
         if (care.length && window.chatAddIn) { try { window.chatAddIn(care[Math.floor(Math.random() * care.length)], { silent: true, tag: '吃饭提醒' }); } catch (e) {} }
       }, 1400);
     }
@@ -2715,6 +2929,7 @@ if (ckRefresh) {
   function eatRemindMaybe() {
     try {
       if (!window.chatAddIn) return;
+      const h = new Date().getHours(); if (h >= 23 || h < 6) return; // v3.26.x：23:00-06:00 静默期，不提醒吃饭（深更半夜吃饭提醒离谱）
       if (!eatRemindEn()) return;
       const now = new Date(); const mins = now.getHours() * 60 + now.getMinutes();
       const w = EAT_REMIND_WINDOWS.find(x => mins >= x[1] && mins <= x[2]);
@@ -2775,9 +2990,13 @@ if (ckRefresh) {
     '</div>';
   host.appendChild(pomoPage);
 
+  // 番茄钟数据全局共享（pomo-cfg 时长 / 今日·累计 🍅 / 夸夸字卡 / 发到聊天 / 铃声 / 陪伴会话 / 陪伴聊天记录
+  // 与陪伴设置都存根命名空间 xy-home-v2:*，所有桌面读写同一份——陪伴模式可跨联系人继续、不随桌面切换重置）
+  function pomoStore() { try { return window.xyStore('xy-home-v2'); } catch (e) { return null; } }
+
   function pomoCfg() {
     let c = null;
-    try { c = JSON.parse((curStore() && curStore().get('pomo-cfg')) || '{}'); } catch (e) {}
+    try { c = JSON.parse((pomoStore() && pomoStore().get('pomo-cfg')) || '{}'); } catch (e) {}
     const ok = (n, d) => (n && n >= 1 && n <= 180 ? n : d);
     return {
       f: ok(c && c.f, POMO_MODES.focus.def),
@@ -2785,23 +3004,23 @@ if (ckRefresh) {
       l: ok(c && c.l, POMO_MODES.long.def)
     };
   }
-  function pomoSetCfg(c) { const s = curStore(); if (s) try { s.set('pomo-cfg', JSON.stringify(c)); } catch (e) {} }
+  function pomoSetCfg(c) { const s = pomoStore(); if (s) try { s.set('pomo-cfg', JSON.stringify(c)); } catch (e) {} }
   function pomoModeMin(m) { const c = pomoCfg(); return m === 'focus' ? c.f : m === 'short' ? c.s : c.l; }
   function pomoTodayKey() { const d = new Date(); return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0'); }
   function pomoToday() {
-    const s = curStore();
+    const s = pomoStore();
     try { const o = JSON.parse((s && s.get('pomo-today')) || '{}'); if (o.date === pomoTodayKey()) return { date: o.date, count: o.count || 0 }; } catch (e) {}
     return { date: pomoTodayKey(), count: 0 };
   }
-  function pomoSaveToday(t) { const s = curStore(); if (s) try { s.set('pomo-today', JSON.stringify(t)); } catch (e) {} }
-  function pomoTotal() { const s = curStore(); try { return parseInt((s && s.get('pomo-total')) || '0', 10) || 0; } catch (e) { return 0; } }
-  function pomoSaveTotal(n) { const s = curStore(); if (s) try { s.set('pomo-total', '' + n); } catch (e) {} }
-  function pomoCustomMsgs() { const s = curStore(); try { const a = JSON.parse((s && s.get('pomo-msgs')) || '[]'); if (Array.isArray(a)) return a; } catch (e) {} return []; }
-  function pomoSaveMsgs(a) { const s = curStore(); if (s) try { s.set('pomo-msgs', JSON.stringify(a)); } catch (e) {} }
+  function pomoSaveToday(t) { const s = pomoStore(); if (s) try { s.set('pomo-today', JSON.stringify(t)); } catch (e) {} }
+  function pomoTotal() { const s = pomoStore(); try { return parseInt((s && s.get('pomo-total')) || '0', 10) || 0; } catch (e) { return 0; } }
+  function pomoSaveTotal(n) { const s = pomoStore(); if (s) try { s.set('pomo-total', '' + n); } catch (e) {} }
+  function pomoCustomMsgs() { const s = pomoStore(); try { const a = JSON.parse((s && s.get('pomo-msgs')) || '[]'); if (Array.isArray(a)) return a; } catch (e) {} return []; }
+  function pomoSaveMsgs(a) { const s = pomoStore(); if (s) try { s.set('pomo-msgs', JSON.stringify(a)); } catch (e) {} }
   function pomoPool() { return DEF_POMO_PRAISE.concat(pomoCustomMsgs()); }
-  function pomoSendOn() { const s = curStore(); try { return s.get('pomo-send-chat') !== '0'; } catch (e) { return true; } }
-  // 结束铃声开关（每桌面独立，默认开；关了只静音、震动与本地通知保留）
-  function pomoBellOn() { const s = curStore(); try { return s.get('pomo-bell') !== '0'; } catch (e) { return true; } }
+  function pomoSendOn() { const s = pomoStore(); try { return s.get('pomo-send-chat') !== '0'; } catch (e) { return true; } }
+  // 结束铃声开关（全局共享，默认开；关了只静音、震动与本地通知保留）
+  function pomoBellOn() { const s = pomoStore(); try { return s.get('pomo-bell') !== '0'; } catch (e) { return true; } }
   // 到点本地通知（period.js notifyAssist 先例）：页面在后台/熄屏时 Web Audio 会挂起、
   // iOS 又没有 navigator.vibrate——系统通知是唯一可靠的到点提醒。只看通知权限，
   // 不受「TA 消息通知」开关影响（番茄钟是用户主动启动的闹钟类功能）。
@@ -2958,14 +3177,14 @@ if (ckRefresh) {
   const pomoSendBtn = document.getElementById('pomo-send');
   if (pomoSendBtn) {
     pomoSendBtn.textContent = '发到聊天：' + (pomoSendOn() ? '开' : '关');
-    pomoSendBtn.addEventListener('click', () => { const s = curStore(); const on = !pomoSendOn(); if (s) try { s.set('pomo-send-chat', on ? '1' : '0'); } catch (e) {} pomoSendBtn.textContent = '发到聊天：' + (on ? '开' : '关'); });
+    pomoSendBtn.addEventListener('click', () => { const s = pomoStore(); const on = !pomoSendOn(); if (s) try { s.set('pomo-send-chat', on ? '1' : '0'); } catch (e) {} pomoSendBtn.textContent = '发到聊天：' + (on ? '开' : '关'); });
   }
   // 结束铃声开关（关=只静音；震动与后台本地通知仍保留）
   const pomoBellBtn = document.getElementById('pomo-bell');
   if (pomoBellBtn) {
     pomoBellBtn.textContent = '铃声：' + (pomoBellOn() ? '开' : '关');
     pomoBellBtn.addEventListener('click', () => {
-      const s = curStore();
+      const s = pomoStore();
       const on = !pomoBellOn();
       if (s) try { s.set('pomo-bell', on ? '1' : '0'); } catch (e) {}
       pomoBellBtn.textContent = '铃声：' + (on ? '开' : '关');
@@ -3025,6 +3244,8 @@ if (ckRefresh) {
         const gn = s.get('piggy-goal-name'); const ga = parseFloat(s.get('piggy-goal-amt')) || 0;
         a = (gn && ga > 0) ? [{ n: gn, a: ga }] : [];
       } catch (e) { a = []; }
+      // 迁移后立即落盘，避免旧单目标永远只活在虚拟读取里（备份/导出时缺失）
+      try { s.set('piggy-goals', JSON.stringify(a)); } catch (e) {}
     }
     return a.filter(function (g) { return g && g.n && (+g.a) > 0; }).map(function (g) {
       return {
@@ -3103,6 +3324,7 @@ if (ckRefresh) {
         const byTxt = (!gg.by || !gg.by.length) ? '监督：所有桌面' : '监督：' + piggyEsc(gg.by.map(piggyContactName).join('、'));
         h += '<div class="pg-row' + (ent.i === act.i ? ' cur' : '') + '" data-pick="' + ent.i + '">' +
           '<span class="pg-name' + (gg.done ? ' done' : '') + '"><span class="pg-nm">' + piggyEsc(gg.n) + (gg.done ? ' ✓' : '') + '</span><span class="pg-by">' + byTxt + '</span></span>' +
+          '<span class="pg-amt">¥' + piggyFmt(gg.a) + '</span>' +
           '<span class="pg-bar"><i style="width:' + p + '%"></i></span><span class="pg-pct">' + p + '%</span>' +
           '<button class="pg-del" data-del="' + ent.i + '">✕</button></div>';
       });
@@ -3122,14 +3344,14 @@ if (ckRefresh) {
           const d = new Date((x && x.t) || Date.now());
           const key = d.getFullYear() + '-' + d.getMonth();
           if (key !== curKey) {
-            if (curKey !== '') parts.push('<div class="pr-sub">本月小结 · ' + (sum >= 0 ? '+' : '\u2212') + '¥' + piggyFmt(Math.abs(sum)) + '</div>');
+            if (curKey !== '') parts.push('<div class="pr-sub">小结 · ' + (sum >= 0 ? '+' : '\u2212') + '¥' + piggyFmt(Math.abs(sum)) + '</div>');
             curKey = key; sum = 0;
             parts.push('<div class="pr-month">' + d.getFullYear() + ' 年 ' + (d.getMonth() + 1) + ' 月</div>');
           }
           sum += ((x && x.type === 'out' ? -1 : 1) * ((x && x.amt) || 0));
           parts.push(piggyRowHtml(x));
         });
-        parts.push('<div class="pr-sub">本月小结 · ' + (sum >= 0 ? '+' : '\u2212') + '¥' + piggyFmt(Math.abs(sum)) + '</div>');
+        parts.push('<div class="pr-sub">小结 · ' + (sum >= 0 ? '+' : '\u2212') + '¥' + piggyFmt(Math.abs(sum)) + '</div>');
         body = parts.join('');
       }
       hist.innerHTML = '<div class="piggy-hist-top"><span class="piggy-hist-title">存钱记录</span>' +
@@ -3377,7 +3599,7 @@ if (ckRefresh) {
   const PMP_REPLIES = ['嗯嗯，我在', '专心哦，我看着你呢', '加油，很快就完成了', '嗯，陪你', '别分心呀，专注完再聊', '好，一起加油', '我在呢，安心专注'];
   const PMP_TIRED = ['累就先歇口气，深呼吸一下', '辛苦啦，摸摸头，再坚持一小会儿', '累了就慢一点，我不催你'];
   let pmpRec = null;
-  try { pmpRec = JSON.parse((curStore() && curStore().get('pomo-companion')) || 'null'); } catch (e) { pmpRec = null; }
+  try { pmpRec = JSON.parse((pomoStore() && pomoStore().get('pomo-companion')) || 'null'); } catch (e) { pmpRec = null; }
   if (!pmpRec || typeof pmpRec !== 'object') pmpRec = null;
   const chatPageEl = document.getElementById('page-chat');
   const pmpBar = document.createElement('div');
@@ -3392,6 +3614,7 @@ if (ckRefresh) {
   pmpMenu.className = 'pmp-menu'; pmpMenu.id = 'pmp-menu'; pmpMenu.hidden = true;
   pmpMenu.innerHTML =
     '<button data-pmp="page" type="button">回番茄钟页</button>' +
+    '<button data-pmp="settings" type="button">陪伴设置</button>' +
     '<button data-pmp="quit" type="button">提前结束</button>';
   if (chatPageEl) {
     const anchor = document.getElementById('chat-body');
@@ -3404,14 +3627,22 @@ if (ckRefresh) {
   pmpCPage.className = 'page'; pmpCPage.id = 'page-pmp-chat'; pmpCPage.hidden = true;
   pmpCPage.innerHTML =
     '<div class="chat-head"><span class="ch-back" id="pmpc-back"><svg viewBox="0 0 24 24" fill="none" stroke="#111111" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 18l-6-6 6-6"/></svg></span><span class="ch-name">陪伴专注</span></div>' +
-    '<div class="pmp-bar" id="pmp-cd"><span class="pmp-bar-time" id="pmp-cd-time">25:00</span><span class="pmp-bar-label" id="pmp-cd-label">专注中 · TA 陪着你</span><button class="pmp-bar-toggle" id="pmp-cd-toggle">暂停</button><button class="pmp-bar-more" id="pmp-cd-more">⋯</button><div class="pmp-progress"><div class="pmp-progress-fill" id="pmp-cd-fill"></div></div></div>' +
-    '<div class="pmp-menu" id="pmp-c-menu" hidden><button data-pmpc="page" type="button">回番茄钟页</button><button data-pmpc="quit" type="button">提前结束</button></div>' +
-    '<div class="pmp-c-list" id="pmp-c-list"></div>' +
-    '<div class="pmp-c-inputbar"><input class="pmp-c-in" id="pmp-c-in" type="text" maxlength="120" placeholder="想说点什么…（TA 安静陪着）"><button class="pmp-c-send" id="pmp-c-send">发送</button></div>';
+    '<div class="pmp-cd" id="pmp-cd">' +
+      '<div class="pmp-cd-time" id="pmp-cd-time">25:00</div>' +
+      '<div class="pmp-cd-label" id="pmp-cd-label">专注中 · TA 陪着你</div>' +
+      '<div class="pmp-cd-ctrls"><button class="pmp-bar-toggle" id="pmp-cd-toggle">暂停</button><button class="pmp-bar-more" id="pmp-cd-more">⋯</button></div>' +
+      '<div class="pmp-cd-progress"><div class="pmp-progress-fill" id="pmp-cd-fill"></div></div>' +
+    '</div>' +
+    '<div class="pmp-menu" id="pmp-c-menu" hidden><button data-pmpc="page" type="button">回番茄钟页</button><button data-pmpc="settings" type="button">陪伴设置</button><button data-pmpc="quit" type="button">提前结束</button></div>' +
+    '<div class="pmp-c-chat">' +
+      '<div class="pmp-c-chat-title">悄悄话 · 陪着聊（辅助功能）</div>' +
+      '<div class="pmp-c-list" id="pmp-c-list"></div>' +
+      '<div class="pmp-c-inputbar"><input class="pmp-c-in" id="pmp-c-in" type="text" maxlength="120" placeholder="想说点什么…（TA 安静陪着）"><button class="pmp-c-send" id="pmp-c-send">发送</button></div>' +
+    '</div>';
   host.appendChild(pmpCPage);
 
-  function pmpLog() { try { const a = JSON.parse((curStore() && curStore().get('pomo-companion-log')) || '[]'); if (Array.isArray(a)) return a; } catch (e) {} return []; }
-  function pmpLogSave(a) { const s = curStore(); if (!s) return; try { s.set('pomo-companion-log', JSON.stringify(a.slice(-300))); } catch (e) {} }
+  function pmpLog() { try { const a = JSON.parse((pomoStore() && pomoStore().get('pomo-companion-log')) || '[]'); if (Array.isArray(a)) return a; } catch (e) {} return []; }
+  function pmpLogSave(a) { const s = pomoStore(); if (!s) return; try { s.set('pomo-companion-log', JSON.stringify(a.slice(-300))); } catch (e) {} }
   function pmpEsc(s) { return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;'); }
   function pmpCRender() {
     const box = document.getElementById('pmp-c-list'); if (!box) return;
@@ -3434,13 +3665,40 @@ if (ckRefresh) {
     if (!pmpCPage.hidden) pmpCRender();
   }
   let pmpReplyTimer = null;
+  // 陪伴设置：是否让 TA 优先用【聊天】里的字卡回复（自定义回复字卡 + 默认字卡 + 附加表情卡，取文本卡）。
+  // 全局共享，所有桌面一致。默认开。
+  function pmpUseChatCards() { const s = pomoStore(); try { return s.get('pomo-cmp-usecards') !== '0'; } catch (e) { return true; } }
+  function pmpSetUseChatCards(on) { const s = pomoStore(); if (s) try { s.set('pomo-cmp-usecards', on ? '1' : '0'); } catch (e) {} }
+  function pmpOpenSettings() {
+    if (!window.openModal) return;
+    const on = pmpUseChatCards();
+    window.openModal('陪伴设置', '', (v) => {
+      if (v !== '0' && v !== '1') return;
+      pmpSetUseChatCards(v === '1');
+      toast(v === '1' ? '已开启：TA 会用【聊天】字卡回复你' : '已关闭：TA 不再用【聊天】字卡回复');
+    }, {
+      noInput: true, lock: true, pill: on ? '1' : '0',
+      pills: [{ label: '用【聊天】字卡回复（开）', value: '1' }, { label: '不用（关）', value: '0' }],
+      staticText: '开启后，陪伴中的 TA 会优先用你在【聊天】里设置的字卡回复你；关闭则只用陪伴自带的常回话。'
+    });
+  }
+  function pmpChatCardText() {
+    try {
+      if (!window.getPool) return '';
+      const t = window.getPool().text || [];
+      // 排除空串与拍一拍（getPool 已过滤拍一拍），也排除媒体 dataURL
+      const arr = t.filter(s => typeof s === 'string' && s.trim() && s.indexOf('data:') !== 0);
+      return (arr.length && Math.random() < 0.7) ? arr[Math.floor(Math.random() * arr.length)] : '';
+    } catch (e) { return ''; }
+  }
   function pmpCReply(userText) {
     clearTimeout(pmpReplyTimer);
     const t = String(userText || '');
     let pool = PMP_REPLIES;
     if (/累|难|烦|倦|困/.test(t)) pool = PMP_TIRED;
     else if (/完成|好了|结束|收工/i.test(t)) pool = PMP_DONE;
-    const txt = pool[Math.floor(Math.random() * pool.length)];
+    let txt = pool[Math.floor(Math.random() * pool.length)];
+    if (pmpUseChatCards()) { const card = pmpChatCardText(); if (card) txt = card; }
     pmpReplyTimer = setTimeout(() => { try { vibrate([30]); } catch (e) {} pmpCAdd('ta', txt); }, 700 + Math.random() * 800);
   }
   function pmpCSend() {
@@ -3457,7 +3715,7 @@ if (ckRefresh) {
     if (e.key === 'Enter' && !e.isComposing && e.keyCode !== 229) { e.preventDefault(); pmpCSend(); }
   });
   function pmpActive() { return !!pmpRec; }
-  function pmpSave() { const s = curStore(); if (!s) return; try { if (pmpRec) s.set('pomo-companion', JSON.stringify(pmpRec)); else s.remove('pomo-companion'); } catch (e) {} }
+  function pmpSave() { const s = pomoStore(); if (!s) return; try { if (pmpRec) s.set('pomo-companion', JSON.stringify(pmpRec)); else s.remove('pomo-companion'); } catch (e) {} }
   function pmpDetach() {
     clearTimeout(pmpEncTimer);
     clearTimeout(pmpReplyTimer);
@@ -3574,7 +3832,7 @@ if (ckRefresh) {
       try { pmpCAdd('ta', '没事，休息一下也可以'); } catch (e) {}
       pmpDetach(); pomoRender();
       if (inWin) { openPage(pomoPage); pomoRender(); }
-    }, { noInput: true, lock: true, pills: [{ label: '结束', value: '1' }, { label: '再撑一会儿', value: '0' }], staticText: '提前结束的话，这个 🍅 就不计入今天啦' });
+    }, { noInput: true, lock: true, pill: '1', pills: [{ label: '结束', value: '1' }, { label: '再撑一会儿', value: '0' }], staticText: '提前结束的话，这个 🍅 就不计入今天啦' });
   }
   // 入口：番茄钟页「陪伴模式」按钮——未在跑则开一个新专注并挂上陪伴；进入/返回的都是专属聊天窗
   const pmpGoBtn = document.getElementById('pomo-companion');
@@ -3605,6 +3863,7 @@ if (ckRefresh) {
   pmpMenu.querySelectorAll('button[data-pmp]').forEach(b => b.addEventListener('click', () => {
     pmpMenu.hidden = true;
     if (b.dataset.pmp === 'page') { openPage(pomoPage); pomoRender(); return; }
+    if (b.dataset.pmp === 'settings') { pmpOpenSettings(); return; }
     if (b.dataset.pmp !== 'quit') return;
     pmpQuitAsk();
   }));
@@ -3616,12 +3875,13 @@ if (ckRefresh) {
   document.querySelectorAll('#pmp-c-menu button[data-pmpc]').forEach(b => b.addEventListener('click', () => {
     const m = document.getElementById('pmp-c-menu'); if (m) m.hidden = true;
     if (b.dataset.pmpc === 'page') { openPage(pomoPage); pomoRender(); return; }
+    if (b.dataset.pmpc === 'settings') { pmpOpenSettings(); return; }
     if (b.dataset.pmpc !== 'quit') return;
     pmpQuitAsk();
   }));
   // 聊天页显隐时同步条显示
   if (chatPageEl) new MutationObserver(pmpSyncBar).observe(chatPageEl, { attributes: true, attributeFilter: ['hidden'] });
-  document.addEventListener('contact-switched', () => { if (pmpActive()) pmpDetach(); });
+  // 陪伴会话全局共享：切换联系人不再退出陪伴（数据存根命名空间，可跨桌面继续）
   // 启动恢复：上次会话还在进行 → 引擎接续走；已在关闭期间完成 → 补记一个 🍅
   (function pmpRestore() {
     if (!pmpRec) return;
@@ -3668,7 +3928,7 @@ if (ckRefresh) {
   let lastTa = null;
   // v3.13.x：浮字/抓包回应改走系统预设字卡池（DEFAULT_CARD_DATA.fish，字卡库「摸鱼浮字」
   // tab 同源可查看/逐张开关）；过滤用户已关闭的卡片，池缺失时回退内置兜底
-  const FISH_NOTE_FALLBACK = ['他在那边也偷了个懒'];
+  const FISH_NOTE_FALLBACK = ['ta在那边也偷了个懒'];
   const CATCH_REPLIES = [
     '呀…被你看到了',
     '才、才没有偷懒…好吧，被抓到了',

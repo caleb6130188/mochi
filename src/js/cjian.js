@@ -140,8 +140,10 @@
     const sorted = arr.slice().sort((a, b) => a - b);
     return sorted.map(h => SHICHEN[shichenAt(h)] + '时').join('·');
   }
-  // 有 slots：世界时间（分钟）在所选时辰里随机；无 slots：现实+偏移连续流动
-  function worldMinuteOf(c) {
+  // 有 slots：世界时间（分钟）在所选时辰里随机；无 slots：现实+偏移连续流动。
+  // 这是"抽一次"的原始计算：外部经 worldMinuteOf 持久化后再取用——世界时间不再
+  // 每次打开此间就重新随机，而是抽一个存住、1–8 小时才重新抽（见下方 ottFor）。
+  function worldMinuteOfRaw(c) {
     const slots = c && c.slots;
     if (Array.isArray(slots) && slots.length) {
       const s = slots[Math.floor(Math.random() * slots.length)];
@@ -151,6 +153,39 @@
     const d = new Date(Date.now() + off * 60000);
     return d.getHours() * 60 + d.getMinutes();
   }
+  // ===== 梦角世界时间持久化（抽一次存住，1–8 小时才重抽） =====
+  // 需求：带时辰区间（slots）的梦角世界时间每次重开网页都会跳（worldMinuteOfRaw 每次都
+  // Math.random()）。改为与「对方当前时间」同一刷新哲学：抽一个世界时刻存住，last/next
+  // 时间戳持久化，冷却过了才重新抽。键形 xy-home-v2:cjian-ott（根级，key=梦角id，
+  // value={worldMin,last,next}）；梦角 id 全局唯一（makeId），跨桌面搬移/增删不受影响。
+  // 注意：「今日」轴的预测随机保持原样——每打开一次此间仍重新重掷，不受本机制约束。
+  let ottCache = null;
+  function loadOtt() {
+    try {
+      const r = rootStore();
+      if (!r) return null;
+      const v = r.get('cjian-ott');
+      if (v) { const o = JSON.parse(v); if (o && typeof o === 'object') return o; }
+    } catch (e) {}
+    return null;
+  }
+  function saveOtt(o) { try { const r = rootStore(); if (r) r.set('cjian-ott', JSON.stringify(o)); } catch (e) {} }
+  function ottFor(c) {
+    const now = Date.now();
+    if (!ottCache) ottCache = loadOtt() || {};
+    const t = ottCache[c.id];
+    let last = (t && typeof t.last === 'number') ? t.last : 0;
+    let next = (t && typeof t.next === 'number') ? t.next : 0;
+    if (last > now || last < 0 || isNaN(last)) { last = 0; next = 0; }
+    if (!t || (now - last) / 36e5 >= next) {
+      ottCache[c.id] = { worldMin: worldMinuteOfRaw(c), last: now, next: 1 + Math.random() * 7 };
+      saveOtt(ottCache);
+    }
+    return ottCache[c.id];
+  }
+  function worldMinuteOf(c) { return ottFor(c).worldMin; }
+  // 删除梦角时清掉其持久化世界时间，避免留孤儿数据
+  function clearOttTag(id) { if (ottCache && ottCache[id]) { delete ottCache[id]; saveOtt(ottCache); } }
   function timeInfo(ts) {
     const d = new Date(ts);
     const hour = d.getHours();
@@ -170,18 +205,13 @@
     }
     return { idx: idx, half: half, range: range, hhmm: pad(hour) + ':' + pad(d.getMinutes()) };
   }
-  function worldNow(offsetMin) { return Date.now() + ((offsetMin || 0) * 60000); }
-  // v3.16.x：展示用世界时间戳——有 slots 的梦角按当前抽中的时辰随机时刻，无 slots 按偏移
+  // v3.x 改：展示用世界时间戳改为基于持久化世界分钟（worldMinuteOf），与状态概率所取的
+  // 世界时间一致，且 1–8 小时才变，不再每次打开此间就跳。
   function worldNowFor(c) {
-    const slots = c && c.slots;
-    if (Array.isArray(slots) && slots.length) {
-      const s = slots[Math.floor(Math.random() * slots.length)];
-      const mm = slotMinuteRange(s);
-      const d = new Date();
-      d.setHours(Math.floor(mm / 60), mm % 60, 0, 0);
-      return d.getTime();
-    }
-    return worldNow(c && c.offsetMin);
+    const wm = worldMinuteOf(c);
+    const d = new Date();
+    d.setHours(Math.floor(wm / 60), wm % 60, 0, 0);
+    return d.getTime();
   }
   function offsetLabel(off) {
     if (!off) return '与现实同步';
@@ -732,6 +762,93 @@
     if (changedName) box.appendChild(el('p', 'cj-p-note', '「' + changedName + '」似乎改变了状态——现在' + changedTo + '。'));
     box.hidden = false;
   }
+  // ===== 对方当前时间：联系人自己随机抽的当地时刻 =====
+  // 刷新机制同「头像互动·随机更换联系人头像」：启动立即检查 + 每 60 秒轮询，
+  // last/next 时间戳持久化（首次 last=0 → 立即抽一个），抽完 next=1+random*7 小时；
+  // 异常时间戳归一，刷新页面周期不重置。键形 xy-home-v2:<cid>:cjian-ta-time。
+  function loadTaTime(cid) {
+    try { const s = storeOf(cid); if (s) { const v = s.get('cjian-ta-time'); if (v) return JSON.parse(v); } } catch (e) {}
+    return null;
+  }
+  function saveTaTime(cid, obj) {
+    try { storeOf(cid).set('cjian-ta-time', JSON.stringify(obj)); } catch (e) {}
+  }
+  function taTimeOf(cid) {
+    const now = Date.now();
+    let t = loadTaTime(cid);
+    let last = (t && typeof t.last === 'number') ? t.last : 0;
+    let next = (t && typeof t.next === 'number') ? t.next : 0;
+    if (last > now || last < 0 || isNaN(last)) { last = 0; next = 0; }
+    if (!t || (now - last) / 36e5 >= next) {
+      // 在梦角所设的时间段（时辰区间）里抽具体时刻；桌面无 slots 梦角则退回全天随机。
+      // 时间段 = 该桌面全部梦角 slots 时辰起始整点的并集。
+      const list0 = loadRoster(cid);
+      const slotSet = [];
+      list0.forEach(function (c2) {
+        if (Array.isArray(c2.slots) && c2.slots.length) {
+          c2.slots.forEach(function (h) { if (slotSet.indexOf(h) < 0) slotSet.push(h); });
+        }
+      });
+      let hh, mm, stH = -1;
+      if (slotSet.length) {
+        stH = slotSet[rand(0, slotSet.length - 1)];
+        const total = slotMinuteRange(stH);
+        hh = Math.floor(total / 60) % 24; mm = total % 60;
+      } else { hh = rand(0, 23); mm = rand(0, 59); }
+      t = { hh: hh, mm: mm, last: now, next: 1 + Math.random() * 7 };
+      if (stH >= 0) t.slotStartH = stH; // 记录抽中的时辰起时，供「时间段」标签展示具体范围
+      saveTaTime(cid, t);
+    }
+    return t;
+  }
+  function renderTaTime() {
+    const listEl = document.getElementById('cj-list');
+    if (!listEl) return;
+    let card = document.getElementById('cj-ta-time');
+    if (!card) {
+      card = el('div', 'cj-ta-time-card');
+      card.id = 'cj-ta-time';
+      listEl.parentNode.insertBefore(card, listEl);
+    }
+    card.innerHTML = '';
+    card.appendChild(el('div', 'cj-ta-time-title', '对方当前时间'));
+    card.appendChild(el('div', 'cj-ta-time-hint', 'TA 自己随机抽的当地时刻 · 每隔 1-8 小时重新抽'));
+    const cidList = viewCid === ALL ? contacts().map(function (ct) { return ct.id; }) : [(viewCid || curCid())];
+    cidList.forEach(function (cid) {
+      const t = taTimeOf(cid);
+      const row = el('div', 'cj-ta-time-item');
+      const left = el('div', 'cj-ta-time-left');
+      left.appendChild(el('span', 'cj-ta-time-sh', 'TA'));
+      const nameCol = el('span', 'cj-ta-time-namecol');
+      nameCol.appendChild(el('span', 'cj-ta-time-name', contactName(cid)));
+      nameCol.appendChild(el('span', 'cj-ta-time-slot', taSlotLabel(cid, t)));
+      left.appendChild(nameCol);
+      row.appendChild(left);
+      const right = el('div', 'cj-ta-time-right');
+      right.appendChild(el('span', 'cj-ta-time-hhmm', pad(t.hh) + ':' + pad(t.mm)));
+      right.appendChild(el('span', 'cj-ta-time-shi', SHICHEN[shichenAt(t.hh)] + '时'));
+      row.appendChild(right);
+      card.appendChild(row);
+    });
+  }
+  // 「对方当前时间」的时间段标签：显示抽中时辰的名字 + 具体时间范围（如「未时 13:00–15:59」）。
+  // 该桌面无 slots 梦角则为全天随机；旧数据无 slotStartH 时按抽到的时刻反推时辰。
+  function taSlotLabel(cid, t) {
+    const hasSlots = loadRoster(cid).some(function (c2) { return Array.isArray(c2.slots) && c2.slots.length; });
+    if (!hasSlots) return '全天随机';
+    let startH;
+    if (t && typeof t.slotStartH === 'number' && t.slotStartH >= 0) startH = t.slotStartH;
+    else startH = shichenStartHour(shichenAt(t.hh));
+    return SHICHEN[shichenAt(startH)] + '时 ' + pad(startH) + ':00–' + pad((startH + 2) % 24) + ':59';
+  }
+  // 刷新检查：启动立即一次 + 每 60 秒；仅当「此间」页开着才重抽/刷新显示（后台不空转）
+  function taTimePoll() {
+    try {
+      const page = document.getElementById('page-cjian');
+      if (page && !page.hidden) renderTaTime();
+    } catch (e) {}
+  }
+  try { setInterval(taTimePoll, 60000); } catch (e) {}
   function renderHero() {
     const t = timeInfo(Date.now());
     const h1 = document.getElementById('cj-hero-time');
@@ -766,6 +883,9 @@
   function setView(v) {
     if (viewCid === v) return;
     viewCid = v;
+    // 切换到非「全部」的具体桌面时：若该桌面从未打开过此间（未播种）会被展示为空态
+    // 「此间还没有梦角」，这里用该 TA 的名字自动种下第一个梦角（与直接打开此间行为一致）。
+    if (viewCid !== ALL) seedIfEmpty(viewCid);
     // 不清缓存：同一浏览期内每个视图的今日预测各自保持稳定，切回来还是原来那份
     window.renderCjian(false);
     const main = document.getElementById('cj-main');
@@ -957,6 +1077,7 @@
     refreshStates();
     renderHero();
     renderGroupBar();
+    renderTaTime();
     renderList();
     renderToday(true);
     if (detailId) renderDetail();
@@ -1164,6 +1285,7 @@
         const st = loadState(mCid);
         delete st[v];
         saveState(st, mCid);
+        clearOttTag(v);
         // v3.14.x：同步清掉 TA 的梦角档案（narc-<id>，memo-arc.js 存根命名空间）
         // 与指向 TA 的 narc-cur（档案页打开时会自愈，这里顺手清干净不留孤儿数据）
         try {
@@ -1262,12 +1384,12 @@
     const cjianApp = document.querySelector('.app[data-app="cjian"]');
     if (cjianApp) {
       cjianApp.addEventListener('click', function (e) {
-        e.stopPropagation();
         try {
           const editing = Array.from(document.querySelectorAll('.app-grid'))
             .some(g => g.classList.contains('editing'));
-          if (editing) return;
+          if (editing) return; // 装修模式：不拦截，让 .app-grid 监听器弹「更换图标」菜单
         } catch (err) {}
+        e.stopPropagation();
         window.__cjianFrom = '';
         window.openCjian();
       });

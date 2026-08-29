@@ -202,8 +202,8 @@ if (p2) {
   })()`) || {};
   check('C7 第三页备忘/心情左右两半卡同行（非上下叠放）', cc.stacked === false && cc.memoW > 100 && cc.moodW > 100,
     JSON.stringify(cc));
-  check('C8 备忘卡 77（↔ 本周日常档）', Math.abs((cc.memoH || 0) - 77) <= 2, 'memoH=' + cc.memoH);
-  check('C9 心情卡 77（与备忘同高，同行两半卡）', Math.abs((cc.moodH || 0) - 77) <= 2, 'moodH=' + cc.moodH);
+  check('C8 备忘卡 92（↔ 本周日常档）', Math.abs((cc.memoH || 0) - 92) <= 2, 'memoH=' + cc.memoH);
+  check('C9 心情卡 92（与备忘同高，同行两半卡）', Math.abs((cc.moodH || 0) - 92) <= 2, 'moodH=' + cc.moodH);
   check('C10 两卡各半行宽 171', Math.abs((cc.memoW || 0) - 171) <= 2 && Math.abs((cc.moodW || 0) - 171) <= 2,
     'memoW=' + cc.memoW + ' moodW=' + cc.moodW);
   // v3.16.x：三页功能图标完全一致——图标大小 58、行高 96、图标下沿与 grid 底部全部对齐
@@ -235,8 +235,125 @@ if (p2) {
     ics.map(x => '下沿=' + x.lastAppB).join(' '));
   check('C12 备忘录横幅已删除（#memo-app-badge 不存在）',
     await evalJs("!document.getElementById('memo-app-badge')") === true, '');
+  // ---- E' 组：长情话不撑高页0 + 卡片/字号缩放下三页仍对齐 ----
+  // v3.16.x：情话是动态文本，换行会把页0 mini-row 撑高→图标组下沉；单行省略后恒定 77。
+  const longQuote = JSON.parse(await evalJs(`(function(){
+    var el=document.getElementById('love-quote');
+    if(!el)return '{}';
+    var old=el.textContent;
+    el.textContent='这是一条非常非常长的今日情话测试文本看看会不会把卡片撑高导致页面错位';
+    var row=document.querySelector('.page-slide .mini-row');
+    var h=row?Math.round(row.getBoundingClientRect().height*10)/10:0;
+    var clipped=getComputedStyle(el).textOverflow==='ellipsis';
+    var sW=el.scrollWidth, cW=el.clientWidth;
+    el.textContent=old;
+    return JSON.stringify({h:h, clipped:clipped, overflow:sW>cW});
+  })()`) || '{}');
+  check('E1 长情话不撑高页0 mini-row（92±2）', Math.abs((longQuote.h || 0) - 92) <= 2,
+    JSON.stringify(longQuote));
+  const scaleAligned = JSON.parse(await evalJs(`(function(){
+    var r=document.documentElement.style;
+    r.setProperty('--desk-card-scale','1.15');
+    var slides=document.querySelectorAll('#desktop-pages .page-slide');
+    var bs=[];
+    slides.forEach(function(sl){
+      var g=sl.querySelector('.app-grid');
+      if(g)bs.push(Math.round(g.getBoundingClientRect().bottom*10)/10);
+    });
+    r.setProperty('--desk-card-scale','1');
+    if(bs.length<3)return '{}';
+    return JSON.stringify({bs:bs, aligned:bs.every(b=>Math.abs(b-bs[0])<=1.2)});
+  })()`) || '{}');
+  check('E2 卡片大小 115% 缩放下三页图标组底部仍对齐（≤1.2px）', scaleAligned.aligned === true,
+    JSON.stringify(scaleAligned));
+  const fontAligned = JSON.parse(await evalJs(`(function(){
+    var r=document.documentElement.style;
+    r.setProperty('--desk-font-scale','1.15');
+    var slides=document.querySelectorAll('#desktop-pages .page-slide');
+    var bs=[];
+    slides.forEach(function(sl){
+      var g=sl.querySelector('.app-grid');
+      if(g)bs.push(Math.round(g.getBoundingClientRect().bottom*10)/10);
+    });
+    r.setProperty('--desk-font-scale','1');
+    if(bs.length<3)return '{}';
+    return JSON.stringify({bs:bs, aligned:bs.every(b=>Math.abs(b-bs[0])<=1.2)});
+  })()`) || '{}');
+  check('E3 桌面字号 115% 缩放下三页图标组底部仍对齐（≤1.2px）', fontAligned.aligned === true,
+    JSON.stringify(fontAligned));
+  // v3.16.x：图标文字行对齐（用户反馈「图标下方文字这一行差一点点」）——第三页有 3 行图标
+  // 比 1/2 页多 1 行，需按「从底部数」对比：页2 第2/3行应对齐页0/1 第1/2行。
+  const rowAlign = JSON.parse(await evalJs(`(function(){
+    var slides=document.querySelectorAll('#desktop-pages .page-slide');
+    var pages=[];
+    slides.forEach(function(sl,pi){
+      var g=sl.querySelector('.app-grid');
+      if(!g)return;
+      var rows=[];
+      var apps=Array.prototype.slice.call(g.querySelectorAll('.app'));
+      var byTop={};
+      apps.forEach(function(a){
+        var nm=a.querySelector('.app-name'), ico=a.querySelector('.app-ico');
+        var t=Math.round(a.getBoundingClientRect().top*10)/10;
+        if(!byTop[t]) byTop[t]={nmT:Math.round(nm.getBoundingClientRect().top*10)/10};
+      });
+      Object.keys(byTop).forEach(function(t){ rows.push(byTop[t]); });
+      pages.push({idx:pi, rows:rows});
+    });
+    // 从底部数第 1/2 行对比
+    var out={};
+    [1,2].forEach(function(fb){
+      var items=[];
+      pages.forEach(function(pg){
+        var row=pg.rows[pg.rows.length-fb];
+        if(row) items.push(row.nmT);
+      });
+      if(items.length===3) out['row'+fb]=Math.max.apply(null,items)-Math.min.apply(null,items);
+    });
+    return JSON.stringify(out);
+  })()`) || '{}');
+  const rowOK = (rowAlign.row1 !== undefined && rowAlign.row1 <= 0.6) &&
+                (rowAlign.row2 !== undefined && rowAlign.row2 <= 0.6);
+  check('E4 图标文字行从底部对齐（第1/2行 ≤0.6px）', rowOK,
+    '第1行Δ=' + rowAlign.row1 + ' 第2行Δ=' + rowAlign.row2);
+  // v3.26.x：系统大字体/无障碍缩放下图标名不换行（用户反馈"手机端第三页底部图标
+  // 和文字没对齐"根因）——4 字图标名（经期记录/梦角档案等）字号放大换行成两行，
+  // 图标块撑高、三页错位。app-name 单行省略后字号 14~24px 三页仍对齐。
+  const fontAligned2 = JSON.parse(await evalJs(`(function(){
+    var st=document.createElement('style');
+    st.id='fs-big'; st.textContent='.app-name{font-size:18px !important;}';
+    document.head.appendChild(st);
+    var slides=document.querySelectorAll('#desktop-pages .page-slide');
+    var gb=[];
+    slides.forEach(function(sl){
+      var g=sl.querySelector('.app-grid');
+      if(g)gb.push(Math.round(g.getBoundingClientRect().bottom*100)/100);
+    });
+    st.remove();
+    if(gb.length<3)return '{}';
+    return JSON.stringify({gb:gb, aligned:gb.every(b=>Math.abs(b-gb[0])<=0.6)});
+  })()`) || '{}');
+  check('E5 图标名 18px 大字体下三页图标组底部仍对齐（≤0.6px）', fontAligned2.aligned === true,
+    'B=' + (fontAligned2.gb || []).join('/'));
   void memoRow; void ck0; void grid0; void grid2; void grid1;
 } else check("C' 组前置：第三页存在", false, '');
+
+// ---- F 组：今日情话 / 已摸鱼 两卡「标题行 / 正文行」水平对齐 ----
+// v3.26.x：两 mini-card 都是 justify-content:center，但情话正文固定高 45px、
+// 已摸鱼仅单行，内容总高不一致 → 各自居中后标题/正文偏移。已摸鱼 .mc-b 与情话
+// 同构（高 45 / line-height15 / margin-top2 / 顶对齐）后应完全对齐。
+const twoCard = await evalJs(`(function(){
+  var q=document.querySelector('.mini-card[data-card-bg="quote"]');
+  var f=document.querySelector('.mini-card[data-card-bg="fish"]');
+  if(!q||!f)return null;
+  var g=function(el){return el?Math.round(el.getBoundingClientRect().top*10)/10:null;};
+  return {qTop:g(q.querySelector('.mc-top')), fTop:g(f.querySelector('.mc-top')),
+          qB:g(q.querySelector('.mc-b')), fB:g(f.querySelector('.mc-b'))};
+})()`) || {};
+check('F1 今日情话/已摸鱼两卡标题行 top 对齐（≤0.6px）',
+  twoCard.qTop!=null && twoCard.fTop!=null && Math.abs(twoCard.qTop-twoCard.fTop)<=0.6, JSON.stringify(twoCard));
+check('F2 今日情话/已摸鱼两卡正文行 top 对齐（≤0.6px）',
+  twoCard.qB!=null && twoCard.fB!=null && Math.abs(twoCard.qB-twoCard.fB)<=0.6, JSON.stringify(twoCard));
 
 // ---- D 组：摸鱼卡结构 + 无 JS 异常 ----
 const weTop = await evalJs(`(function(){

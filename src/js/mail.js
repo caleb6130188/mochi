@@ -78,10 +78,33 @@
     return list;
   }
   // 按 id 合并两个信件列表（后者覆盖同 id），按 tm 倒序
+  // v3.26.x：剥图回填——大信件超 200KB 时 LS 只有剥图快照（正文图片 dataURL 被剥成 [图片]），
+  //   IDB 里是完整版；原实现后者(b=本地快照)整体覆盖同 id 的完整版 → 联系人用表情包写信/
+  //   回信，信箱只显示「图片」两个字的文字。改为同 id 时优先保留「含真实 data:image」的那版
+  //   （包含图片 → 完整版），彻底去掉剥图占位；两侧都无损时才按内容长度取更完整一方。
+  function letterLen(o) {
+    let n = 0;
+    const a = o && typeof o.content === 'string' ? o.content : '';
+    const b = o && o.myReply && typeof o.myReply.content === 'string' ? o.myReply.content : '';
+    const c = o && o.partnerReply && typeof o.partnerReply.content === 'string' ? o.partnerReply.content : '';
+    return a.length + b.length + c.length;
+  }
+  function hasRealImg(o) {
+    const s = [o && o.content, o && o.myReply && o.myReply.content, o && o.partnerReply && o.partnerReply.content].join(' ');
+    return /data:image\//.test(s || '');
+  }
   function mergeLists(a, b) {
     const map = {};
-    (a || []).forEach(x => { if (x && x.id) map[x.id] = x; });
-    (b || []).forEach(x => { if (x && x.id) map[x.id] = x; });
+    const put = (x) => {
+      if (!x || !x.id) return;
+      const prev = map[x.id];
+      if (!prev) { map[x.id] = x; return; }
+      const xImg = hasRealImg(x), pImg = hasRealImg(prev);
+      if (xImg !== pImg) { if (xImg) map[x.id] = x; return; } // 有图的一版胜出
+      if (letterLen(x) > letterLen(prev)) map[x.id] = x;
+    };
+    (a || []).forEach(put);
+    (b || []).forEach(put);
     return Object.keys(map).map(k => map[k]).sort((x, y) => (y.tm || 0) - (x.tm || 0));
   }
   // v3.5.120：信箱权威加载防护——修复「刷新后信箱数据丢失」：
@@ -147,22 +170,23 @@
   // v3.6.x：完整 HTML 转义（只转 < 可被 `&lt;…&gt;` 实体绕过注入）
   function escHtml(s) { return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;'); }
   // v3.x.x：称呼跟随——TA 写的信在显示层替换 TA/他（fit 参数，我写的信保持原文）
+  // v3.26.x：独立附图识别——表情包/图片支持 base64 dataURL、svg 类非 base64 dataURL
+  //   与带 sticker:/image: 前缀的外链图，统一渲染为缩略图（解决聊天正常、信箱墨水/信
+  //   件表情包只显示文字）。无附图前缀的 http 链接仍当普通文本（不误判正文网址）。
   function renderBody(content, fit) {
     const s = String(content || '');
-    let html = '';
-    const re = /((?:sticker|image):)?(data:image\/[a-zA-Z0-9.+-]+;base64,[A-Za-z0-9+/=]+)/g;
-    let last = 0, m;
     const seg = (t) => {
-      t = escHtml(t);
+      t = String(t).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
       return (fit && window.taFit) ? window.taFit(t) : t;
     };
-    while ((m = re.exec(s))) {
-      html += seg(s.slice(last, m.index));
-      html += '<img class="mail-body-img" src="' + m[2] + '" alt="表情"> ';
-      last = m.index + m[0].length;
-    }
-    html += seg(s.slice(last));
-    return html;
+    const RE = /((?:sticker|image):)?(https?:\/\/[^\s"'<>]+|data:image\/[a-zA-Z0-9.+-]+(?:;[a-zA-Z0-9.+-]*(?:=[^;,]*)?)*,[^\s"'<>]+)/g;
+    return s.replace(RE, function (all, pre, src) {
+      if (src.indexOf('http') === 0 && pre !== 'sticker:' && pre !== 'image:') {
+        return seg(all); // 普通网址（无附图前缀）按文本保留
+      }
+      const attrs = String(src).replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+      return '<img class="mail-body-img" src="' + attrs + '" alt="表情"> ';
+    });
   }
   // 信箱列表摘要：剔除图片/表情包 dataURL（含标记前缀），避免显示超长 base64 乱码
   // v3.9.x：补 HTML 转义——shortDesc 结果直接拼 innerHTML（render 列表项），未转义
@@ -683,9 +707,16 @@
     if (cfg.kaomojiEn && kp.length && Math.random() * 100 < 30) t += ' ' + kp[Math.floor(Math.random() * kp.length)];
     if (cfg.emojiEn && ep.length && Math.random() * 100 < 15) t += ' ' + ep[Math.floor(Math.random() * ep.length)];
     // v3.11.x：只收 dataURL 媒体——信件正文按 sticker:/data:image 正则识别内联图片，
-    // 链接导入的 http(s) 字卡拼进信纸只会显示成一段 URL 文字，先过滤掉
+    //   链接导入的 http(s) 字卡拼进信纸只会显示成一段 URL 文字，先过滤掉
     const st = pool.sticker.concat(pool.image).filter(s => typeof s === 'string' && s.indexOf('data:') === 0);
-    if (cfg.stickerEn && st.length && Math.random() * 100 < 20) t += ' ' + st[Math.floor(Math.random() * st.length)];
+    if (cfg.stickerEn && st.length && Math.random() * 100 < 20) {
+      // v3.26.x：TA 自动写信/回信选中的表情包如果超大（>阈值），在这里同步换一张
+      //   小图（避免几百 KB 原图拼进 content 触发信箱主键 200KB 剥图成「图片」）。
+      //   仓库里的原图先经 shrinkMediaUrl 抽一张压缩版缓存到内存，退化场景才保留原图。
+      const orig = st[Math.floor(Math.random() * st.length)];
+      const small = (window._shrunkStickerCache && window._shrunkStickerCache[orig]) || orig;
+      t += ' ' + small;
+    }
     return t;
   }
   function letterLast(cid) { const v = parseInt(csFor(cid).get('mail-letter-last'), 10); return isNaN(v) ? 0 : v; }
@@ -1003,8 +1034,11 @@
   function mailUploadImage(textarea) {
     const fi = document.createElement('input');
     fi.type = 'file'; fi.accept = 'image/*'; fi.multiple = true;
+    fi.style.cssText = 'position:fixed;left:-9999px;top:0;width:1px;height:1px;opacity:0;';
+    document.body.appendChild(fi);
     fi.onchange = () => {
       const files = Array.prototype.slice.call(fi.files || []);
+      fi.remove();
       if (!files.length) return;
       files.forEach(f => {
         const reader = new FileReader();
@@ -1041,7 +1075,12 @@
       // stopPropagation：防止冒泡到 document 的「面板外点击关闭」把刚打开的面板又关掉
       e.stopPropagation();
       // 复用聊天同一个表情包面板（插入模式：点击表情插入信纸）
-      if (window.openEmojiPanelForInsert) window.openEmojiPanelForInsert((src) => mailInsertInto(textarea, 'sticker:' + src));
+      // v3.26.x：贴进信纸正文前先压缩超大表情包 dataURL（见 chatcard.js shrinkMediaUrl）——
+      //   否则写信/回信把几百 KB 原图拼进 content，信箱主键超 200KB 剥图成「图片」文字
+      if (window.openEmojiPanelForInsert) window.openEmojiPanelForInsert((src) => {
+        try { if (window.shrinkMediaUrl) { window.shrinkMediaUrl(src, (small) => { mailInsertInto(textarea, 'sticker:' + (small || src)); }); return; } } catch (e) {}
+        mailInsertInto(textarea, 'sticker:' + src);
+      }, { allowUrl: true });
     });
     const upImg = root.querySelector('.mail-tb-image');
     if (upImg) upImg.addEventListener('click', () => mailUploadImage(textarea));

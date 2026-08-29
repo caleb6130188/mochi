@@ -375,7 +375,14 @@
   // v3.14.x：回前台统一信号——healKeepAlive + dispatch mochi-fg-resume 事件，
   // ta-ask 等模块监听后补触发主动消息 + 补弹后台新卡片（安卓后台 setInterval 被节流，
   // 回前台不等下一个 tick 立即检查；小米MIX4 Edge 收不到后台消息修复）
+  let _fgResumeAt = 0;
   function _onFgVisible() {
+    // v3.18.x：一次切后台再切回会连续触发 visibilitychange(visible)+focus+pageshow，
+    // 每次都派发 mochi-fg-resume 会让 ta-ask 补触发/补弹连跑多遍 → 弹出一大堆已看过的旧卡片重叠。
+    // 用 1s 窗口合并为一次，只在真正再次回前台时重新派发。
+    const now = Date.now();
+    if (now - _fgResumeAt < 1000) return;
+    _fgResumeAt = now;
     healKeepAlive();
     try { document.dispatchEvent(new Event('mochi-fg-resume')); } catch (e) {}
   }
@@ -776,12 +783,19 @@
   //   你【看过消息前】的旧未读累计（进聊天页才清零），回前台会把前几分钟看过的
   //   消息当新消息重弹。改为：切后台时记录未读基数（resumeUnreadBase），回前台
   //   只提示【后台期间新增】的未读增量；无增量则完全不弹。
-  let resumeUnreadBase = -1; // 切后台时的未读基数；-1=未初始化（本次会话没切过后台）
+  // v3.19.x：回前台汇总改用「本次后台实际发送的通知数」——不再用 chat-unread 差值：
+  //   chat-unread 是当前桌面未读数，跨桌面/psync 补投递会污染它，导致回前台
+  //   弹「错误联系人名 + 错误条数」（用户实测：切换桌面后弹窗显示旧桌面昵称、没收到
+  //   消息却说收到1条）。hiddenSentCount 只在 bgNotifyCheck 真正发送系统通知时累加，
+  //   回前台时据此弹一条汇总，准确反映"后台真收到了几条、来自谁"。
+  let hiddenSentCount = 0;
+  let hiddenSentName = '';
   document.addEventListener('visibilitychange', function () {
     const vis = document.visibilityState;
     if (vis === 'hidden') {
-      // 切后台：记录当前未读数，作为本次后台会话的基数
-      try { resumeUnreadBase = parseInt(store.get('chat-unread'), 10) || 0; } catch (e) { resumeUnreadBase = 0; }
+      // 切后台：重置本次后台会话的发送计数（bgNotifyCheck 发送时累加）
+      hiddenSentCount = 0;
+      hiddenSentName = '';
       return;
     }
     if (vis !== 'visible') return;
@@ -792,24 +806,34 @@
         toast('提醒：后台保活已关闭，后台消息到不了，通知不会弹（设置里开启）');
       }
     }
-    // 补弹应用内横幅 + 汇总系统通知：仅当【本次后台期间】未读有增量。
-    // v3.5.161：用增量（当前未读 - 切后台时基数）而非总量，避免重弹看过消息；
-    // 基数未初始化（本次会话没切过后台）时跳过，不弹旧未读
+    // 补弹汇总：仅当本次后台【真的发送过系统通知】时，用实际发送数与发送者名
     try {
-      if (resumeUnreadBase < 0) return;
       const chatPage = document.getElementById('page-chat');
       const inChat = chatPage && !chatPage.hidden;
-      const unreadNow = parseInt(store.get('chat-unread'), 10) || 0;
-      const inc = unreadNow - resumeUnreadBase;
-      if (!inChat && inc > 0 && window.showDeskPopup) {
-        const name = store.get('lbl-partner') || (window.taWord ? window.taWord() : 'TA');
+      const n = hiddenSentCount;
+      const who = hiddenSentName || store.get('lbl-partner') || (window.taWord ? window.taWord() : 'TA');
+      hiddenSentCount = 0;
+      hiddenSentName = '';
+      if (!inChat && n > 0 && window.showDeskPopup) {
         // visibilitychange 为 visible 时触发，isHidden=false 显示应用内横幅
-        window.showDeskPopup({ name: name, text: '你不在的时候收到 ' + inc + ' 条新消息', isHidden: false });
+        window.showDeskPopup({ name: who, text: '你不在的时候收到 ' + n + ' 条新消息', isHidden: false });
         const now = Date.now();
         if (saved === '1' && 'Notification' in window && Notification.permission === 'granted' &&
             (!lastResumeNotifyAt || now - lastResumeNotifyAt > 30000)) {
           lastResumeNotifyAt = now;
-          showSysNotification(name, { body: '你不在的时候收到 ' + inc + ' 条新消息' });
+          // v3.21.x：汇总通知也带联系人头像（右位大图标）——此前只发文字，通知右侧无头像。
+          // 取当前桌面聊天头像（与 bgNotifyCheck 同口径），等比缩略后作 icon，失败回退原文。
+          const notiIcon = (store.get('cs-avatar-partner') || store.get('avatar-partner') || '');
+          const sendNoti = function (iconVal) {
+            const o = { body: '你不在的时候收到 ' + n + ' 条新消息' };
+            if (iconVal) o.icon = iconVal;
+            showSysNotification(who, o);
+          };
+          if (notiIcon && (notiIcon.indexOf('data:') === 0 || /^https?:\/\//i.test(notiIcon))) {
+            makeAvatarThumb(notiIcon, function (u) { sendNoti(u || notiIcon); });
+          } else {
+            sendNoti('');
+          }
         }
       }
     } catch (e) {}
@@ -1013,6 +1037,10 @@
     if (notifiedDup(nkey) || seenDup(nkey)) { gateStats.dup++; return; }
     if (recentChatDup(nkey, ts)) { gateStats.dup++; return; }
     gateStats.sent++;
+    // v3.19.x：累加「本次后台实际发送的通知数」——回前台汇总用它（见 visibilitychange
+    // 处理器），发送者名取本次通知标题
+    hiddenSentCount++;
+    hiddenSentName = extra.name || store.get('lbl-partner') || (window.taWord ? window.taWord() : 'TA');
     const name = extra.name || store.get('lbl-partner') || (window.taWord ? window.taWord() : 'TA');
     let t = '';
     if (ts) {
@@ -1049,30 +1077,16 @@
     //（https URL，SW 随时可取）。media 不再各自转 blob URL，dataURL 原样上交
     // showSysNotification 统一 Blob 化直传（页面冻结后 blob: URL 取不到图是左侧
     // 回退浏览器默认图标的根因）
-    const avatar = extra.av || store.get('cs-avatar-partner') || store.get('avatar-partner') || '';
+    // avFixed：调用方已给出权威头像（如跨桌面联系人头像），即使为空也不再回退当前桌面头像，
+    // 避免把「当前桌面的联系人头像」错当成跨桌面联系人头像显示；空值由下方兜底 mochi 图标。
+    const avatar = extra.avFixed
+      ? (extra.av || '')
+      : (extra.av || store.get('cs-avatar-partner') || store.get('avatar-partner') || '');
     if (avatar && (avatar.indexOf('data:') === 0 || /^https?:\/\//i.test(avatar))) bigIcon = avatar;
     if (!bigIcon) bigIcon = NOTIFY_ICON;
     if (extra.img && (extra.img.indexOf('data:') === 0 || /^https?:\/\//i.test(extra.img))) previewImg = extra.img;
-    // v3.9.x 修复：头像裁剪为正方形，防止安卓通知拉伸变形
-    // 通知的 icon 字段在安卓上会被强制拉伸填充，需预先裁剪为 1:1
-    const cropAvatarToSquare = function (dataUrl, cb) {
-      try {
-        const img = new Image();
-        img.onload = function () {
-          try {
-            const size = Math.min(img.width, img.height);
-            const sx = (img.width - size) / 2;
-            const sy = (img.height - size) / 2;
-            const c = document.createElement('canvas');
-            c.width = size; c.height = size;
-            c.getContext('2d').drawImage(img, sx, sy, size, size);
-            cb(c.toDataURL('image/jpeg', 0.85));
-          } catch (e) { cb(''); }
-        };
-        img.onerror = function () { cb(''); };
-        img.src = dataUrl;
-      } catch (e) { cb(''); }
-    };
+    // v3.21.x：头像为「等比缩略图」，统一走模块级 makeAvatarThumb
+    const cropAvatarToSquare = makeAvatarThumb;
     // v3.14.x：发送链路收敛——icon 裁剪完成后连同消息图一次性交
     // showSysNotification（内部统一 dataURL→Blob 直传 + 逐级降级重发）
     const sendFinal = function (iconVal) {
@@ -1083,14 +1097,38 @@
         if (ok) markNotified(nkey);
       });
     };
-    if (bigIcon && bigIcon.indexOf('data:') === 0) {
-      // v3.15.x：裁剪失败不再丢弃头像——回退原 dataURL 交给 showSysNotification 的
+    if (bigIcon) {
+      // v3.15.x：裁剪失败不再丢弃头像——回退原图交给 showSysNotification 的
       // prepMediaBlobs 转 Blob；此前裁剪失败 cb('') 会直接丢头像导致通知无头像
+      // v3.20.x：data: 与 http(s) 头像都走 1:1 裁剪，杜绝通知 icon 位拉伸变形
       cropAvatarToSquare(bigIcon, function (u) { sendFinal(u || bigIcon); });
     } else {
       sendFinal(bigIcon);
     }
   };
+  // v3.21.x：头像「等比缩略图」——canvas 尺寸跟随图片本身宽高比，只整体缩放到
+  // 最长边 96px，不裁切、不填充、不改变比例，避免原图在通知上被拉长/裁掉边缘；
+  // 跨域图污染 canvas 时 toDataURL 抛错走 cb('') 回退原图，不影响通知发送。
+  function makeAvatarThumb(dataUrl, cb) {
+    try {
+      const img = new Image();
+      if (/^https?:\/\//i.test(dataUrl)) { img.crossOrigin = 'anonymous'; }
+      img.onload = function () {
+        try {
+          const maxSide = 96;
+          const scale = Math.min(1, maxSide / Math.max(img.width, img.height));
+          const w = Math.max(1, Math.round(img.width * scale));
+          const h = Math.max(1, Math.round(img.height * scale));
+          const c = document.createElement('canvas');
+          c.width = w; c.height = h;
+          c.getContext('2d').drawImage(img, 0, 0, w, h);
+          cb(c.toDataURL('image/jpeg', 0.85));
+        } catch (e) { cb(''); }
+      };
+      img.onerror = function () { cb(''); };
+      img.src = dataUrl;
+    } catch (e) { cb(''); }
+  }
   // v3.5.147：通知缩略图压缩——canvas 把图片 dataURL 压到最长边 96px JPEG。
   // 压缩失败返回空串（调用方不带图发送，保证文字通知不丢）
   function compressNotifyImg(dataUrl, cb) {
@@ -1217,7 +1255,7 @@
           }
         }
       } catch (e) {}
-      if (!dup) { try { window.chatAddIn(it.t, { initiative: 1 }); delivered++; } catch (e) {} }
+      if (!dup) { try { window.chatAddIn(it.t, { initiative: 1, silent: true }); delivered++; } catch (e) {} }
     }
     try { await window.idbSet(PSYNC_QUEUE_KEY, remain); } catch (e) {}
     return delivered;
@@ -1226,12 +1264,56 @@
   function psyncSyncStatus(state) {
     const el = document.getElementById('psync-status');
     if (!el) return;
-    if (!psyncSupported()) { el.textContent = '此浏览器不支持离线提醒（需安卓 Chromium 并添加到桌面）'; return; }
+    const isIOS = !!(window.mochiDevice || {}).isIOS;
+    if (!psyncSupported()) {
+      el.textContent = isIOS
+        ? '此浏览器不支持离线提醒（iPhone 只能靠系统通知/保活；安卓请用 Chrome/Edge，并把应用添加到主屏幕）'
+        : '此浏览器不支持离线提醒（请用安卓 Chrome/Edge，并把应用添加到主屏幕后重开此开关）';
+      return;
+    }
     if (!psyncEnabled()) { el.textContent = '已关闭 · 页面全关后不再收到 TA 的消息提醒'; return; }
-    if (!psyncStandalone()) { el.textContent = '需先把应用添加到手机桌面（安装为应用）才会调度'; return; }
-    if (state === 'denied') { el.textContent = '系统拒绝了后台调度权限，暂无法离线提醒'; return; }
+    if (!psyncStandalone()) { el.textContent = '需先添加到主屏生效：浏览器菜单「添加到主屏幕」，再从桌面图标打开本应用，然后重新打开此开关'; return; }
+    if (state === 'denied') { el.textContent = '系统拒绝了后台调度：请去 系统设置→应用→浏览器 里允许通知，并关闭「省电/后台清理」后重试'; return; }
+    if ('Notification' in window && Notification.permission !== 'granted') {
+      el.textContent = '已开启 · 还需允许系统通知（会弹授权，点「允许」才能收到提醒弹窗）';
+      return;
+    }
     let n = (typeof window.__psyncSnapCount === 'number') ? window.__psyncSnapCount : 0;
-    el.textContent = '已开启 · 待发文案 ' + n + ' 条 · 频率由系统决定（通常数小时一次），进程被杀仍收不到';
+    el.textContent = '已开启 · 待发文案 ' + n + ' 条 · 后台频率由系统定（约数小时一次）；收不到请检查：系统设置允许本浏览器通知，且不限制其后台运行/省电';
+  }
+  // 使用说明弹窗（见 psync-help 功能说明标签）：怎么开 / 为什么开不了 / 有什么用
+  const psHelp = document.getElementById('psync-help');
+  if (psHelp) {
+    const openPsyncHelp = function (e) {
+      if (e) { try { e.stopPropagation(); e.preventDefault(); } catch (er) {} }
+      const txt = [
+        '离线消息提醒（零后端）\n',
+        '🌟 有什么用',
+        '页面全部关闭后，TA 也会在后台「留话」提醒你，营造陪伴感。系统每隔几小时唤醒一次，随机抽一条你准备（或内置）的想念字卡，以 TA 的名义弹出系统通知；回来后这条消息也会补进聊天记录。\n',
+        '🔗 它和「后台弹窗」无关',
+        '两者是完全独立的功能，互不影响。后台弹窗要的是「页面还在后台时」TA 发消息、靠后台保活+通知权限弹横幅。不开离线消息提醒，后台弹窗照常工作；反之亦然。想收到后台弹窗时，只需：后台保活+桌面消息弹窗开关开着+系统通知允许。\n',
+        '🔓 怎么开（安卓）',
+        '1. 用 Chrome 或 Edge（安卓）打开本应用；',
+        '2. 浏览器菜单 →「添加到主屏幕」，再从桌面图标打开；',
+        '3. 打开本开关，系统弹通知授权时点「允许」；',
+        '4. 到手机 系统设置→应用→浏览器，确认「通知」允许、且未限制后台/省电。\n',
+        '⚠️ 为什么有人开不了',
+        '· iPhone：iOS 不支持此技术，只能靠系统通知/保活；',
+        '· 非 Chrome/Edge 的安卓浏览器：不支持，请换用；',
+        '· 没添加到主屏：需先从桌面图标打开才能调度；',
+        '· 开了却收不到：多半是系统关了通知，或浏览器被省电/后台清理。\n',
+        '📌 注意',
+        '它不是真推送，频率由系统决定（约数小时一次）、只随机抽一条；也不代表对方真实在线。'
+      ].join('\n');
+      window.openModal('离线消息提醒 · 功能说明', '', function () {}, {
+        noInput: true, okText: '知道了',
+        staticText: txt
+      });
+    };
+    psHelp.addEventListener('click', openPsyncHelp);
+    psHelp.addEventListener('keydown', function (e) {
+      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); openPsyncHelp(); }
+    });
   }
   // 设置开关（全局键 psync-en，与保活/通知同款 gGet/gSet）
   const psBtn = document.getElementById('psync-en');
@@ -1271,5 +1353,17 @@
         if (psyncEnabled() && psyncSupported()) psyncBuildSnapshot();
       }, 3000);
     });
+  } catch (e) {}
+
+  // v3.26.x：监听 SW notificationclick 回传——后台弹窗/离线提醒被点击时 SW 聚焦窗口后
+  // 发 MOCHI_NOTIFY_CLICK，页面端调 enterChat 跳到聊天页（与桌面悬浮消息点击同款入口）。
+  // enterChat 由 chat.js 定义为 window.enterChat，此处仅消费全局 API，不跨域改 chat.js。
+  try {
+    if ('serviceWorker' in navigator && navigator.serviceWorker) {
+      navigator.serviceWorker.addEventListener('message', function (e) {
+        if (!e || !e.data || e.data.type !== 'MOCHI_NOTIFY_CLICK') return;
+        try { if (typeof window.enterChat === 'function') window.enterChat(); } catch (x) {}
+      });
+    }
   } catch (e) {}
 })();

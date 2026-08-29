@@ -12,6 +12,11 @@
     // 旧值（用户反馈：玩 4 天桌面「已摸鱼」显示第 2 天）。fish-log-global-migrated 为
     // 合并幂等标记键，同为全局根键。二者都不随联系人隔离，绝不能迁移。
     'fish-log', 'fish-log-global-migrated',
+    // v3.17.x：跨桌面「来消息」全局根键——incoming-requests（申请队列）、
+    // desk-checkin-en（桌面查岗全局开关）与 desk-call-en（跨桌面来电全局开关）都存
+    // 根命名空间、全桌面通，绝不随联系人隔离，防 migrateLegacy 每次刷新搬进 default
+    // 桌面（同 bg-*/feed-* 既有处理）。
+    'incoming-requests', 'desk-checkin-en', 'desk-call-en',
     // v3.12.x：group-chat-msgs（群聊消息，v3.8 起全局存储于根命名空间）——同 bg-* 道理，
     // 不是旧顶层业务键。此前漏排除导致每次刷新 migrateLegacy 把群聊记录搬进 default:
     // 并删根键，群聊页读根键为空 → 历史看似清空（数据滞留 default: 副本）+ 迁移循环空转。
@@ -80,7 +85,22 @@
     // 绝不能被 migrateLegacy 当旧顶层业务键迁进 default 桌面（否则其他桌面读不到=「消失」）。
     // dec-global-migrated / gdec-global-migrated 为存量各桌面数据合并进根键的一次性幂等标记。
     'decision-history', 'decision-settings', 'dec-global-migrated',
-    'gdec-members', 'gdec-history', 'gdec-settings', 'gdec-global-migrated'];
+    'gdec-members', 'gdec-history', 'gdec-settings', 'gdec-global-migrated',
+    // v3.26.x：番茄钟数据全局共享（p2-features.js pomoStore 走根命名空间）——
+    // 键 xy-home-v2:pomo-*（时长/今日·累计/夸夸字卡/发到聊天/铃声/陪伴会话/陪伴聊天记录/
+    // 陪伴用字卡开关）绝不随联系人隔离。此前漏排除，migrateLegacy 每次刷新把它们当旧
+    // 顶层业务键迁进 default 桌面并删 LS 根键 → 自定义时长/今日·累计刷新后回默认值。
+    'pomo-cfg', 'pomo-today', 'pomo-total', 'pomo-msgs', 'pomo-send-chat', 'pomo-bell',
+    'pomo-companion', 'pomo-companion-log', 'pomo-cmp-usecards',
+    // v3.26.x：备忘录数据全局共享（memo-app.js 存根命名空间，所有桌面互通一份）——
+    // memo-app-items/memo-app-send/memo-app-global-migrated 绝不随联系人隔离；
+    // memo-app.js 已内置误迁自愈，这里补排除让 migrateLegacy 彻底不再动它们。
+    'memo-app-items', 'memo-app-send', 'memo-app-global-migrated',
+    // v3.26.x：桌面美化方案（personalize.js beauty-schemes）、聊天美化方案（chat-settings.js
+    // chat-beauty-schemes）、隐藏TA表情包开关（chat-settings.js hide-ta-sticker，聊天/朋友圈
+    // 共用）都是全局根键。此前漏排除，被 migrateLegacy 迁进 default 桌面并删 LS 根键 →
+    // IDB 不可用场景下方案列表/开关刷新后消失。
+    'beauty-schemes', 'chat-beauty-schemes', 'hide-ta-sticker'];
   function isExcluded(k) {
     const r = k.slice(G.length + 1);
     if (EXCLUDE.indexOf(r) >= 0) return true;
@@ -168,7 +188,7 @@
 
   // ---- 联系人性别 / TA 称呼跟随 ----
   // 存储键：<cid>:partner-gender = 'he' | 'she' | ''（未设置 → 默认「TA」），随联系人命名空间隔离。
-  // 各模块在【显示层】调 window.taFit(text[, cid]) 把指代联系人的「他/TA」替换为「他/她/TA」；
+  // 各模块在【显示层】调 window.taFit(text[, cid]) 把指代联系人的「他/TA/ta」替换为「他/她/TA/ta」；
   // 只改显示不改存储原文，历史消息重新渲染即自动跟随。
   window.partnerGenderFor = function (cid) {
     try { return window.xyStore(G + ':' + (cid || 'default')).get('partner-gender') || ''; } catch (e) { return ''; }
@@ -180,19 +200,25 @@
     return 'TA';
   };
   window.taWord = function () { return window.taWordFor(window.__activeCid || 'default'); };
-  // 人称替换：TA/他 → 性别称呼。保护「其他」（非人称）、base64 段（dataURL 不能动，
+  // 人称替换：TA/他/ta → 性别称呼。保护「其他」（非人称）、base64 段（dataURL 不能动，
   // 大写 TA 可能出现在 base64 字符里）与 <svg>…</svg> 图标段（系统消息带图标前缀）；
   // 不用正则 lookbehind（旧版 iOS Safari 不支持）。
   window.taFit = function (text, cid) {
     if (text === null || text === undefined) return text;
     const s = String(text);
-    if (s.indexOf('他') < 0 && s.indexOf('TA') < 0) return s;
+    if (s.indexOf('他') < 0 && s.indexOf('TA') < 0 && s.indexOf('ta') < 0) return s;
     const w = window.taWordFor(cid || window.__activeCid || 'default');
+    // 字卡库系统预设字卡用「ta」作中性占位：未设置称呼时保留「ta」，
+    // 已设置（他/她）才把独立 token 的「ta」替换成对应性别词（\b 词边界
+    // 防误伤 table/data 等英文词内的 ta；\b 不受旧版 iOS 限制）。
+    const taw = w === 'TA' ? 'ta' : w;
     const segs = s.split(/(<svg[\s\S]*?<\/svg>)/);
     for (let i = 0; i < segs.length; i += 2) {
       const parts = segs[i].split(/(data:[a-zA-Z0-9.+-]+\/[a-zA-Z0-9.+-]+;base64,[A-Za-z0-9+/=]+)/);
       for (let j = 0; j < parts.length; j += 2) {
-        parts[j] = parts[j].split('其他').join('\u0001').split('TA').join(w).split('他').join(w).split('\u0001').join('其他');
+        let p = parts[j].split('其他').join('\u0001').split('TA').join(w).split('他').join(w);
+        if (taw !== 'ta') p = p.replace(/\bta\b/g, taw);
+        parts[j] = p.split('\u0001').join('其他');
       }
       segs[i] = parts.join('');
     }
@@ -231,7 +257,22 @@
       try {
         const s = window.xyStore(G + ':' + id);
         const cur = s.get('lbl-partner');
+        // v3.25.x：有效昵称（cs-lbl-partner 优先）变化时接入系统消息昵称跟随——当前桌面
+        //   立即清扫+重渲染（chat.js chatSysNickChanged）；非当前桌面只记 hist，等该桌面
+        //   下次 loadMsgs 惰性补扫。
+        const csLbl = s.get('cs-lbl-partner');
+        const oldEff = csLbl || cur || 'TA';
         if (!cur || cur === oldName) s.set('lbl-partner', c.name);
+        const newEff = csLbl || s.get('lbl-partner') || 'TA';
+        if (newEff !== oldEff) {
+          if (id === (window.__activeCid || 'default') && window.chatSysNickChanged) {
+            try { window.chatSysNickChanged(oldEff); } catch (e) {}
+          } else {
+            let h = [];
+            try { const v = JSON.parse(s.get('sysmsg-nick-hist') || '[]'); if (Array.isArray(v)) h = v; } catch (e) {}
+            if (h.indexOf(oldEff) < 0) { h.push(oldEff); s.set('sysmsg-nick-hist', JSON.stringify(h)); }
+          }
+        }
       } catch (e) {}
       // 广播联系人重命名事件，通知通话模块等实时同步昵称
       try { document.dispatchEvent(new CustomEvent('contact-renamed', { detail: { id, name: c.name, oldName } })); } catch (e) {}
@@ -300,6 +341,11 @@
   //   保留旧键导致每次刷新重新迁移覆盖新聊天记录（v3.6.x 修复刷新丢聊天记录）。
   //   幂等检查同时查 IDB 新键（不只 LS/memoryCache），防 idbRestore 未回填时误判为空。
   function migrateLegacy() {
+    // v3.26.x：def/root 提升到函数顶部——此前在第一个 try 块内声明（const 块级作用域），
+    // 下方 v3.26.x 新增的 pomo-*/beauty-schemes 修复块在 try 外引用 → 每次启动
+    // ReferenceError: def is not defined，migrateLegacy 中断、旧键迁移不执行
+    const def = window.xyStore(G + ':default');
+    const root = window.xyStore(G);
     // v3.9.x：修复被旧版 migrateLegacy 误迁移的全局系统键——早期版本把
     // bg-keepalive/bg-notify（后台保活/通知开关）与 reply-gc-*（群聊回复设置）
     // 当旧顶层业务键迁进 default 桌面并删根键（cleanupOld 只删 LS、IDB 旧根键保留，
@@ -307,8 +353,6 @@
     // 桌面刷新后开关读不到全局值自动变关。这里检测 default 桌面的这些键，写回根
     // 命名空间并删除 default 副本，一次性修复存量坏数据（幂等：根键已有则不覆盖）。
     try {
-      const def = window.xyStore(G + ':default');
-      const root = window.xyStore(G);
       ['bg-keepalive', 'bg-notify', 'group-chat-enabled'].forEach(function (k) {
         const v = def.get(k);
         if (v !== null && v !== undefined && v !== '') {
@@ -330,6 +374,20 @@
         }
       });
     } catch (e) {}
+    // v3.26.x：修复被旧版 migrateLegacy 误迁移的全局键——pomo-* / beauty-schemes /
+    // chat-beauty-schemes / hide-ta-sticker 此前不在 EXCLUDE，每次刷新被当旧顶层业务键
+    // 迁进 default 桌面并删 LS 根键。检测 default 副本：根键空则写回根，并一律删 default
+    // 副本（幂等：根键已有值不覆盖，只删副本）。memo-app-* 不在此列——memo-app.js 自带
+    // 误迁自愈与按 id 合并，避免两处同写冲突。
+    ['pomo-cfg', 'pomo-today', 'pomo-total', 'pomo-msgs', 'pomo-send-chat', 'pomo-bell',
+      'pomo-companion', 'pomo-companion-log', 'pomo-cmp-usecards',
+      'beauty-schemes', 'chat-beauty-schemes', 'hide-ta-sticker'].forEach(function (k) {
+      const v = def.get(k);
+      if (v !== null && v !== undefined && v !== '') {
+        try { if (root.get(k) === null || root.get(k) === undefined) root.set(k, v); } catch (e) {}
+        try { def.remove(k); } catch (e) {}
+      }
+    });
     const old = [];
     // v3.6.x：顺带清理存量双重前缀垃圾键（default:default:*）——旧版迁移误把命名空间键
     // 再迁一层产生，读取不命中但占存储，安全删除
@@ -456,6 +514,18 @@
       document.body.appendChild(m);
       m.addEventListener('click', (e) => { if (e.target === m) hideContactModal(m); });
     }
+    // v3.x：列表 overflow-y:auto 在部分设备（如红米 K80 Chrome）会露出灰色滚动条，
+    // 与全站其余滚动容器「隐藏滚动条」的观感不一致——隐藏但保留滚动能力。
+    if (!document.getElementById('cm-scrollbar-hide')) {
+      const st = document.createElement('style'); st.id = 'cm-scrollbar-hide';
+      // v3.26.x：「功能说明」统一为设置页 .tag 同款中性胶囊（此前内联 #7a6ad8 紫色，黑白/深色主题下突兀）
+      st.textContent = '.cm-list{scrollbar-width:none;-ms-overflow-style:none}.cm-list::-webkit-scrollbar{display:none}' +
+        '#cm-fn-explain{display:inline-block;margin-left:4px;font-size:11px;color:var(--muted,#888);font-weight:400;letter-spacing:.2px;border:1px solid rgba(0,0,0,.08);background:rgba(0,0,0,.03);border-radius:9px;padding:2px 9px;cursor:pointer;line-height:1.4}' +
+        '#cm-fn-explain:hover,#cm-fn-explain:focus-visible{background:rgba(0,0,0,.06);border-color:rgba(0,0,0,.12);outline:none}' +
+        '[data-theme="dark"] #cm-fn-explain{color:#aaa;border-color:rgba(255,255,255,.14);background:rgba(255,255,255,.06)}' +
+        '[data-theme="dark"] #cm-fn-explain:hover,[data-theme="dark"] #cm-fn-explain:focus-visible{background:rgba(255,255,255,.1);border-color:rgba(255,255,255,.2)}';
+      document.head.appendChild(st);
+    }
     return m;
   }
   window.openContactManager = function () {
@@ -464,8 +534,8 @@
     const box = el('div');
     // v3.11.x：颜色改主题变量（内联硬编码浅色在深色模式下白底白字不可见）
     box.style.cssText = 'width:min(92vw,420px);max-height:80vh;display:flex;flex-direction:column;background:var(--card-bg,#fff);color:var(--ink,#111);border-radius:16px;padding:18px;box-shadow:0 8px 30px rgba(0,0,0,.2)';
-    box.appendChild(el('div', '', '<div style="font-size:16px;font-weight:600;margin-bottom:4px">联系人 / 桌面</div><div style="font-size:12px;color:var(--muted,#888);margin-bottom:12px">每个联系人数据独立；仅朋友圈互通<br>「称呼」可设置消息里 TA 的性别叫法（他 / 她 / 不设置）</div>'));
-    const list = el('div'); list.style.cssText = 'display:flex;flex-direction:column;gap:8px;margin-bottom:12px;overflow-y:auto;overflow-x:hidden;-webkit-overflow-scrolling:touch;flex:1;min-height:0';
+    box.appendChild(el('div', '', '<div style="font-size:16px;font-weight:600;margin-bottom:4px">联系人 / 桌面</div><div style="font-size:12px;color:var(--muted,#888);margin-bottom:12px">每个联系人数据独立；除朋友圈外，还有部分功能数据在所有桌面共用。<b id="cm-fn-explain">【功能说明】</b><br>「称呼」可设置消息里 TA 的性别叫法（他 / 她 / 不设置）</div>'));
+    const list = el('div', 'cm-list'); list.style.cssText = 'display:flex;flex-direction:column;gap:8px;margin-bottom:12px;overflow-y:auto;overflow-x:hidden;-webkit-overflow-scrolling:touch;flex:1;min-height:0';
     getContacts().forEach(c => {
       const row = el('div');
       row.style.cssText = 'display:flex;align-items:center;gap:10px;padding:10px;border:1px solid var(--card-border,#eee);border-radius:10px';
@@ -514,8 +584,52 @@
       });
     });
     box.appendChild(add);
+    // v3.18.x：「美化方案」已收拢到【手机桌面美化】页（保存/我的方案/导入导出同组），此处不再重复放入口
     const close = el('button', '', '关闭');
     close.style.cssText = 'width:100%;margin-top:8px;padding:10px;border:1px solid var(--card-border,#eee);border-radius:10px;background:var(--btn-cancel-bg,#fafafa);color:var(--btn-cancel-ink,#555)';
+    close.addEventListener('click', () => { hideContactModal(m); });
+    box.appendChild(close);
+    m.appendChild(box);
+    // v3.26.x：「功能说明」——点开弹窗列出所有跨桌面共用的数据
+    document.getElementById('cm-fn-explain') && document.getElementById('cm-fn-explain').addEventListener('click', function (e) { e.stopPropagation(); if (window.openFuncExplain) window.openFuncExplain(); });
+    showContactModal(m);
+  };
+  // 切换桌面「功能说明」：说明哪些数据在所有桌面共用 / 哪些按桌面独立
+  window.openFuncExplain = function () {
+    const m = ensureModal();
+    m.innerHTML = '';
+    const box = el('div');
+    box.style.cssText = 'width:min(92vw,420px);max-height:80vh;display:flex;flex-direction:column;background:var(--card-bg,#fff);color:var(--ink,#111);border-radius:16px;padding:18px;box-shadow:0 8px 30px rgba(0,0,0,.2);overflow-y:auto;-webkit-overflow-scrolling:touch';
+    const txt =
+      '<div style="font-size:16px;font-weight:600;margin-bottom:8px">数据互通说明</div>' +
+      '<div style="font-size:13px;font-weight:600;color:var(--danger-ink,#a32d2d);margin-bottom:6px">所有桌面共用的数据</div>' +
+      '<ul style="margin:0;padding-left:18px;font-size:12px;line-height:1.9;color:var(--muted,#666)">' +
+      '<li>朋友圈（动态、通知、双方昵称/头像/封面）</li>' +
+      '<li>群聊（消息、成员形象、美化、回复设置、开关）</li>' +
+      '<li>存钱罐（金额与存钱目标，两人共同金库）</li>' +
+      '<li>心意币 / 红包 / 市集余额</li>' +
+      '<li>心意市集自定义商品</li>' +
+      '<li>我的表情包</li>' +
+      '<li>字卡库公用字卡</li>' +
+      '<li>经期记录、摸鱼天数</li>' +
+      '<li>帮我决定 / 多人决定（历史与设置）</li>' +
+      '<li>梦角世界·此间（名单与状态）、梦角档案 / 我的档案</li>' +
+      '<li>音乐文件、后台保活、通知、离线消息提醒</li>' +
+      '<li>跨桌面「来消息」（查岗 / 来电申请与开关）</li>' +
+      '</ul>' +
+      '<div style="font-size:13px;font-weight:600;color:#1a8a5f;margin:12px 0 6px">按桌面独立的数据</div>' +
+      '<ul style="margin:0;padding-left:18px;font-size:12px;line-height:1.9;color:var(--muted,#666)">' +
+      '<li>聊天记录与未读数</li>' +
+      '<li>字卡库专属字卡 / 专属回复 / 收藏</li>' +
+      '<li>桌面布局与美化（壁纸 / 气泡 / 字号等）</li>' +
+      '<li>称呼性别（TA / 他 / 她）</li>' +
+      '<li>日历、信箱、备忘录</li>' +
+      '<li>占卜、记录、收藏、统计、记账</li>' +
+      '</ul>' +
+      '<div style="font-size:12px;color:var(--muted,#999);margin-top:12px;line-height:1.7">「共用」指切换桌面后数据仍延续；「独立」指各桌面各留一份、互不影响。</div>';
+    box.appendChild(el('div', '', txt));
+    const close = el('button', '', '关闭');
+    close.style.cssText = 'width:100%;margin-top:14px;padding:10px;border:1px solid var(--card-border,#eee);border-radius:10px;background:var(--btn-cancel-bg,#fafafa);color:var(--btn-cancel-ink,#555)';
     close.addEventListener('click', () => { hideContactModal(m); });
     box.appendChild(close);
     m.appendChild(box);

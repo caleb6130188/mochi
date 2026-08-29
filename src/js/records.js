@@ -135,6 +135,12 @@
     // 1) 番茄陪伴：records-care 里的 pomo 记录（只记时间）
     caresLoad().forEach(r => { if (r.kind === 'pomo') rows.push({ icon: '🍅', main: '番茄钟陪伴', sub: fmtDT(r.ts), ts: r.ts }); });
     // 2) 查岗 / 经期 / 喝水 / 吃饭：从聊天记录回溯
+    // v3.25.x：跨桌面查岗卡（deskCk）与该联系人 records-care 里的 desk-checkin 记录是
+    // 同一次事件（记录随卡同刻写入；同联系人冷却 30 分钟，90s 窗口内不会误合并）——
+    // 已有对应记录的卡不再按「查岗」重复列，防同一次查岗在来源桌面出两行；
+    // 无记录的旧卡（历史数据/仅聊天触发）仍照列。
+    let careTs = [];
+    try { caresLoad().forEach(r => { if (r && r.kind === 'desk-checkin') careTs.push(r.ts || 0); }); } catch (e) {}
     let msgs = [];
     try { msgs = (window.getChatMsgs ? window.getChatMsgs() : JSON.parse(store.get('chat-msgs') || '[]')); } catch (e) {}
     (msgs || []).forEach(m => {
@@ -145,7 +151,7 @@
       else if (tag === '喝水提醒') rows.push({ icon: KIND_ICON.water, main: '提醒喝水 · ' + esc(m.text || ''), sub: fmtDT(t), ts: t });
       else if (tag === '吃饭提醒') rows.push({ icon: KIND_ICON.eat, main: '提醒吃饭 · ' + esc(m.text || ''), sub: fmtDT(t), ts: t });
       // 查岗：ask-card 是问题卡本体；ask-msg 提示语只作补充（若 30s 内已有问卡则不重复列）
-      else if (m.special === 'ask-card' && m.askQuestion) rows.push({ icon: KIND_ICON.checkin, main: '查岗 · ' + esc(m.askQuestion), sub: fmtDT(t), ts: t });
+      else if (m.special === 'ask-card' && m.askQuestion && !(m.deskCk && careTs.some(ct => Math.abs(ct - t) <= 90000))) rows.push({ icon: KIND_ICON.checkin, main: '查岗 · ' + esc(m.askQuestion), sub: fmtDT(t), ts: t });
       else if (m.special === 'ask-msg' && /查岗/.test(m.text || '')) {
         const nearCard = (msgs || []).some(o => o && o.special === 'ask-card' && o.askQuestion && Math.abs((o.ts || 0) - t) < 30000);
         if (!nearCard) rows.push({ icon: KIND_ICON.checkin, main: '查岗', sub: fmtDT(t), ts: t });
@@ -193,6 +199,37 @@
       return '<div class="tc-listitem"><div class="tc-li-top"><span class="tc-li-q">' + (out ? '🧧 我发红包 ¥' + amt : '🧧 ' + esc(name) + ' 发红包 ¥' + amt) + '</span><span class="tc-li-time">' + fmtDT(m.rpTs || m.ts) + '</span></div>' +
         '<div class="tc-li-line">' + sub + '</div></div>';
     }).join('');
+  }
+  // ---- 占卜记录（v3.26.x：占卜页抽牌时选了对象 → 存入该联系人桌面的 records-divine） ----
+  // 记录结构 { ts, mode, count, question, cards, summary, target }，写入方在 divination.js
+  function renderDivinePanel() {
+    const el = document.getElementById('home-divine');
+    if (!el) return;
+    const esc = (s) => String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+    const list = histList('records-divine');
+    if (!list.length) {
+      el.innerHTML = '<div class="ta-empty">暂无占卜记录（在「占卜」页选择对象抽牌后，牌面与解读自动存入这里）</div>';
+      return;
+    }
+    el.innerHTML = list.map((h, i) => {
+      const n = Array.isArray(h.cards) ? h.cards.length : (h.count || 0);
+      const cardsTxt = Array.isArray(h.cards) ? h.cards.map(c => ((c && c.name) || '') + (c && c.rev ? '(逆)' : '')).join('、') : '';
+      const title = (h.mode === 'tarot' ? '塔罗' : '雷诺曼') + ' · ' + n + ' 张' + (h.target ? ' · 为 ' + esc(h.target) + ' 占卜' : '');
+      return '<div class="tc-listitem"><div class="tc-li-top"><span class="tc-li-q">🔮 ' + title +
+        (h.question ? ' · 问：' + esc(h.question) : '') + '</span><span class="tc-li-time">' + fmtDT(h.ts) + '</span></div>' +
+        (cardsTxt ? '<div class="tc-li-line">' + esc(cardsTxt) + '</div>' : '') +
+        (h.summary ? '<div class="tc-li-line">' + (window.taFit ? window.taFit(esc(h.summary)) : esc(h.summary)) + '</div>' : '') +
+        '<button class="div-h-view hd-view" data-di="' + i + '">查看牌面</button></div>';
+    }).join('');
+    // 查看牌面：跳转到占卜页并渲染完整结果（复用 divineRenderResult）
+    el.querySelectorAll('.hd-view').forEach(b => b.addEventListener('click', () => {
+      const h = histList('records-divine')[parseInt(b.dataset.di, 10)];
+      if (!h || !Array.isArray(h.cards) || !window.divineRenderResult) return;
+      document.querySelectorAll('.page').forEach(p => p.hidden = true);
+      const dp = document.getElementById('page-divine');
+      if (dp) dp.hidden = false;
+      try { window.divineRenderResult(h.cards, h.mode, h.question || '', h.summary || ''); } catch (e) {}
+    }));
   }
   // ---- 渲染主页记录 ----
   function histList(key) { try { return JSON.parse(store.get(key) || '[]'); } catch (e) { return []; } }
@@ -271,6 +308,10 @@
     // 联系人的关心/提醒记录（v3.16.x）
     if (showOnly === 'care') {
       renderCarePanel();
+    }
+    // 占卜记录（v3.26.x：抽牌选了对象，存该联系人桌面 records-divine）
+    if (showOnly === 'divine') {
+      renderDivinePanel();
     }
     // 换头像记录（全部事件：直接换 / 邀请同意 / 邀请拒绝 / 我手动更换）
     if (showOnly === 'av') {

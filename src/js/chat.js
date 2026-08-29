@@ -20,20 +20,42 @@ let lastIdbLoadPrefix = null;
 let lastIdbLoadAt = 0;
 const IDB_RELOAD_MIN_GAP = 8000;
 let pendingLocal = null; // 权威就绪前暂存的内存消息（绝不落盘，防止污染读取/覆盖 IDB）
-let saveTimer = null;
+// ===== v3.26.x 止血：聊天大包（含图片 base64）避免「每个交互同步全量写」 =====
+// 根因：chat-msgs 单键可达数百 MB（图片 base64 内联），saveMsgs/saveMsgsNow 每次
+// 都对整包同步 JSON.stringify + idbSet → 数百 ms~数秒长任务（发消息/来消息打断、
+// 打字缓冲、收键盘卡、上滑卡、切页卡）。方案：把这个整包串化+落盘改为「合并 + 低频
+// + 空闲窗口」执行——requestIdleCallback 空闲期或 ≥PERSIST_MIN_GAP 才写一次，
+// 不与交互/帧率争主线程；数据语义不变（仍写整包最新，不丢数据），离页仍强制兜底。
+const PERSIST_MIN_GAP = 2500;   // 两次实际落盘的最小间隔（ms）
+let lastPersistAt = 0;          // 上次实际落盘时间（performance.now()）
+let persistTimer = null;        // 排队中标记（rIdle/timeout）
+let persistRun = null;          // 待执行落盘闭包（tail 只保留最新一次）
+function runPersist() {
+  persistTimer = null;
+  const run = persistRun;
+  persistRun = null;
+  if (!run) return;
+  const wait = PERSIST_MIN_GAP - (performance.now() - lastPersistAt);
+  if (wait > 0) { persistTimer = setTimeout(runPersist, wait); return; }
+  try { run(); lastPersistAt = performance.now(); } catch (e) {}
+}
+function schedulePersist(writer) {
+  persistRun = writer;
+  if (persistTimer) return;
+  if (window.requestIdleCallback) persistTimer = window.requestIdleCallback(runPersist, { timeout: 4000 });
+  else persistTimer = setTimeout(runPersist, 2500);
+}
+function flushPersistNow() {
+  const run = persistRun;
+  persistRun = null;
+  persistTimer = null;
+  if (run) { try { run(); lastPersistAt = performance.now(); } catch (e) {} }
+}
+function cancelPersist() { persistRun = null; persistTimer = null; }
 document.addEventListener('contact-switched', function () {
 try {
-if (saveTimer) {
-clearTimeout(saveTimer);
-saveTimer = null;
-if (pendingSaveData && pendingSavePrefix) {
-const snap = JSON.stringify(pendingSaveData);
-try { if (window.idbSet) window.idbSet(pendingSavePrefix + ':chat-msgs', snap); } catch (e) {}
-try { writeLsSnapshot(snap, pendingSavePrefix, true); } catch (e) {}
-}
-pendingSaveData = null;
-pendingSavePrefix = null;
-}
+// 切走前强制落盘待写（persistRun 闭包已捕获旧命名空间前缀，切桌面后仍写对桌面）
+flushPersistNow();
 try { hideTyping(); } catch (e) {}
 msgs = [];
 pendingLocal = null;
@@ -48,6 +70,7 @@ authLoadedPrefix = null;
 armReadyFuse();
 try { lastQuote = null; } catch (e) {}
 try { lastMineText = ''; } catch (e) {}
+try { lastMineQuote = ''; } catch (e) {}
 try { lastQuotedText = ''; } catch (e) {}
 try {
 draftImgs = [];
@@ -156,7 +179,6 @@ scrollChatBottom();
 } catch (e) {}
 }, 15000);
 }
-let pendingSaveData = null, pendingSavePrefix = null;
 function saveMsgs() {
 if (!chatDbReady) {
 try { pendingLocal = msgs.slice(); } catch (e) {}
@@ -165,39 +187,22 @@ try { pendingLocal = msgs.slice(); } catch (e) {}
 if (msgs.length) writeLsSnapshot(JSON.stringify(msgs), undefined, true);
 return;
 }
-if (saveTimer) clearTimeout(saveTimer);
+// v3.26.x 止血：改为合并+低频+空闲落盘（见上方调度器），不再每个动作同步写整包
 const myPrefix = window.activePrefix();
-pendingSaveData = msgs;
-pendingSavePrefix = myPrefix;
-    saveTimer = setTimeout(() => {
-      saveTimer = null;
-      pendingSaveData = null;
-      pendingSavePrefix = null;
-      // v3.14.x：空记录落盘守卫——本会话从未成功读过该桌面的权威数据时，
-      // 禁止把空数组写进 IDB（极端场景：权威读取失败+内存被重置后任何模块
-      // 触发保存，会把全部历史覆盖成 []）。清空聊天记录走 clearChatHistory
-      // 的 store.remove 直删，不依赖空数组落盘。
-      if (!msgs.length && authLoadedPrefix !== myPrefix) return;
-      const data = JSON.stringify(msgs);
-try { if (window.idbSet) window.idbSet(myPrefix + ':chat-msgs', data); } catch (e) {}
-writeLsSnapshot(data, myPrefix);
-}, 400);
+schedulePersist(() => {
+  // v3.14.x：空记录落盘守卫——本会话从未成功读过该桌面的权威数据时，
+  // 禁止把空数组写进 IDB。清空聊天记录走 clearChatHistory 的 store.remove 直删。
+  if (!msgs.length && authLoadedPrefix !== myPrefix) return;
+  const data = JSON.stringify(msgs);
+  try { if (window.idbSet) window.idbSet(myPrefix + ':chat-msgs', data); } catch (e) {}
+  writeLsSnapshot(data, myPrefix);
+});
 }
 function flushSave() {
 if (window.__resetting) return;
-    if (saveTimer) {
-      clearTimeout(saveTimer);
-      saveTimer = null;
-      const myPrefix = window.activePrefix();
-      // v3.14.x：空记录落盘守卫（同 saveMsgs 防抖回调）——权威未读过前不写空数组
-      if (!msgs.length && authLoadedPrefix !== myPrefix) return;
-      const data = JSON.stringify(msgs);
-      try { if (window.idbSet) window.idbSet(myPrefix + ':chat-msgs', data); } catch (e) {}
-      // v3.13.x：页面离开前强制立即写快照（不节流），防退出时窗口内最新消息只进内存
-      writeLsSnapshot(data, myPrefix, true);
-} else if (!chatDbReady && msgs.length) {
-writeLsSnapshot(JSON.stringify(msgs), undefined, true);
-}
+// v3.26.x 止血：立即落盘待写（离页/切走兜底）；未就绪则仅写 LS 有损快照
+flushPersistNow();
+if (!chatDbReady && msgs.length) writeLsSnapshot(JSON.stringify(msgs), undefined, true);
 }
 window.chatFlushSave = flushSave;
 try {
@@ -208,6 +213,98 @@ else if (deskMsgEl && !deskMsgEl.hidden) hideDeskMsg();
 });
 } catch (e) {}
 window.getChatMsgs = function () { return msgs; };
+try { window.__mochiProf = window.__mochiProf || {}; } catch (e) {}
+function __prof(t) { try { window.__mochiProf[t] = performance.now(); } catch (e) {} }
+// ===== v3.26.x OOM 防线：聊天大数据量分批/延迟归一化 =====
+// 根因：三星 S24 等真机上，旧账号积累数万条聊天记录时，启动读库后在主线程同步
+// 跑完所有「全量数组」pass（collapseRapidDups / 图表迁移 / 媒体迁移 / 转义还原 /
+// ts 回填 / sysNick 清扫），主线程阻塞数秒 → 渲染进程 OOM、页面崩溃。
+// 方案：IDB 解析/合并后先出首屏，把这些 pass 挪到后台按片 setTimeout 分批跑，
+// 单帧只耗几毫秒；全部跑完再合并渲染 + 落盘。各 pass 均按对象引用改属性、幂等可重入。
+const ICON_BELL = '<svg class="st-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2v3M4.2 4.2l2.2 2.2M2 12h3M19 12h3M4.2 19.8l2.2-2.2M17.6 17.6l2.2 2.2"/><path d="M12 6a6 6 0 016 6v4h-3v-4a3 3 0 00-6 0v4H6v-4a6 6 0 016-6z"/><path d="M9 20h6"/></svg>';
+const ICON_TEL = '<svg class="st-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M22 16.92v3a2 2 0 01-2.18 2 19.79 19.79 0 01-8.63-3.07 19.5 19.5 0 01-6-6 19.79 19.79 0 01-3.07-8.67A2 2 0 014.11 2h3a2 2 0 012 1.72 12.84 12.84 0 00.7 2.81 2 2 0 01-.45 2.11L8.09 9.91a16 16 0 006 6l1.27-1.27a2 2 0 012.11-.45 12.84 12.84 0 002.81.7A2 2 0 0122 16.92z"/></svg>';
+const ICON_ENV = '<svg class="st-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M3 7l9 6 9-6"/></svg>';
+const ICON_CQ_FIX = { '再等等，会遇到我': '再等等，会遇到你', '你身边': '我身边', '只给我看': '只给你看' };
+const NORM_CHUNK = 2500;
+let normTimer = null, normPrefix = null;
+function normCell(r) {
+  let c = false;
+  if (!r) return false;
+  try {
+    if (typeof r.text === 'string' && r.text.indexOf(ICON_BELL) >= 0) { r.text = r.text.split(ICON_BELL).join(ICON_TEL); c = true; }
+    if (r.special === 'poke' && typeof r.text === 'string') {
+      const t = r.text.replace(/✉️\s*/g, '').replace(/✉\s*/g, '');
+      if (t !== r.text) { r.text = ICON_ENV + t; c = true; }
+    }
+    if ((r.type === 'text' || !r.type) && typeof r.text === 'string' && r.text.indexOf('data:image/') === 0) { r.type = 'image'; c = true; }
+    if (r.special === 'poke' && typeof r.text === 'string' && r.text.indexOf('&lt;svg class=&quot;st-ico&quot;') === 0) {
+      const mm = r.text.match(/^(&lt;svg class=&quot;st-ico&quot;[\s\S]*?&lt;\/svg&gt;)([\s\S]*)$/);
+      if (mm) { r.text = mm[1].replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"').replace(/&amp;/g, '&') + mm[2]; c = true; }
+    }
+    if (r.special === 'ask-curious' && Array.isArray(r.curiousQuick)) {
+      const f = r.curiousQuick.map(o => ICON_CQ_FIX[o] || o);
+      if (f.some((o, i) => o !== r.curiousQuick[i])) { r.curiousQuick = f; c = true; }
+    }
+    if (r.special === 'ask-curious' && typeof r.curiousAnswer === 'string' && ICON_CQ_FIX[r.curiousAnswer]) { r.curiousAnswer = ICON_CQ_FIX[r.curiousAnswer]; c = true; }
+    if (!r.ts) { r.ts = Date.now(); c = true; }
+  } catch (e) {}
+  return c;
+}
+function normCollapseRange(from, to) {
+  let removed = 0;
+  const GAP_TEXT = 2500, GAP_MEDIA = 60000;
+  try {
+    const n = msgs.length;
+    for (let i = Math.min(to, n) - 1; i > from; i--) {
+      const a = msgs[i], b = msgs[i - 1];
+      if (!a || !b || !a.side || a.side !== b.side) continue;
+      if (dupSig(a) !== dupSig(b)) continue;
+      const hasContent = (a.text && a.text.length) || a.img || a.voice || !!a.special || (a.parts && a.parts.length);
+      if (!hasContent) continue;
+      const isMedia = !!a.img || !!a.voice || !!a.special;
+      const dts = (a.ts || 0) - (b.ts || 0);
+      if (dts < 0 || dts > (isMedia ? GAP_MEDIA : GAP_TEXT)) continue;
+      msgs.splice(i, 1); removed++;
+    }
+  } catch (e) {}
+  return removed;
+}
+function scheduleDeferredNormalization() {
+  if (normTimer) return;
+  let pre;
+  try { pre = window.activePrefix(); } catch (e) { pre = ''; }
+  if (pre === normPrefix) return;
+  normPrefix = pre;
+  normTimer = setTimeout(runDeferredNormalization, 80);
+}
+function runDeferredNormalization() {
+  normTimer = null;
+  let myPre;
+  try { myPre = window.activePrefix(); } catch (e) { myPre = ''; }
+  if (myPre !== normPrefix) { normPrefix = null; return; }
+  let idx = 0, changed = false;
+  const N = msgs.length;
+  if (!N) { normPrefix = null; return; }
+  const finish = () => {
+    try { if (sysNickCatchup()) changed = true; } catch (e) {}
+    normPrefix = null;
+    if (!changed) return;
+    try { if (window.idbSet) window.idbSet(myPre + ':chat-msgs', JSON.stringify(msgs)); } catch (e) {}
+    try { writeLsSnapshot(JSON.stringify(msgs), myPre, true); } catch (e) {}
+    try { if (chatVisible() && msgs.length) { renderWindow(false, true); scrollChatBottom(); } } catch (e) {}
+  };
+  const tick = () => {
+    let nowPre;
+    try { nowPre = window.activePrefix(); } catch (e) { nowPre = ''; }
+    if (nowPre !== normPrefix) { normPrefix = null; return; }
+    const end = Math.min(N, idx + NORM_CHUNK);
+    for (let i = idx; i < end; i++) { if (normCell(msgs[i])) changed = true; }
+    if (normCollapseRange(idx, end + 1, msgs)) changed = true;
+    if (end < N) { idx = end; setTimeout(tick, 0); }
+    else finish();
+  };
+  setTimeout(tick, 0);
+}
 function migrateLegacyMediaMsgs() {
 let migrated = false;
 msgs.forEach(r => {
@@ -262,13 +359,12 @@ return false;
 }
 function loadMsgs(forceIdb) {
 armReadyFuse();
-if (!saveTimer && !msgs.length && !chatDbReady) {
+if (!persistTimer && !msgs.length && !chatDbReady) {
 try { msgs = JSON.parse(store.get('chat-msgs') || '[]'); } catch (e) { msgs = []; }
 if (!Array.isArray(msgs)) msgs = [];
 try { syncLastMineText(); } catch (e) {}
 }
-migrateLegacyMediaMsgs();
-try { if (collapseRapidDups(msgs)) saveMsgs(); } catch (e) {}
+// v3.26.x：全量 migration/去重 pass 移到 runDeferredNormalization 后台分批跑，防大数据主线程卡死
 const nowT = Date.now();
 const skipRead = chatDbReady &&
 lastIdbLoadPrefix === window.activePrefix() &&
@@ -317,41 +413,54 @@ writeLsSnapshot(JSON.stringify(msgs), myPrefix, true);
 return;
 }
 try {
+__prof('ch0_enter');
 const idbArr = typeof v === 'string' ? JSON.parse(v) : v;
+__prof('ch1_parsed');
 if (!Array.isArray(idbArr)) { chatDbReady = true; return; }
 const sigOf = (m) => { try { return JSON.stringify({ t: m && m.text, s: m && m.side, ts: m && m.ts, i: m && m.img ? (typeof m.img === 'string' ? m.img.slice(0, 32) : String(m.img.length)) : 0 }); } catch (e) { return ''; } };
-const idbSigs = new Set();
-idbArr.forEach(x => { if (x) idbSigs.add(sigOf(x)); });
-const idbTsSide = new Set(idbArr.map(x => (((x && x.ts) || 0) + '|' + ((x && x.side) || ''))));
-const liteResidue = (m) => !!(m && (m._lsLite || m.img === '' || m.voice === ''));
-const localNew = (pendingLocal || msgs || []).filter(m => m && !idbSigs.has(sigOf(m))).filter(m => {
-if (!liteResidue(m)) return true;
-return !idbTsSide.has((((m && m.ts) || 0)) + '|' + ((m && m.side) || ''));
-});
-localNew.forEach(m => { try { delete m._lsLite; } catch (e) {} });
-const merged = idbArr.concat(localNew).sort((a, b) => ((a && a.ts || 0) - (b && b.ts || 0)));
-const curArr = pendingLocal || msgs || [];
-if (merged.length === curArr.length) {
-curArr.forEach((m, i) => {
-if (!m || i >= merged.length) return;
-if (sessionChangedIdx.has(i)) merged[i] = m;
-});
-}
-curArr.forEach((m, i) => {
-if (!m || i >= merged.length) return;
-if (!answeredRec(m) || answeredRec(merged[i])) return;
-merged[i] = m;
-});
-let changed = localNew.length > 0 || merged.length !== msgs.length;
-if (!changed && merged.length === msgs.length && msgs.length) {
-changed = msgs.some(m => m && (m.img === '' || m.voice === ''));
+const hasLocal = !!((pendingLocal && pendingLocal.length) || (msgs && msgs.length));
+let merged, curArr = pendingLocal || msgs || [];
+let changed = false;
+// v3.26.x OOM：无本地待合并数据时跳过全量签名 Set 构建（旧大数据账号最常见的启动场景）
+if (!hasLocal) {
+  merged = idbArr;
+} else {
+  const idbSigs = new Set();
+  idbArr.forEach(x => { if (x) idbSigs.add(sigOf(x)); });
+  __prof('ch2_sigset');
+  const idbTsSide = new Set(idbArr.map(x => (((x && x.ts) || 0) + '|' + ((x && x.side) || ''))));
+  __prof('ch3_tsside');
+  const liteResidue = (m) => !!(m && (m._lsLite || m.img === '' || m.voice === ''));
+  const localNew = curArr.filter(m => m && !idbSigs.has(sigOf(m))).filter(m => {
+    if (!liteResidue(m)) return true;
+    return !idbTsSide.has((((m && m.ts) || 0)) + '|' + ((m && m.side) || ''));
+  });
+  localNew.forEach(m => { try { delete m._lsLite; } catch (e) {} });
+  merged = idbArr.concat(localNew).sort((a, b) => ((a && a.ts || 0) - (b && b.ts || 0)));
+  if (merged.length === curArr.length) {
+    curArr.forEach((m, i) => {
+      if (!m || i >= merged.length) return;
+      if (sessionChangedIdx.has(i)) merged[i] = m;
+    });
+  }
+  curArr.forEach((m, i) => {
+    if (!m || i >= merged.length) return;
+    if (!answeredRec(m) || answeredRec(merged[i])) return;
+    merged[i] = m;
+  });
+  changed = localNew.length > 0 || merged.length !== msgs.length;
+  if (!changed && merged.length === msgs.length && msgs.length) {
+    changed = msgs.some(m => m && (m.img === '' || m.voice === ''));
+  }
 }
 msgs = merged;
-if (merged.length !== curArr.length) sessionChangedIdx.clear();
-if (collapseRapidDups(msgs)) { changed = true; sessionChangedIdx.clear(); }
-migrateLegacyMediaMsgs();
+__prof('ch4_merged');
+if (hasLocal && merged.length !== curArr.length) sessionChangedIdx.clear();
+// v3.26.x：原同步全量 normalization（collapseRapidDups/migrateLegacyMediaMsgs/
+// restoreEscapedPokeIcons/sysNickCatchup/图标迁移/ts 回填）移入后台分批归一化，
+// 首屏即时可交互，防大数据 OOM 崩溃。此处仅本次合并产生的 changed 落盘。
 try { syncLastMineText(); } catch (e) {}
-if (restoreEscapedPokeIcons()) changed = true;
+__prof('ch5_passes');
 pendingLocal = null;
 chatDbReady = true;
 // v3.14.x：本命名空间已读到权威（此后空数组落盘才被允许——内存已含全部历史）
@@ -363,58 +472,26 @@ lastIdbLoadAt = Date.now();
 } catch (e) {}
 try { localStorage.removeItem('xy-home-v2:chat-msgs'); } catch (e) {}
 if (changed) {
+__prof('ch6_save');
 try { if (window.idbSet) window.idbSet(myPrefix + ':chat-msgs', JSON.stringify(msgs)); } catch (e) {}
 try { writeLsSnapshot(JSON.stringify(msgs), myPrefix, true); } catch (e) {}
+__prof('ch7_end');
 if (chatVisible() && chatNearBottom()) {
 renderWindow(false, true);
 scrollChatBottom();
 }
 }
+// v3.26.x：读库完成后调度后台分批归一化（幂等，仅对当前联系跑一次）
+scheduleDeferredNormalization();
 } catch (e) { /* 解析失败：不置 chatDbReady，下次进入再重试 */ }
 });
 }
 } catch (e) {}
 } // v3.13.x：时间闸跳过全量重读的关闭括号
-{
-const bellSvg = '<svg class="st-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2v3M4.2 4.2l2.2 2.2M2 12h3M19 12h3M4.2 19.8l2.2-2.2M17.6 17.6l2.2 2.2"/><path d="M12 6a6 6 0 016 6v4h-3v-4a3 3 0 00-6 0v4H6v-4a6 6 0 016-6z"/><path d="M9 20h6"/></svg>';
-const telSvg = '<svg class="st-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M22 16.92v3a2 2 0 01-2.18 2 19.79 19.79 0 01-8.63-3.07 19.5 19.5 0 01-6-6 19.79 19.79 0 01-3.07-8.67A2 2 0 014.11 2h3a2 2 0 012 1.72 12.84 12.84 0 00.7 2.81 2 2 0 01-.45 2.11L8.09 9.91a16 16 0 006 6l1.27-1.27a2 2 0 012.11-.45 12.84 12.84 0 002.81.7A2 2 0 0122 16.92z"/></svg>';
-let iconMigrated = false;
-msgs.forEach(r => {
-if (r && typeof r.text === 'string' && r.text.indexOf(bellSvg) >= 0) {
-r.text = r.text.split(bellSvg).join(telSvg);
-iconMigrated = true;
-}
-});
-if (iconMigrated) saveMsgs();
-}
-{
-const envSvg = '<svg class="st-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M3 7l9 6 9-6"/></svg>';
-let envMigrated = false;
-msgs.forEach(r => {
-if (r && r.special === 'poke' && typeof r.text === 'string') {
-const t = r.text.replace(/✉️\s*/g, '').replace(/✉\s*/g, '');
-if (t !== r.text) { r.text = envSvg + t; envMigrated = true; }
-}
-});
-if (envMigrated) saveMsgs();
-}
-{
-const CQ_FIX = { '再等等，会遇到我': '再等等，会遇到你', '你身边': '我身边', '只给我看': '只给你看' };
-let cqMigrated = false;
-msgs.forEach(r => {
-if (!r || r.special !== 'ask-curious') return;
-if (Array.isArray(r.curiousQuick)) {
-const fixed = r.curiousQuick.map(o => CQ_FIX[o] || o);
-if (fixed.some((o, i) => o !== r.curiousQuick[i])) { r.curiousQuick = fixed; cqMigrated = true; }
-}
-if (typeof r.curiousAnswer === 'string' && CQ_FIX[r.curiousAnswer]) { r.curiousAnswer = CQ_FIX[r.curiousAnswer]; cqMigrated = true; }
-});
-if (cqMigrated) saveMsgs();
-}
-if (restoreEscapedPokeIcons()) saveMsgs();
-let changed = false;
-msgs.forEach(r => { if (r && !r.ts) { r.ts = Date.now(); changed = true; } });
-if (changed) saveMsgs();
+// v3.26.x：全部全量 migration/去重已移入 runDeferredNormalization 后台分批执行
+// （见本文件顶部 OOM 防线注释）。此处兜底：无权威读库（IDB 缺键/读取失败回溯）
+// 场景也补一次归一化调度；scheduleDeferredNormalization 按当前联系幂等去重。
+if (chatDbReady && msgs.length) scheduleDeferredNormalization();
 }
 function escTxt(s) {
 return String(s == null ? '' : s)
@@ -454,12 +531,82 @@ function chatLabel(ck, dk, fb) {
 let v = null;
 try { v = store.get(ck); } catch (e) {}
 if (v) return v;
+// v3.26.x：dk 传 null 表示不回退桌面键——聊天昵称与桌面彻底解耦（用户要求：聊天设置里
+// 联系人/我的昵称不再跟随桌面，未设时用默认占位 TA/我，即 v3.8.x 原设计）
+if (!dk) return fb;
 try { v = store.get(dk); } catch (e) {}
 return v || fb;
 }
-function chatPartnerName() { return chatLabel('cs-lbl-partner', 'lbl-partner', 'TA'); }
+// v3.26.x：聊天昵称与桌面解耦——只读聊天专用键 cs-lbl-*，未设时默认 TA/我，
+// 不再回退读桌面 lbl-partner/lbl-user（v3.9.x 的「跟随桌面」按用户要求取消）
+function chatPartnerName() { return chatLabel('cs-lbl-partner', null, 'TA'); }
 window.chatPartnerName = chatPartnerName;
-function chatUserName() { return chatLabel('cs-lbl-user', 'lbl-user', '我'); }
+function chatUserName() { return chatLabel('cs-lbl-user', null, '我'); }
+// v3.25.x：系统消息昵称动态化——改名后历史系统消息称呼跟随当前昵称。
+// 存储：改名时把旧昵称从系统标记记录的 text 清扫成 {ta} 占位符（白名单=renderMsg 里走
+//   T(rec.text) 的分支，普通气泡 text 永不扫、永不换）；渲染：T() 把 {ta} 换回当前昵称。
+// {ta} 含花括号，不可能出现在 base64 字母表/svg 文本里；但被清扫的旧名可能撞上 base64/svg
+// 段（如默认名 TA），清扫按 taFit 同款分段保护。hist/swept 每桌面各存一份，loadMsgs 惰性补扫。
+function sysNickCur() { return chatPartnerName(); }
+function sysNickHistGet(st) {
+try {
+const v = JSON.parse(st.get('sysmsg-nick-hist') || '[]');
+if (Array.isArray(v)) return v.filter(x => typeof x === 'string' && x);
+} catch (e) {}
+return [];
+}
+function sysNickSweepText(s, oldName) {
+const segs = String(s).split(/(<svg[\s\S]*?<\/svg>)/);
+for (let i = 0; i < segs.length; i += 2) {
+const parts = segs[i].split(/(data:[a-zA-Z0-9.+-]+\/[a-zA-Z0-9.+-]+;base64,[A-Za-z0-9+/=]+)/);
+for (let j = 0; j < parts.length; j += 2) {
+if (parts[j].indexOf(oldName) >= 0) parts[j] = parts[j].split(oldName).join('{ta}');
+}
+segs[i] = parts.join('');
+}
+return segs.join('');
+}
+function sysNickSweepable(r) {
+if (!r || typeof r.text !== 'string' || !r.text) return false;
+if (r.mailNotice) return true;
+return r.special === 'poke' || r.special === 'ask-msg' || r.special === 'call' ||
+r.special === 'call-reply' || r.special === 'invite-reply' || r.special === 'pong' ||
+r.special === 'brick' || r.special === 'memory';
+}
+function sysNickSweepMsgs(arr, oldName) {
+let changed = false;
+for (let i = 0; i < arr.length; i++) {
+const r = arr[i];
+if (!sysNickSweepable(r) || r.text.indexOf(oldName) < 0) continue;
+const t = sysNickSweepText(r.text, oldName);
+if (t !== r.text) { r.text = t; changed = true; }
+}
+return changed;
+}
+function sysNickCatchup() {
+const cur = sysNickCur();
+const hist = sysNickHistGet(store);
+if (!hist.length) {
+try { store.set('sysmsg-nick-hist', JSON.stringify([cur])); store.set('sysmsg-nick-swept', '1'); } catch (e) {}
+return false;
+}
+let changed = false;
+if (hist[hist.length - 1] !== cur) {
+// 名字在上次会话后被改动（含绕过钩子的外部写入，如备份导入）：旧尾名清扫成 {ta}，与改名钩子同效
+if (sysNickSweepMsgs(msgs, hist[hist.length - 1])) changed = true;
+hist.push(cur);
+try { store.set('sysmsg-nick-hist', JSON.stringify(hist)); } catch (e) {}
+}
+let swept = 0;
+try { swept = parseInt(store.get('sysmsg-nick-swept'), 10) || 0; } catch (e) {}
+if (swept < hist.length) {
+for (let i = swept; i < hist.length; i++) {
+if (hist[i] && hist[i] !== cur && sysNickSweepMsgs(msgs, hist[i])) changed = true;
+}
+try { store.set('sysmsg-nick-swept', String(hist.length)); } catch (e) {}
+}
+return changed;
+}
 let avatarBatchCache = null;
 function fillAvatar(el, key) {
 if (typeof el === 'string') el = document.getElementById(el);
@@ -509,6 +656,7 @@ scrollChatBottom();
 }
 fillAvatar('chat-user-av', 'cs-avatar-user');
 fillAvatar('chat-partner-av', 'cs-avatar-partner');
+try { updateChatPartnerName(); } catch (e) {}
 } catch (e) {}
 });
 } catch (e) {}
@@ -518,8 +666,8 @@ if (!pname) return;
 let saved = null;
 try { saved = store.get('cs-lbl-partner'); } catch (e) {}
 if (saved) { pname.textContent = saved; return; }
-try { saved = store.get('lbl-partner'); } catch (e) {}
-if (saved) { pname.textContent = saved; return; }
+// v3.26.x：聊天与桌面昵称解耦——不再回退读桌面 lbl-partner；未设聊天专用昵称时
+// 回退联系人名片名（联系人管理里的名字，非桌面美化昵称），最后默认 TA
 try {
 if (window.getContacts) {
 const c = window.getContacts().find(x => x.id === (window.__activeCid || 'default'));
@@ -530,6 +678,9 @@ pname.textContent = window.taWord ? window.taWord() : 'TA';
 }
 updateChatPartnerName();
 window.renderChatHeader = updateChatPartnerName;
+try {
+document.addEventListener('mochi-wrj-heal', function () { try { updateChatPartnerName(); } catch (e) {} });
+} catch (e) {}
 const typingEl = document.getElementById('chat-typing');
 let typingOn = false;
 function chatVisible() {
@@ -639,6 +790,135 @@ eg.forEach(g => (g[1] || []).forEach(c => { if (isOff && isOff('emoji', c)) retu
 } catch (e) {}
 return { text, kaomoji, emoji, sticker, image, voice, poke };
 }
+// v3.27.x：暴露给番茄钟陪伴模式复用——让陪伴中的 TA 使用与普通聊天一致的字卡池回复
+window.getPool = getPool;
+// v3.27.x：生成回复前确保字卡池就绪——冷启动挂起大键（__xyIdbDeferredKeys，见 idb.js
+// v3.14.x OOM 防线）时同步读回复池是空库，此前首条回复直接落 FALLBACK_REPLY_POOL，
+// 某些手机上联系人因此一直发兜底那几条系统预设字卡（用户反馈）。
+// v3.28.x：修「还有手机没解决」——① 等待上限 2.5s 对慢 IDB（iOS 挂后台杀连接、
+// 大图字卡库）太短，放宽到与 idbHydrateKey 自身 8s 超时对齐；② 回复池主源是当前
+// 联系人的专属字卡，此前走「公用→专属」共享链，公用大键慢会拖住专属，改为专属优先
+// 直取（hydrateReplyScope），就绪即放行、公用随后后台补；③ 取回失败/超时记冷却，
+// 冷却期内池子仍空时不再每条回复干等，避免坏 IDB 手机每次回复都白等；④ 始终不阻塞
+//（超时保留原兜底，下次回复重试；池子一旦就绪立即走自定义字卡）。
+// v3.28.x（根因收口）：就绪判定以「自定义字卡是否就位」为准，不用合并池——合并池含
+// 系统默认字卡，默认字卡开关开着时池子恒非空，旧判定直接放行，挂起大键里的自定义
+// 字卡永不取回，联系人只发默认/兜底那几条系统预设字卡（Phase E 复现：池 4728 张
+// 系统卡但自定义 MARKER 不在内）。取回完成或确认无自定义字卡（用户确实没加）即放行，
+// 靠默认字卡/兜底回复，不阻塞。
+function hasCustomReplyCards() {
+  try {
+    const cc = (window.getCustomCards && window.getCustomCards()) || [];
+    return cc.length > 0;
+  } catch (e) { return false; }
+}
+let lastHydFailAt = 0;
+const HYDR_FAIL_COOLDOWN = 30000;
+// v3.28.x（第三层收口）：回复池后台自愈——坏/慢 IDB 手机上单次取回可能整体失败
+//（idbHydrateKey 8s 内两次尝试仍挂，事务队列被占/连接反复被断），此前每次回复只
+// 干等一次、失败后进冷却不再取 → 池子整会话读空，联系人一直发兜底那几条系统预设字卡。
+// 这里在「池仍空」时安排有界低频后台重试：每 5s 一次、上限 12 次，一旦自定义字卡
+// 就绪立即停；只要设备 IDB 恢复/启动回填落定，池子取回后【后续所有回复】马上用上
+// 自定义字卡，不再一直兜底。内存成本与现有回复路径一致（回复本来就会触发取回），
+// 不会额外把大库拉进堆；每次尝试走 hydrateReplyScope（in-flight 去重 + absent 缓存）。
+let _replyWatcherTimer = null;
+let _replyWatcherLeft = 0;
+const _REPLY_WATCHER_MAX = 12;
+const _REPLY_WATCHER_INTERVAL = 5000;
+function _replyWatcherStop() {
+  if (_replyWatcherTimer) { clearTimeout(_replyWatcherTimer); _replyWatcherTimer = null; }
+  _replyWatcherLeft = 0;
+}
+function _replyWatcherTick() {
+  _replyWatcherTimer = null;
+  if (hasCustomReplyCards()) { _replyWatcherStop(); return; }
+  let done = false;
+  const settle = function () {
+    if (done) return; done = true;
+    if (hasCustomReplyCards()) { _replyWatcherStop(); return; }
+    _replyWatcherKick();
+  };
+  try {
+    // 专属优先（回复池主源）；就绪即停，公用后台补
+    window.hydrateReplyScope('own', function () {
+      if (hasCustomReplyCards()) { settle(); return; }
+      window.hydrateReplyScope('public', function () { settle(); });
+    });
+  } catch (e) { settle(); }
+}
+function _replyWatcherKick() {
+  try {
+    if (hasCustomReplyCards()) { _replyWatcherStop(); return; }
+    if (!window.hydrateReplyScope || _replyWatcherTimer || _replyWatcherLeft <= 0) return;
+    _replyWatcherLeft--;
+    _replyWatcherTimer = setTimeout(_replyWatcherTick, _REPLY_WATCHER_INTERVAL);
+  } catch (e) {}
+}
+function _replyWatcherStart() {
+  try {
+    if (hasCustomReplyCards() || _replyWatcherTimer || _replyWatcherLeft > 0) return;
+    _replyWatcherLeft = _REPLY_WATCHER_MAX;
+    _replyWatcherKick();
+  } catch (e) {}
+}
+function ensureReplyCardsReady(capMs) {
+  // v3.28.x：等待上限 8s→20s——专属+公用双键串行取回最坏 16s（每键对齐 idbHydrateKey
+  // 内部 4s+4s 重试），8s 会切断慢 IDB 手机（真我/荣耀 Edge 事务偶发挂起、MB 级大键读取
+  // 耗时长的真机）的取回完成点，回复池整会话读空落兜底卡。20s 让双键都能跑完；超时后
+  // 冷却期内池子仍空时不再每条回复干等（坏 IDB 手机直接快出兜底），池子一旦就绪立即走
+  // 自定义字卡（就绪判定在冷却检查之前，冷却不会挡住已就绪的池子）。
+  // 取回失败/超时/完成后池仍空 → 启动后台自愈重试（_replyWatcherStart），等设备恢复。
+  const cap = capMs || 20000;
+  try {
+    if (hasCustomReplyCards()) { lastHydFailAt = 0; _replyWatcherStop(); return Promise.resolve(true); }
+    if (!window.hydrateReplyScope) return Promise.resolve(false);
+    // 取回失败/超时冷却：自定义字卡仍缺且刚失败过，不再干等（直接回兜底路径，等下次回复重试）
+    if (Date.now() - lastHydFailAt < HYDR_FAIL_COOLDOWN) { _replyWatcherStart(); return Promise.resolve(false); }
+    return new Promise((res) => {
+      let settled = false;
+      const tm = setTimeout(() => { if (!settled) { settled = true; lastHydFailAt = Date.now(); _replyWatcherStart(); res(false); } }, cap);
+      const finish = (ok) => { if (!settled) { settled = true; clearTimeout(tm); res(ok); } };
+      // 专属字卡优先取回（回复池主源）；就绪即放行，公用字卡后台补
+      window.hydrateReplyScope('own', () => {
+        if (hasCustomReplyCards()) {
+          try { if (window.hydrateLibScopes) window.hydrateLibScopes(['public']); } catch (e) {}
+          _replyWatcherStop();
+          finish(true);
+          return;
+        }
+        // 专属取回完成仍无自定义字卡 → 再取公用；取回完成（或确认无此键）即放行，
+        // 避免没加自定义字卡的用户每条回复都干等
+        window.hydrateReplyScope('public', () => {
+          if (!hasCustomReplyCards()) _replyWatcherStart(); // 池仍空 → 后台自愈重试
+          finish(true);
+        });
+      });
+    });
+  } catch (e) { return Promise.resolve(false); }
+}
+window.ensureReplyCardsReady = ensureReplyCardsReady;
+// v3.26.x：回复字卡池诊断——「联系人一直只发【收到～】」报障时直接定位：池子各类型数量、
+// 自定义字卡总数、默认字卡三个开关，打进设置→复制诊断信息的【数据】节。省去依赖用户手数。
+window.__replyPoolDiag = function () {
+  try {
+    const P = getPool();
+    const cfg = (window.defaultCardCfg && window.defaultCardCfg()) || {};
+    const customRaw = (window.getCustomCards && window.getCustomCards()) || [];
+    return [
+      '池text=' + P.text.length,
+      'kaomoji=' + P.kaomoji.length,
+      'emoji=' + P.emoji.length,
+      'sticker=' + P.sticker.length,
+      'image=' + P.image.length,
+      'voice=' + P.voice.length,
+      'poke=' + P.poke.length,
+      '自定义字卡=' + customRaw.length,
+      '默认总开关=' + cfg.enabled,
+      '聊天使用=' + (window.defaultCardUse ? window.defaultCardUse('chat') : '?'),
+      '主字卡=' + (window.defaultCardCat ? window.defaultCardCat('main') : '?')
+    ].join(' / ');
+  } catch (e) { return '诊断出错:' + e.message; }
+};
 function fmtTime(ts) {
 if (!ts) return '';
 const d = new Date(ts);
@@ -677,25 +957,75 @@ a.addEventListener('ended', stopChatVoice);
 a.addEventListener('error', () => { stopChatVoice(); toast('语音播放失败'); });
 a.play().catch(() => { stopChatVoice(); toast('语音播放失败'); });
 }
+function voicePartsOf(text) {
+const p = String(text || '').split('|||');
+return { name: (p[0] || '语音消息').replace(/\.[^.]+$/, ''), src: p[1] || '' };
+}
+function fillVoiceBubble(b, text, prefixHtml) {
+const v = voicePartsOf(text);
+b.innerHTML = (prefixHtml || '') + '<div class="msg-voice" data-src="' + attrEsc(v.src) + '">' +
+'<button class="msg-voice-play" title="播放">' +
+// 播放/暂停双图标：playing 时 CSS 切换显示，点按三角↔双竖条有互动态（录制面板试听钮同款）
+'<svg class="voice-ico-play" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>' +
+'<svg class="voice-ico-pause" viewBox="0 0 24 24" fill="currentColor"><path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/></svg>' +
+'</button>' +
+'<div class="msg-voice-wave"><i></i><i></i><i></i><i></i><i></i></div>' +
+'<span class="msg-voice-name">' + escTxt(v.name) + '</span>' +
+'</div>';
+const btn = b.querySelector('.msg-voice-play');
+if (btn) btn.addEventListener('click', function (e) {
+e.stopPropagation();
+if (v.src) playVoiceInChat(btn, v.src);
+else toast('语音数据缺失');
+});
+}
 const QUOTE_PLACEHOLDER = /^(图片|表情包|\[图片\]|\[表情包\])$/;
+// 旧数据兜底：修复前 TA 自动引用存的是原始 text（语音为「名称|||data:audio;base64…」），
+// 直出会整串 base64 铺满屏幕。渲染前统一还原成可读标签，新数据本已是标签、原样通过。
+function quoteTextSafe(s) {
+let str = String(s == null ? '' : s);
+const bar = str.indexOf('|||');
+if (bar >= 0) str = bar > 0 ? '[语音] ' + str.slice(0, bar) : '';
+const di = str.indexOf('data:');
+if (di > 0 && str.length - di > 120) str = str.slice(0, di).trim();
+return str;
+}
 function quoteHtml(q, side) {
 const __fitQ = (side !== 'out') && !!window.taFit;
 const FQ = (s) => (__fitQ ? window.taFit(s) : s);
 if (q && typeof q === 'object') {
 const imgs = (q.imgs || []).filter(s => typeof s === 'string' && s.indexOf('data:') === 0).slice(0, 3);
-const t = String(q.t || '');
+const t = quoteTextSafe(q.t);
 const tHtml = (t && t.indexOf('data:') !== 0 && !(imgs.length && QUOTE_PLACEHOLDER.test(t))) ? escTxtBr(FQ(t)) : '';
 let inner = '';
-if (imgs.length) inner += '<span class="msg-quote-imgs">' + imgs.map(s => '<img class="msg-quote-img" src="' + attrEsc(s) + '" alt="图片">').join('') + '</span>';
+if (imgs.length) inner += '<span class="msg-quote-imgs">' + imgs.map(s => '<img class="msg-quote-img" src="' + attrEsc(s) + '" alt="图片" loading="lazy" decoding="async">').join('') + '</span>';
 if (tHtml) inner += '<span class="msg-quote-text">' + tHtml + '</span>';
 return '<div class="msg-quote">' + inner + '</div>';
 }
 if (typeof q === 'string' && q.indexOf('data:') === 0) {
-return '<div class="msg-quote"><img class="msg-quote-img" src="' + attrEsc(q) + '" alt="图片"></div>';
+return '<div class="msg-quote"><img class="msg-quote-img" src="' + attrEsc(q) + '" alt="图片" loading="lazy" decoding="async"></div>';
 }
-return '<div class="msg-quote"><span class="msg-quote-text">' + escTxtBr(FQ(q)) + '</span></div>';
+const qs = quoteTextSafe(q);
+return '<div class="msg-quote"><span class="msg-quote-text">' + escTxtBr(FQ(qs)) + '</span></div>';
 }
 let inplaceDrafts = {};
+// v3.28.x：当前聚焦的互动卡片输入栏下标。联系人新消息触发整窗重渲染（renderWindow）会
+// 重建输入框，若不在重建后回补 focus，安卓会收起输入法、卡片像被收起，打断用户输入。
+// 用 document focusin/focusout 跟踪（contenteditable `.ce-box` 上 activeElement 常为 body，
+// 单看 activeElement 不可靠；focusin 能命中 ceBox，故以此为权威）。
+let inplaceFocusIdx = -1;
+document.addEventListener('focusin', (e) => {
+  const t = e.target;
+  if (!t || t.nodeType !== 1 || !t.closest) return;
+  if (!t.closest('.msg-inplace')) return;
+  const item = t.closest('.msg-ask');
+  inplaceFocusIdx = item && item.dataset.idx !== undefined ? Number(item.dataset.idx) : -1;
+});
+document.addEventListener('focusout', () => {
+  const ae = document.activeElement;
+  if (ae && ae.nodeType === 1 && ae.closest && ae.closest('.msg-inplace')) return;
+  inplaceFocusIdx = -1;
+});
 function inplaceTypeOf(rec) {
 if (!rec) return null;
 if (rec.special === 'ask-choose') return 'choose';
@@ -707,6 +1037,15 @@ return null;
 function collectInplaceDrafts() {
 if (!body) return;
 inplaceDrafts = {};
+// 快照当前聚焦下标：这里是清空 body 前唯一能读到「仍在聚焦」的位置（focusout 在
+// innerHTML='' 时才触发）。activeElement 命中 input 或它的 ceBox 都算聚焦，作为兜底。
+try {
+const ae = document.activeElement;
+if (ae && ae.nodeType === 1 && ae.closest && ae.closest('.msg-inplace')) {
+const fi = ae.closest('.msg-ask');
+if (fi && fi.dataset.idx !== undefined) inplaceFocusIdx = Number(fi.dataset.idx);
+}
+} catch (e) {}
 body.querySelectorAll('.msg-ask[data-idx] .msg-inplace input.ip-input').forEach(inp => {
 const item = inp.closest('.msg-ask');
 if (!item || item.dataset.idx === undefined) return;
@@ -714,6 +1053,21 @@ const idx = Number(item.dataset.idx);
 const t = inplaceTypeOf(msgs[idx]);
 if (t && (inp.value || '').trim()) inplaceDrafts[idx] = { type: t, value: inp.value };
 });
+// 若 focusin 跟踪的下标在当前渲染里指向已作答卡片则失效；未作答的（含空输入）保留，
+// 以便重渲染后重开输入栏、维持焦点不被打断
+if (inplaceFocusIdx >= 0) {
+const ridx = msgs[inplaceFocusIdx];
+if (ridx && inplaceTypeOf(ridx) !== null && inplaceAnswered(ridx)) inplaceFocusIdx = -1;
+}
+}
+function inplaceAnswered(rec) {
+if (!rec) return true;
+return (
+(rec.special === 'ask-choose' && rec.choiceStatus === 'answered') ||
+(rec.special === 'ask-curious' && rec.curiousStatus === 'answered') ||
+(rec.special === 'ask-roast' && rec.roastStatus === 'answered') ||
+(rec.special === 'ask-card' && rec.askStatus === 'answered')
+);
 }
 function restoreInplaceDrafts() {
 if (!body) return;
@@ -743,8 +1097,23 @@ const s = window.getSelection();
 s.removeAllRanges();
 s.addRange(r);
 } catch (e) {}
+// v3.28.x：重建后若正是重渲染前聚焦的那张卡片，回补焦点，让输入法保持弹出、不被收起
+if (inplaceFocusIdx === idx) {
+setTimeout(() => { try { inp.focus(); } catch (e) {} }, 0);
+}
 }
 });
+// v3.28.x：聚焦但还没打字的输入栏不在草稿字典里，重建后补开输入栏，维持焦点不被打断
+// （expandCardInPlace 内部会对输入框 refocus）
+if (inplaceFocusIdx >= 0) {
+const idx = inplaceFocusIdx;
+const item = body.querySelector('.msg-ask[data-idx="' + idx + '"]');
+if (item && !item.querySelector('.msg-inplace')) {
+const rec = msgs[idx];
+const type = inplaceTypeOf(rec);
+if (type && !inplaceAnswered(rec)) try { expandCardInPlace(idx, type); } catch (e) {}
+}
+}
 }
 function expandCardInPlace(idx, type) {
 const el = body.querySelector('.msg-ask[data-idx="' + idx + '"]');
@@ -1165,8 +1534,26 @@ loadNewerIncremental();
 }, { passive: true });
 function renderMsg(rec) {
 const m = document.createElement('div');
+if (!batchRendering) m.classList.add('msg-enter');
 const __fit = rec.side !== 'out' && !!window.taFit;
-const T = (s) => (__fit ? window.taFit(s) : s);
+const __taNm = chatPartnerName();
+const __meNm = chatUserName();
+// v3.26.x：拍一拍人称修复——taFit（称呼）期间把 {ta}/{me} 掩成控制符，先替换称呼再回填昵称，
+// 昵称（含默认 TA、含「他」的名字）永不被称呼功能改写成 他/ta/她；字卡文案里的独立
+// ta/TA/他（非占位符）仍按称呼替换（字卡库中性占位设计不变）
+const T = (s) => {
+let t = s;
+if (__fit && typeof t === 'string') {
+const hasPh = t.indexOf('{ta}') >= 0 || t.indexOf('{me}') >= 0;
+if (hasPh) t = t.split('{ta}').join('\u0002').split('{me}').join('\u0003');
+t = window.taFit(t);
+if (hasPh) t = t.split('\u0002').join(__taNm).split('\u0003').join(__meNm);
+return t;
+}
+if (typeof t === 'string' && t.indexOf('{ta}') >= 0) t = t.split('{ta}').join(__taNm);
+if (typeof t === 'string' && t.indexOf('{me}') >= 0) t = t.split('{me}').join(__meNm);
+return t;
+};
 if (rec.special === 'invite') {
 m.className = 'msg-ask';
 m.dataset.idx = msgs.length - 1;
@@ -1259,7 +1646,7 @@ return m;
 }
 // v3.16.x：记忆翻牌结算卡片（memory-game.js endGame 调用 chatAddSystem special:'memory'）
 if (rec.special === 'memory') {
-m.className = 'msg-pong';
+m.className = 'msg-pong msg-memory';
 m.innerHTML = '<div class="msg-pong-card">' +
 '<div class="msg-pong-label">🧠 ' + T('记忆翻牌') + '</div>' +
 '<div class="msg-pong-result">' + escTxt(T(rec.text || '')) + '</div>' +
@@ -1314,8 +1701,8 @@ return m;
 }
 // v3.15.x：TA 向 Mochi 申请心意币的回执卡（金额与红包同款随机分布）
 if (rec.special === 'askcoin') {
-m.className = 'msg-center';
-m.innerHTML = '<div class="msg-center-card">🪙 ' + escTxt(chatPartnerName()) + ' 向 Mochi 申请了心意币 ¥' + (Number(rec.askFen || 0) / 100).toFixed(2) + '</div>';
+m.className = 'msg-poke';
+m.innerHTML = '<span>🪙 ' + escTxt(chatPartnerName()) + ' 向 Mochi 申请了心意币 ¥' + (Number(rec.askFen || 0) / 100).toFixed(2) + '</span>';
 appendMsg(m);
 maybeScrollChatBottom(rec.side);
 return m;
@@ -1468,20 +1855,7 @@ b.style.padding = '8px 10px';
 b.style.background = '';
 b.style.border = '';
 b.style.boxShadow = '';
-const vparts = String(rec.text || '').split('|||');
-const vname = (vparts[0] || '语音消息').replace(/\.[^.]+$/, '');
-const vsrc = vparts[1] || '';
-b.innerHTML = '<div class="msg-voice" data-src="' + attrEsc(vsrc) + '">' +
-'<button class="msg-voice-play" title="播放">' +
-'<svg viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>' +
-'</button>' +
-'<div class="msg-voice-wave"><i></i><i></i><i></i><i></i><i></i></div>' +
-'<span class="msg-voice-name">' + escTxt(vname) + '</span>' +
-'</div>';
-b.querySelector('.msg-voice-play').addEventListener('click', function (e) {
-e.stopPropagation();
-playVoiceInChat(this, vsrc);
-});
+fillVoiceBubble(b, rec.text, rec.quote ? quoteHtml(rec.quote, rec.qside) : '');
 } else if (rec.parts && rec.parts.length) {
 const imgs = rec.parts.filter(p => p.k === 'img').map(p => p);
 const textPart = rec.parts.filter(p => p.k === 'text').map(p => p.v).join(' ');
@@ -1622,19 +1996,18 @@ if (!action) {
 const cards = pokeAllCards();
 action = cards.length ? pick(cards) : '拍了拍你';
 }
-const name = chatPartnerName();
-const myName = chatUserName();
+// v3.26.x：TA 主动拍一拍同样存 {ta}/{me} 占位符（与 sendPoke 一致），昵称渲染期回填、不受称呼改写
 let text;
 if (action.indexOf('你') >= 0) {
 if (action.charAt(0) === '你' || action.charAt(0) === '我') {
-text = name + ' ' + action.slice(1).replace(/你(?![们])/g, myName);
+text = '{ta} ' + action.slice(1).replace(/你(?![们])/g, '{me}');
 } else {
-text = name + ' ' + action.replace(/你(?![们])/g, myName);
+text = '{ta} ' + action.replace(/你(?![们])/g, '{me}');
 }
 } else if (action.charAt(0) === '我') {
-text = name + ' ' + action.slice(1);
+text = '{ta} ' + action.slice(1);
 } else {
-text = name + ' ' + action;
+text = '{ta} ' + action;
 }
 addIn(text, { special: 'poke' });
 }
@@ -1661,7 +2034,7 @@ pendingLocal = null;
 sessionChangedIdx.clear();
 chatDbReady = true;
 renderStart = 0; // v3.6.x：分页窗口起点复位（消息已清空）
-if (saveTimer) { clearTimeout(saveTimer); saveTimer = null; }
+cancelPersist();
 try { store.remove('chat-msgs'); } catch (e) {}
 if (body) body.innerHTML = '';
 clearChatUnread();
@@ -1677,7 +2050,7 @@ pendingLocal = null;
 sessionChangedIdx.clear();
 chatDbReady = true;
 renderStart = 0;
-if (saveTimer) { clearTimeout(saveTimer); saveTimer = null; }
+cancelPersist();
 const importedData = JSON.stringify(msgs);
 try { if (window.idbSet) window.idbSet(window.activePrefix() + ':chat-msgs', importedData); } catch (e) {}
 writeLsSnapshot(importedData, undefined, true);
@@ -1729,7 +2102,7 @@ return;
 }
 if (!deskMsgEl || !deskMsgEnabled()) return;
 if (deskMsgText) deskMsgText.textContent = notifyT;
-if (deskMsgName) deskMsgName.textContent = opts.name || store.get('lbl-partner') || (window.taWord ? window.taWord() : 'TA');
+if (deskMsgName) deskMsgName.textContent = opts.name || chatPartnerName();
 if (deskMsgAv) {
 if (opts.av && typeof opts.av === 'string' && opts.av.indexOf('data:') === 0) {
 const img = document.createElement('img');
@@ -1753,6 +2126,10 @@ deskMsgTimer = setTimeout(() => { if (deskMsgEl) deskMsgEl.hidden = true; }, 600
 }
 function extractDeskMsg(rec) {
 let text = rec.text || '';
+// v3.26.x：拍一拍/系统消息存 {ta}/{me} 占位符，桌面弹窗预览需回填昵称
+// （renderMsg 走 T() 替换，此处同义；不走 taFit 称呼改写，避免昵称被改成 他/她）
+if (typeof text === 'string' && text.indexOf('{ta}') >= 0) text = text.split('{ta}').join(chatPartnerName());
+if (typeof text === 'string' && text.indexOf('{me}') >= 0) text = text.split('{me}').join(chatUserName());
 let img = rec.img || '';
 let imgSub = '';
 if (rec.parts && rec.parts.length) {
@@ -1777,7 +2154,7 @@ return { text: text, img: img, imgSub: imgSub };
 }
 function showDeskMsg(rec) {
 const info = extractDeskMsg(rec);
-const name = store.get('lbl-partner') || (window.taWord ? window.taWord() : 'TA');
+const name = chatPartnerName();
 const isHidden = document.visibilityState === 'hidden';
 if (isHidden) {
 showDeskPopup({ name: name, text: info.text, type: rec.type, img: info.img, imgSub: info.imgSub, isHidden: true });
@@ -1902,11 +2279,16 @@ if (dts >= 0 && dts <= 1200) { saveMsgs(); return null; }
 }
 msgs.push(rec);
 saveMsgs();
-const notable = rec.side === 'in' && (!rec.special || rec.special === 'poke' || rec.special === 'gift');
-if (notable && (!chatVisible() || document.visibilityState === 'hidden')) {
-if (!chatVisible()) incChatUnread();
-showDeskMsg(rec);
-}
+	const notable = rec.side === 'in' && (!rec.special || rec.special === 'poke' || rec.special === 'gift');
+	// v3.19.x：rec.silent（psync 跨桌面补投递）——消息进聊天+未读角标，但不触发
+	// 桌面横幅/系统通知：补投递的是同步队列里其他时刻/其他桌面的旧内容，弹通知
+	// 会形成"一堆看过的消息重叠弹窗 + 错误联系人名"
+	if (notable && !rec.silent && (!chatVisible() || document.visibilityState === 'hidden')) {
+	if (!chatVisible()) incChatUnread();
+	showDeskMsg(rec);
+	} else if (notable && rec.silent && !chatVisible()) {
+	incChatUnread();
+	}
 if (renderStart > 0 && msgs.length - renderStart > RENDER_MAX &&
 (rec.side === 'out' || chatNearBottom())) {
 renderWindow(false, true);
@@ -1920,6 +2302,12 @@ return el;
 }
 function addIn(text, opts) {
 opts = opts || {};
+  // v3.26.x：联系人发消息音效——TA 主动消息/系统通知统一在 addIn 触发「联系人发送和回复消息」音效
+  // （sfx-in）。此前只有群聊播 in 音效、单聊从未触发，所有手机单聊收 TA 消息都静音（红米 Turbo4Pro
+  // + Via 反馈）。silent（小游戏互动/后台批量/静默通知）与已读回执（special:'read'）不打扰，不播放。
+  if (window.playSfx && !opts.silent && opts.special !== 'read') {
+    try { window.playSfx('in'); } catch (e) {}
+  }
   // v3.14.x：opts.tag = 来源标注（如「经期关心/喝水提醒/吃饭提醒」）——系统功能直接发进
   // 聊天的字卡带一枚标签 chip（复用 rec.mood 渲染与持久化链路，重进聊天仍在），
   // 用户能看出这条消息是哪个功能触发的，不再是无来由的普通气泡
@@ -1927,14 +2315,36 @@ opts = opts || {};
   // 正文本身就是一张完整字卡，label 再渲染一遍会上下两行内容重复）
   const _tagMood = opts.tag ? [{ tag: String(opts.tag), label: opts.tagNoDup ? '' : String(text) }] : null;
   // v3.16.x：gInv = 联系人主动邀请的游戏类型（pong/snake/rps），随消息持久化供小游戏记录识别
-return addRec({ side: 'in', text: text, initiative: opts.initiative, special: opts.special, quote: opts.quote, qidx: opts.qidx, type: opts.type, img: opts.img, parts: opts.parts, mailNotice: opts.mailNotice, gInv: opts.gInv, askQuestion: opts.askQuestion, askStatus: opts.askStatus, askOptions: opts.askOptions, askType: opts.askType, choiceQuestion: opts.choiceQuestion, choiceOptions: opts.choiceOptions, choicePref: opts.choicePref, choiceCat: opts.choiceCat, choiceStatus: opts.choiceStatus, choiceAnswer: opts.choiceAnswer, choiceReply: opts.choiceReply, choiceMatch: opts.choiceMatch, curiousQuestion: opts.curiousQuestion, curiousQuick: opts.curiousQuick, curiousReplies: opts.curiousReplies, curiousFollowup: opts.curiousFollowup, curiousQid: opts.curiousQid, curiousCat: opts.curiousCat, curiousStatus: opts.curiousStatus, curiousAnswer: opts.curiousAnswer, curiousReply: opts.curiousReply, roastText: opts.roastText, roastCat: opts.roastCat, roastStatus: opts.roastStatus, roastAnswer: opts.roastAnswer, roastReply: opts.roastReply, rpAmount: opts.rpAmount, rpWish: opts.rpWish, rpStatus: opts.rpStatus, rpTs: opts.rpTs, rpCover: opts.rpCover, askFen: opts.askFen, askTs: opts.askTs, deskCk: opts.deskCk, mood: opts.mood || _tagMood || undefined });
+	return addRec({ side: 'in', text: text, initiative: opts.initiative, special: opts.special, quote: opts.quote, qidx: opts.qidx, type: opts.type, img: opts.img, parts: opts.parts, mailNotice: opts.mailNotice, gInv: opts.gInv, silent: opts.silent, askQuestion: opts.askQuestion, askStatus: opts.askStatus, askOptions: opts.askOptions, askType: opts.askType, choiceQuestion: opts.choiceQuestion, choiceOptions: opts.choiceOptions, choicePref: opts.choicePref, choiceCat: opts.choiceCat, choiceStatus: opts.choiceStatus, choiceAnswer: opts.choiceAnswer, choiceReply: opts.choiceReply, choiceMatch: opts.choiceMatch, curiousQuestion: opts.curiousQuestion, curiousQuick: opts.curiousQuick, curiousReplies: opts.curiousReplies, curiousFollowup: opts.curiousFollowup, curiousQid: opts.curiousQid, curiousCat: opts.curiousCat, curiousStatus: opts.curiousStatus, curiousAnswer: opts.curiousAnswer, curiousReply: opts.curiousReply, roastText: opts.roastText, roastCat: opts.roastCat, roastStatus: opts.roastStatus, roastAnswer: opts.roastAnswer, roastReply: opts.roastReply, rpAmount: opts.rpAmount, rpWish: opts.rpWish, rpStatus: opts.rpStatus, rpTs: opts.rpTs, rpCover: opts.rpCover, askFen: opts.askFen, askTs: opts.askTs, deskCk: opts.deskCk, deskCkDir: opts.deskCkDir, mood: opts.mood || _tagMood || undefined });
 }
 function addOut(text) {
 return addRec({ side: 'out', text: text });
 }
+// v3.25.x：改名钩子（chat-settings 联系人昵称 / contacts 联系人改名同步 lbl-partner）。
+// 记录 hist 并立即清扫当前桌面内存 msgs + 重渲染聊天窗；非当前桌面由 contacts 只记
+// hist（chatSysNickChanged 不感知），等该桌面下次 loadMsgs 惰性补扫。
+window.chatSysNickChanged = function (oldName) {
+try {
+if (typeof oldName !== 'string' || !oldName) return;
+const cur = sysNickCur();
+const hist = sysNickHistGet(store);
+if (hist.indexOf(oldName) < 0) hist.push(oldName);
+if (hist.indexOf(cur) < 0) hist.push(cur);
+store.set('sysmsg-nick-hist', JSON.stringify(hist));
+if (oldName === cur) { store.set('sysmsg-nick-swept', String(hist.length)); return; }
+// 权威未就绪（开屏极早期）：只记 hist 不动 msgs、不推进 swept——否则清扫后的文本
+// 与 IDB 权威里的原文本签名不同，finalize 合并会当成两条重复记录；交给补扫。
+if (!chatDbReady) return;
+store.set('sysmsg-nick-swept', String(hist.length));
+// 改名后无论清扫是否有改动都要重渲染：系统消息显示走 {ta}→当前名替换，有改动时旧名
+// 已换成 {ta}、无改动（连续改名）时旧渲染缓存的名字已过期——不重渲染 DOM 会停留在旧名
+if (sysNickSweepMsgs(msgs, oldName)) saveMsgs();
+try { if (chatVisible()) renderWindow(true); } catch (e) {}
+} catch (e) {}
+};
 window.chatAddSystem = function (text, opts) {
 opts = opts || {};
-return addIn(text, { special: opts.special || 'poke', img: opts.img, mailNotice: opts.mailNotice, askQuestion: opts.askQuestion, askStatus: opts.askStatus, askOptions: opts.askOptions, askType: opts.askType, choiceQuestion: opts.choiceQuestion, choiceOptions: opts.choiceOptions, choicePref: opts.choicePref, choiceCat: opts.choiceCat, curiousQuestion: opts.curiousQuestion, curiousQuick: opts.curiousQuick, curiousReplies: opts.curiousReplies, curiousFollowup: opts.curiousFollowup, curiousQid: opts.curiousQid, curiousCat: opts.curiousCat, roastText: opts.roastText, roastCat: opts.roastCat, deskCk: opts.deskCk });
+return addIn(text, { special: opts.special || 'poke', img: opts.img, mailNotice: opts.mailNotice, askQuestion: opts.askQuestion, askStatus: opts.askStatus, askOptions: opts.askOptions, askType: opts.askType, choiceQuestion: opts.choiceQuestion, choiceOptions: opts.choiceOptions, choicePref: opts.choicePref, choiceCat: opts.choiceCat, curiousQuestion: opts.curiousQuestion, curiousQuick: opts.curiousQuick, curiousReplies: opts.curiousReplies, curiousFollowup: opts.curiousFollowup, curiousQid: opts.curiousQid, curiousCat: opts.curiousCat, roastText: opts.roastText, roastCat: opts.roastCat, deskCk: opts.deskCk, deskCkDir: opts.deskCkDir });
 };
 window.chatAddIn = function (text, opts) {
 const r = addIn(text, opts);
@@ -1989,13 +2399,73 @@ else if (tries < 3) setTimeout(attempt, 1500);
 };
 attempt();
 };
+// v3.19.x：安全的「非当前桌面」追加任意 rec（含 ask-card 互动卡）。先读后写，读到
+// undefined 时用 idbGetAllKeys 复核是「确认无历史」还是「读取失败」——失败则重试
+//（最多 3 次），绝不冒覆盖整个聊天记录的风险（与 chatAppendToDeskMsg 同款安全逻辑）。
+// 当前桌面直接走内存链路 addRec（实时渲染 + 统一落盘）。
+window.chatAppendDeskRec = function (cid, rec) {
+  const cur = window.__activeCid || 'default';
+  rec = rec || {};
+  if (!rec.ts) rec.ts = Date.now();
+  if (cid === cur) return addRec(rec);
+  if (!window.idbGet || !window.idbSet) return;
+  const key = 'xy-home-v2:' + cid + ':chat-msgs';
+  let tries = 0;
+  const writeArr = function (arr) {
+    try { window.idbSet(key, JSON.stringify(arr)); } catch (e) {}
+    try { localStorage.setItem(key, JSON.stringify(arr)); } catch (e) {}
+  };
+  const attempt = function () {
+    tries++;
+    window.idbGet(key).then(function (v) {
+      if (v !== undefined && v !== null) {
+        let arr = [];
+        try { arr = typeof v === 'string' ? JSON.parse(v) : v; } catch (e) { arr = []; }
+        if (!Array.isArray(arr)) arr = [];
+        arr.push(rec);
+        writeArr(arr);
+        return;
+      }
+      const confirmMiss = window.idbGetAllKeys
+        ? window.idbGetAllKeys().then(function (keys) {
+            return !(keys || []).some(function (k) { return k === key; });
+          }).catch(function () { return false; })
+        : Promise.resolve(true);
+      confirmMiss.then(function (isMiss) {
+        if (isMiss) writeArr([rec]);
+        else if (tries < 3) setTimeout(attempt, 1500);
+      });
+    }).catch(function () { if (tries < 3) setTimeout(attempt, 1500); });
+  };
+  attempt();
+};
+// v3.19.x：把一张跨桌面查岗卡（带 deskCk + deskCkDir 双方向）写入指定联系人桌面聊天。
+// 后台收到查岗通知切回浏览器后，到该联系人即可看到并回答（incoming-requests 后台分支调用）。
+window.chatAppendDeskCkTo = function (cid, q) {
+  const field = (window.buildDeskCkCard ? window.buildDeskCkCard(q) : null)
+    || { deskCkDir: 'toMe', text: '在干嘛呢？想你了。', hint: 'TA 来查岗了。', opts: null, askType: 'text' };
+  window.chatAppendDeskRec(cid, {
+    side: 'in', special: 'ask-card', text: field.text,
+    askQuestion: field.text, askOptions: field.opts, askType: field.askType,
+    deskCk: true, deskCkDir: field.deskCkDir
+  });
+};
+// v3.19.x：把一句「求聊天」开场白写入指定联系人桌面聊天（后台命中求聊天时调用）。
+window.chatAppendDeskTextTo = function (cid, text) {
+  window.chatAppendDeskRec(cid, { side: 'in', special: 'poke', text: text || '想你了，来聊聊天吧。' });
+};
 function saveMsgsNow() {
 // v3.14.x：空记录落盘守卫（同 saveMsgs）——调用方都是作答/回应后触发，
 // msgs 必非空；真出现空+权威未读过时绝不写盘（防覆盖全部历史）
 if (!msgs.length && authLoadedPrefix !== window.activePrefix()) return;
-const data = JSON.stringify(msgs);
-try { if (window.idbSet) window.idbSet(window.activePrefix() + ':chat-msgs', data); } catch (e) {}
-writeLsSnapshot(data, undefined, true);
+// v3.26.x 止血：合并到低频空闲落盘（不再立即同步写整包），离页 flushSave 兜底
+const myPrefix = window.activePrefix();
+schedulePersist(() => {
+  if (!msgs.length && authLoadedPrefix !== myPrefix) return;
+  const data = JSON.stringify(msgs);
+  try { if (window.idbSet) window.idbSet(myPrefix + ':chat-msgs', data); } catch (e) {}
+  writeLsSnapshot(data, myPrefix, true);
+});
 }
 window.chatChooseReply = function (msgIdx, answer, opt, match) {
 const rec = msgs[msgIdx];
@@ -2085,12 +2555,18 @@ const taReply = preset
 let deskReply = '';
 if (rec && rec.deskCk) {
 try {
-const pool = (window.getDeskCheckPool ? window.getDeskCheckPool() : []).concat(
+// v3.19.x：按方向取池——deskCkDir 'meToTa'（联系人申请我查 TA）抽「联系人申请我
+// 对联系人查岗」，否则（toMe/旧数据）抽「联系人对我查岗」；拒绝查岗时回一句固定失落话
+const dir = rec.deskCkDir === 'meToTa' ? 'meToTa' : 'toMe';
+const pool = (window.getDeskCheckPool ? window.getDeskCheckPool(dir) : []).concat(
   (window.getCustomCardsFor ? window.getCustomCardsFor(window.__activeCid || 'default') : []).filter(function (c) {
     return typeof c === 'string' && c.trim() && c.indexOf('data:') !== 0;
   })
 );
-if (pool.length && Math.random() * 100 < 50) {
+if (dir === 'meToTa' && /不要|不用|下次|不了|算了|no/i.test(String(answer))
+  && (Math.random() * 100 < 50)) {
+deskReply = ['那好吧，下次想查随时来呀。', '没事，那我把自己交给你保管。', '不查也行，反正我总是会来找你。'][Math.floor(Math.random() * 3)];
+} else if (pool.length && Math.random() * 100 < 50) {
 const n = 1 + Math.floor(Math.random() * Math.min(5, pool.length));
 const used = {};
 const picked = [];
@@ -2226,6 +2702,10 @@ return;
 }
 retractMsg(target, side);
 }
+// v3.26.x：字卡池为空的最终兜底——原单条硬编码「收到～」会让联系人在没有可用
+// 字卡时每条回复都一模一样（用户反馈联系人一直/重复发【收到~】）。改用一个小型
+// 通用池随机抽，避免机械复读；真实的根因仍要查该联系人的字卡库是否为 & 默认字卡开关。
+const FALLBACK_REPLY_POOL = ['收到～', '好呀', '好～', '嗯嗯', '知道啦', '好哒', '嗯嗯，我在听'];
 function genReplyText(c) {
 const pool = getPool();
 let reply = '', type = 'text';
@@ -2238,7 +2718,7 @@ reply = pick(pool.image); type = 'image';
 } else if (pool.voice.length && hit(c['voice-prob'])) {
 reply = pick(pool.voice); type = 'voice';
 } else {
-reply = pick(pool.text) || '收到～';
+reply = pick(pool.text) || pick(FALLBACK_REPLY_POOL);
 }
 if (type === 'text' && pool.kaomoji.length && hit(c['kaomoji-prob'])) {
 reply += ' ' + pick(pool.kaomoji);
@@ -2249,8 +2729,9 @@ function scheduleReply() {
 const myCid = window.__activeCid || 'default';
 const sameCid = () => (window.__activeCid || 'default') === myCid;
 syncLastMineText();
-const quoteSrc = lastMineText;
+const quoteSrc = lastMineQuote;
 const quoteSrcIdx = lastMineIdx;
+const quoteKey = quoteSrc && typeof quoteSrc === 'object' ? String(quoteSrc.t || '') + '\n' + (quoteSrc.imgs || []).join() : String(quoteSrc || '');
 const c = cfg();
 if (hit(c['rn-prob'])) {
 setTimeout(() => { if (!sameCid()) return; addIn('', { special: 'read' }); }, randInt(1000, 4000));
@@ -2274,8 +2755,8 @@ for (let i = 0; i < count; i++) {
 setTimeout(() => {
 if (!sameCid()) return;
 hideTyping();
-const q = (wantQuote && i === 0 && quoteSrc !== lastQuotedText) ? quoteSrc : null;
-if (q) lastQuotedText = q;
+const q = (wantQuote && i === 0 && quoteKey && quoteKey !== lastQuotedText) ? quoteSrc : null;
+if (q) lastQuotedText = quoteKey;
 replyOnce(c, q, i > 0, q ? quoteSrcIdx : -1);
 if (i < count - 1) showTyping();
 if (i === count - 1) {
@@ -2285,8 +2766,9 @@ setTimeout(() => { if (!sameCid()) return; if (window.maybeMusicRequest) window.
 }
 }, delay);
 }
-function replyOnce(c, quote, silent, quoteIdx) {
+async function replyOnce(c, quote, silent, quoteIdx) {
 try { console.log('[mochi-reply] replyOnce #%s quote=%s silent=%s', (window.__replyOnceDiag=(window.__replyOnceDiag||0)+1), !!quote, !!silent); } catch(e){}
+try { await ensureReplyCardsReady(); } catch (e) {}
 const myCid = window.__activeCid || 'default';
 const sameCid = () => (window.__activeCid || 'default') === myCid;
 const rep = genOneReply(c);
@@ -2297,12 +2779,17 @@ const m = addIn(rep.text, { quote: quote, qside: 'out', qidx: quote ? quoteIdx :
 const _favProbMsg = (window.favCfg ? window.favCfg().taMsg : 30);
 if (lastMineText && Math.random() * 100 < _favProbMsg) {
 const fav = getFav();
-if (!fav.some(f => f.side === 'out' && f.text === lastMineText)) {
-const favType = lastMineText.indexOf('data:') === 0 ? 'image' : 'text';
+// v3.26.x：只与 TA 自己的收藏判重——「我」收藏过同一条不应挡住 TA 的自动收藏（两个 tab 独立）
+if (!fav.some(f => f.by === 'ta' && f.side === 'out' && f.text === lastMineText)) {
+let favType = lastMineText.indexOf('data:') === 0 ? 'image' : 'text';
 let favParts = undefined;
 for (let i = msgs.length - 1; i >= 0; i--) {
 const mm = msgs[i];
-if (mm && mm.side === 'out' && mm.text === lastMineText && mm.parts && mm.parts.length) { favParts = mm.parts.map(p => ({ k: p.k, v: p.v, sub: p.sub })); break; }
+if (mm && mm.side === 'out' && mm.text === lastMineText) {
+if (mm.type && mm.type !== 'text') favType = mm.type;
+if (mm.parts && mm.parts.length) favParts = mm.parts.map(p => ({ k: p.k, v: p.v, sub: p.sub }));
+break;
+}
 }
 fav.push({ side: 'out', text: lastMineText, type: favType, ts: Date.now(), by: 'ta', parts: favParts });
 saveFav(fav);
@@ -2425,7 +2912,11 @@ if (moreCk) {
 moreCk.addEventListener('click', (e) => {
 e.stopPropagation();
 if (morePanel) morePanel.hidden = true;
-if (window.openCkPanel) window.openCkPanel();
+// 聊天「更多功能」寻踪：全屏打开寻踪页（返回时回聊天）
+if (window.openCheckinPage) {
+window.__ckFrom = 'chat';
+window.openCheckinPage();
+} else toast('寻踪加载失败');
 });
 }
 const moreCjian = document.getElementById('more-cjian');
@@ -2441,17 +2932,20 @@ window.openCjian();
 }
 let lastMineText = '';
 let lastMineIdx = -1;
+let lastMineQuote = '';
 let lastQuotedText = '';
 function syncLastMineText() {
 for (let i = msgs.length - 1; i >= 0; i--) {
 const m = msgs[i];
 if (m && m.side === 'out' && !m.retracted && typeof m.text === 'string' && m.text) {
 lastMineText = m.text;
+lastMineQuote = quoteSnapOf(m);
 lastMineIdx = i;
 return;
 }
 }
 lastMineText = '';
+lastMineQuote = '';
 lastMineIdx = -1;
 }
 function genOneReply(c) {
@@ -2600,6 +3094,10 @@ if (!hit(prob)) return;
 if (hit(cfgn(c, 'touch-prob', 5))) { performPoke(); return; }
 if (tryActiveInvite(c)) return;
 if (window.ckQuestionTry && window.ckQuestionTry(c)) return;
+// v3.27.x：主动发送前先确保字卡池就绪——冷启动挂起大键时同步读池是空库，
+// 主动消息也会落「在吗？」兜底；等待取回完成再构建 pool（专属优先、上限 8s 对齐 IDB）
+(async () => {
+try { await ensureReplyCardsReady(); } catch (e) {}
 const pool = getPool();
 const autoMsg = () => {
 const r = Math.random() * 100;
@@ -2632,6 +3130,7 @@ if (i < count - 1) showTyping();
 }
 setTimeout(() => { if (window.callMaybeTrigger) window.callMaybeTrigger(); }, count * 2600 + 3500);
 setTimeout(() => { trySystemAutoSend(); trySystemAskMochi(); tryCollectPending(); if (window.maybeAutoGift) window.maybeAutoGift(); }, count * 2600 + 2500);
+})();
 } catch (e) {
 try {
 const errArr = (window.__jsErrors = window.__jsErrors || []);
@@ -2650,6 +3149,9 @@ const phoneTab = document.querySelector('.tab[data-page="page-phone"]');
 if (phoneTab) phoneTab.classList.add('active');
 document.querySelectorAll('.page').forEach(p => p.hidden = true);
 chatPage.hidden = false;
+// v3.28.x：进入聊天页即按需取回字卡库（冷启动挂起大键）——专属字卡优先（回复池主源），
+// 公用随后；配合 replyOnce 内的等待，避免首条/持续回复落兜底卡。
+try { if (window.hydrateLibScopes) window.hydrateLibScopes(['own', 'public']); } catch (e) {}
 fillAvatar('chat-user-av', 'cs-avatar-user');
 fillAvatar('chat-partner-av', 'cs-avatar-partner');
 if (window.applyChatSettings) window.applyChatSettings();
@@ -2708,20 +3210,33 @@ const moreGridAsk = document.getElementById('more-grid-ask');
 // v3.15.x：功能增多后顶部改为分类 chips（互动/小游戏/工具/TA的提问），
 // 按钮元素与 ID 全部保留只做过滤显示；每个功能只归属一个分类、分类间不重复
 const MORE_CATS = ['chat', 'game', 'tool', 'ask'];
-function applyMoreCat(cat) {
+// v3.26.x：群聊打开共享面板时进入「群聊模式」——只保留【工具】分类，且只留 帮我决定/多人决定/搜索记录/占卜；
+// 禁止在群聊里使用【小游戏】【TA的提问】【互动】功能。聊天页打开时关闭该模式、恢复全部分类。
+let moreGroupMode = false;
+const GROUP_MORE_ITEM_IDS = new Set(['more-decide', 'more-gdecide', 'more-search', 'more-divine']);
+function applyMoreCat(cat, group) {
+if (group === true || group === false) moreGroupMode = group;
+if (moreGroupMode) cat = 'tool'; // 群聊模式强制锁定「工具」分类
 if (MORE_CATS.indexOf(cat) < 0) cat = 'chat';
-document.querySelectorAll('#more-tabs .more-tab').forEach(t => t.classList.toggle('sel', t.dataset.mcat === cat));
+document.querySelectorAll('#more-tabs .more-tab').forEach(t => {
+const showTab = !moreGroupMode || t.dataset.mcat === 'tool'; // 群聊模式隐藏其余分类 tab
+t.hidden = !showTab;
+t.classList.toggle('sel', t.dataset.mcat === cat);
+});
 if (moreGridAsk) moreGridAsk.hidden = cat !== 'ask';
 if (moreGridFun) {
 moreGridFun.hidden = cat === 'ask';
 moreGridFun.querySelectorAll('.more-item').forEach(it => {
-it.hidden = it.dataset.mcat !== cat;
+if (moreGroupMode) it.hidden = !GROUP_MORE_ITEM_IDS.has(it.id); // 群聊模式只显允许的 4 项
+else it.hidden = it.dataset.mcat !== cat;
 });
 }
-store.set('more-cat', cat);
+if (!moreGroupMode) store.set('more-cat', cat);
 }
 // v3.16.x：群聊页打开共享更多面板时复用同一分类过滤
 window.applyMoreCat = applyMoreCat;
+// v3.26.x：群聊打开/关闭共享面板时切换群聊过滤模式
+window.setMoreGroupMode = (on) => { moreGroupMode = !!on; applyMoreCat('tool', !!on); };
 document.querySelectorAll('#more-tabs .more-tab').forEach(t => t.addEventListener('click', (e) => { e.stopPropagation(); applyMoreCat(t.dataset.mcat); }));
 moreBtn.addEventListener('click', (e) => {
 e.stopPropagation();
@@ -2732,7 +3247,7 @@ const saved = store.get('more-cat');
 if (saved && MORE_CATS.indexOf(saved) >= 0) tab = saved;
 else if (store.get('more-tab') === 'ask') tab = 'ask'; // 旧两页签记忆迁移
 } catch (err) {}
-applyMoreCat(tab);
+applyMoreCat(tab, false); // v3.26.x：聊天页打开面板关闭群聊过滤模式，恢复全部分类
 closeIme(); // v3.5.116：收起输入法，面板不被键盘遮挡
 // v3.16.x：聊天页打开共享更多面板时隐藏 @群成员 按钮（仅群聊打开时显示）
 const tb = document.getElementById('gc-more-at');
@@ -2762,13 +3277,20 @@ if (Array.isArray(v)) return v.filter(g => Array.isArray(g) && Array.isArray(g[1
 } catch (e) {}
 return null;
 }
+// 用户改过分组后置位：防止启动期 IDB 兜底恢复把会话内的修改回滚掉（如删光后又复活）
+const pokeDirty = { ta: false, mine: false };
 function pokeUserGroupsSave(kind) {
+pokeDirty[kind] = true;
 try {
 const data = JSON.stringify(pokeUserGroups[kind]);
 store.set('poke-groups-' + kind, data);
 if (window.idbSet) window.idbSet(pokeUserGroupsKey(kind), data);
 } catch (e) {}
 }
+// v3.26.x：初始化只读不写。手机端 LS 缺键（iOS 系统清理/quota 写失败脏键/启动回填
+// 未完成）时，旧实现会用「默认空数据」同步回写 LS+IDB，把 IDB 备份覆盖掉——
+// 「我的拍一拍」新增条目永久丢失，版本更新刷新重开即复现。数据落库只在用户
+// 实际改动时发生（pokeUserGroupsSave），空默认不落盘。
 function pokeUserGroupsInit(kind) {
 const loaded = pokeUserGroupsLoad(kind);
 if (loaded) return loaded;
@@ -2777,26 +3299,37 @@ try {
 const v = JSON.parse(store.get('poke-user-' + kind) || 'null');
 if (Array.isArray(v)) legacy = v.filter(x => typeof x === 'string' && x.trim());
 } catch (e) {}
-const g = [['我的新增', legacy]];
-try {
-store.set('poke-groups-' + kind, JSON.stringify(g));
-if (window.idbSet) window.idbSet(pokeUserGroupsKey(kind), JSON.stringify(g));
-} catch (e) {}
-return g;
+return [['我的新增', legacy]];
 }
 const pokeUserGroups = { ta: pokeUserGroupsInit('ta'), mine: pokeUserGroupsInit('mine') };
-(function () {
-if (!window.idbGet) return;
-['ta', 'mine'].forEach(kind => {
-window.idbGet(pokeUserGroupsKey(kind)).then(v => {
-if (!v) return;
-try {
-const arr = JSON.parse(v);
-if (Array.isArray(arr) && arr.length > pokeUserGroups[kind].length) pokeUserGroups[kind] = arr;
-} catch (e) {}
-}).catch(() => {});
+function pokeGroupsCardCount(groups) {
+let n = 0;
+(groups || []).forEach(g => { if (Array.isArray(g) && Array.isArray(g[1])) n += g[1].length; });
+return n;
+}
+// IDB 兜底恢复：备份条目总数多于内存时采用。旧条件「分组数更多」在单分组数据下
+// 永不成立，救不回 1 组 N 条的常见数据。会话内已改过（pokeDirty）则跳过防回滚。
+function pokeAdoptFromIdb(kind) {
+if (pokeDirty[kind] || !window.idbGet) return Promise.resolve(false);
+return window.idbGet(pokeUserGroupsKey(kind)).then(v => {
+if (!v || pokeDirty[kind]) return false;
+let arr = null;
+try { arr = JSON.parse(v); } catch (e) { return false; }
+if (!Array.isArray(arr)) return false;
+if (pokeGroupsCardCount(arr) > pokeGroupsCardCount(pokeUserGroups[kind])) {
+pokeUserGroups[kind] = arr.filter(g => Array.isArray(g) && Array.isArray(g[1]));
+return true;
+}
+return false;
+}).catch(() => false);
+}
+function pokeAdoptAllRerender() {
+Promise.all([pokeAdoptFromIdb('ta'), pokeAdoptFromIdb('mine')]).then(adopted => {
+if ((adopted[0] || adopted[1]) && pokeCard && !pokeCard.hidden) renderPokeCard();
 });
-})();
+}
+if (window.__mochiDataReady) pokeAdoptAllRerender();
+else document.addEventListener('mochi-restore-done', pokeAdoptAllRerender);
 function pokeKindOf(card) {
 if (typeof card !== 'string') return 'mine';
 if (card.indexOf('你') >= 0) return 'mine';
@@ -2834,18 +3367,6 @@ pokeTabMine.dataset.ptab = 'mine';
 pokeTabsRow.appendChild(pokeTabPub);
 pokeTabsRow.appendChild(pokeTabTa);
 pokeTabsRow.appendChild(pokeTabMine);
-const pokeToolsRow = document.createElement('div');
-pokeToolsRow.className = 'poke-tools';
-const pokeNewGroupBtn = document.createElement('button');
-pokeNewGroupBtn.className = 'emoji-tool poke-tool';
-pokeNewGroupBtn.type = 'button';
-pokeNewGroupBtn.textContent = '＋ 新建分组';
-const pokeAddBtn = document.createElement('button');
-pokeAddBtn.className = 'emoji-tool poke-tool';
-pokeAddBtn.type = 'button';
-pokeAddBtn.textContent = '＋ 新增拍一拍';
-pokeToolsRow.appendChild(pokeNewGroupBtn);
-pokeToolsRow.appendChild(pokeAddBtn);
 const pokeGroupsBar = document.createElement('div');
 pokeGroupsBar.className = 'poke-groups';
 const pokeInputRow = document.createElement('div');
@@ -2858,10 +3379,35 @@ pokeInput.setAttribute('autocomplete', 'off');
 pokeInput.setAttribute('autocorrect', 'off');
 pokeInput.setAttribute('autocapitalize', 'off');
 pokeInput.setAttribute('spellcheck', 'false');
+const pokeInputSave = document.createElement('button');
+pokeInputSave.className = 'poke-input-save';
+pokeInputSave.type = 'button';
+pokeInputSave.textContent = '存入';
+pokeInputSave.title = '存到当前选中的分组';
 const pokeInputGo = document.createElement('button');
 pokeInputGo.className = 'poke-input-go';
 pokeInputGo.type = 'button';
-pokeInputGo.textContent = '拍一拍';
+pokeInputGo.textContent = '发送';
+// 存入：把输入的文字保存到当前选中分组（预设分组不可写，自动落到第一个用户分组）
+function pokeTargetGroup() {
+const groups = pokeUserGroups.mine;
+let target = groups.find(g => g[0] === pokeCurGroup) || groups[0];
+if (!target) { target = ['我的新增', []]; groups.push(target); }
+return target;
+}
+function savePokeInput() {
+const v = (pokeInput && pokeInput.value || '').trim();
+if (!v) { toast('先输入拍一拍文字'); return; }
+const target = pokeTargetGroup();
+if (target[1].indexOf(v) >= 0) { toast('「' + target[0] + '」已有相同的拍一拍'); return; }
+target[1].push(v);
+pokeUserGroupsSave('mine');
+pokeCurGroup = target[0];
+savePokePref();
+renderPokeCard();
+if (pokeInput) pokeInput.value = '';
+toast('已存入「' + target[0] + '」');
+}
 function doPokeInput() {
 const v = (pokeInput && pokeInput.value || '').trim();
 if (!v) { toast('先输入拍一拍文字'); return; }
@@ -2869,6 +3415,10 @@ sendPoke(v);
 if (pokeInput) pokeInput.value = '';
 closePokeCard();
 }
+pokeInputSave.addEventListener('click', (e) => {
+e.stopPropagation();
+savePokeInput();
+});
 pokeInputGo.addEventListener('click', (e) => {
 e.stopPropagation();
 doPokeInput();
@@ -2880,32 +3430,34 @@ doPokeInput();
 }
 });
 pokeInputRow.appendChild(pokeInput);
+pokeInputRow.appendChild(pokeInputSave);
 pokeInputRow.appendChild(pokeInputGo);
 if (pokeCard) {
 pokeCard.insertBefore(pokeTabsRow, pokeList);
-pokeCard.insertBefore(pokeToolsRow, pokeList);
 pokeCard.insertBefore(pokeGroupsBar, pokeList);
-pokeCard.insertBefore(pokeInputRow, pokeList);
+// 输入行放面板最底部（footer）：键盘弹起面板收缩时它是最后一行，离键盘最近、不会被盖住
+pokeCard.appendChild(pokeInputRow);
 }
 function sendPoke(action) {
-const name = chatPartnerName();
+// v3.26.x：存 {me}/{ta} 占位符而非字面昵称——渲染 T() 回填「我的昵称 + TA 的昵称」
+// （跟随改名），称呼功能（taFit）不再把昵称槽位改写成 他/ta/她
 let text;
 if (action.indexOf('你') >= 0) {
 if (action.charAt(0) === '你') {
-text = action.replace(/^你/, '我').replace(/(?!^)我(?![们])/g, name);
+text = '{me}' + action.slice(1).replace(/我(?![们])/g, '{ta}');
 } else if (action.charAt(0) === '我') {
-text = action.replace(/你(?![们])/g, name);
+text = action.replace(/你(?![们])/g, '{ta}');
 } else {
-text = '我 ' + action.replace(/你(?![们])/g, name);
+text = '{me} ' + action.replace(/你(?![们])/g, '{ta}');
 }
 } else if (action.indexOf('我') >= 0) {
 if (action.charAt(0) === '我') {
-text = '我 ' + action.slice(1).replace(/我(?![们])/g, name);
+text = '{me} ' + action.slice(1).replace(/我(?![们])/g, '{ta}');
 } else {
-text = '我 ' + action.replace(/我(?![们])/g, name);
+text = '{me} ' + action.replace(/我(?![们])/g, '{ta}');
 }
 } else {
-text = '我 ' + action;
+text = '{me} ' + action;
 }
 addRec({ side: 'in', text: text, special: 'poke' });
 if (window.logFish) window.logFish();
@@ -3047,6 +3599,17 @@ renderPokeCard();
 });
 pokeGroupsBar.appendChild(c);
 });
+if (pokeMode === 'mine') {
+const add = document.createElement('span');
+add.className = 'emoji-g-chip poke-g-add';
+add.textContent = '＋ 分组';
+add.title = '新建拍一拍分组';
+add.addEventListener('click', (e) => {
+e.stopPropagation();
+pokeNewGroupAction();
+});
+pokeGroupsBar.appendChild(add);
+}
 }
 function renderPokeCard() {
 const name = chatPartnerName();
@@ -3057,7 +3620,6 @@ pokeTabMine.textContent = pokeTabLabel('mine');
 pokeTabPub.classList.toggle('sel', pokeMode === 'public');
 pokeTabTa.classList.toggle('sel', pokeMode === 'ta');
 pokeTabMine.classList.toggle('sel', pokeMode === 'mine');
-if (pokeToolsRow) pokeToolsRow.hidden = pokeMode !== 'mine';
 if (pokeInputRow) pokeInputRow.hidden = pokeMode !== 'mine';
 pokeInput.placeholder = '输入拍一拍文字，如：拍了拍你的脸蛋';
 const groups = pokeTabGroups(pokeMode);
@@ -3069,7 +3631,7 @@ pokeList.innerHTML = pokeMode === 'public'
 ? '<div class="cc-empty">暂无公用拍一拍<br>请到 字卡库 → 公用字卡 → 拍一拍 添加</div>'
 : pokeMode === 'ta'
 ? '<div class="cc-empty">暂无拍一拍字卡<br>请到 字卡库 → 专属字卡 → 拍一拍 添加</div>'
-: '<div class="cc-empty">暂无拍一拍字卡<br>点击「＋ 新增拍一拍」添加，或直接输入拍一拍文字</div>';
+: '<div class="cc-empty">暂无拍一拍字卡<br>在下方输入文字，点「存入」添加</div>';
 return;
 }
 const cur = groups.find(g => g.key === pokeCurGroup) || groups[0];
@@ -3078,7 +3640,7 @@ pokeList.innerHTML = pokeMode === 'public'
 ? '<div class="cc-empty">该分组暂无公用拍一拍<br>请到 字卡库 → 公用字卡 → 拍一拍 添加</div>'
 : pokeMode === 'ta'
 ? '<div class="cc-empty">该分组暂无拍一拍字卡<br>请到 字卡库 → 专属字卡 → 拍一拍 添加</div>'
-: '<div class="cc-empty">该分组暂无拍一拍<br>点击「＋ 新增拍一拍」添加到该分组</div>';
+: '<div class="cc-empty">该分组暂无拍一拍<br>在下方输入文字，点「存入」添加到该分组</div>';
 return;
 }
 cur.cards.forEach((c, i) => {
@@ -3101,8 +3663,8 @@ pokeTabMine.addEventListener('click', (e) => {
 e.stopPropagation();
 if (pokeMode !== 'mine') { pokeMode = 'mine'; savePokePref(); renderPokeCard(); }
 });
-pokeNewGroupBtn.addEventListener('click', (e) => {
-e.stopPropagation();
+// 新建分组：入口在分组栏尾部的「＋ 分组」chip（renderPokeGroupsBar），仅我的拍一拍显示
+function pokeNewGroupAction() {
 window.openModal('新建拍一拍分组（当前为「' + pokeTabLabel(pokeMode) + '」）', '', (v) => {
 v = (v || '').trim();
 if (!v) { toast('请输入分组名'); return; }
@@ -3115,27 +3677,9 @@ savePokePref();
 renderPokeCard();
 toast('已新建分组「' + v + '」');
 });
-});
-pokeAddBtn.addEventListener('click', (e) => {
-e.stopPropagation();
-const kind = pokeMode; // 工具行仅在我的拍一拍显示，kind 恒为 'mine'
-const groups = pokeUserGroups[kind];
-let target = groups.find(g => g[0] === pokeCurGroup) || groups[0];
-if (!target) { target = ['我的新增', []]; groups.push(target); }
-const hint = '（将添加到「' + target[0] + '」，作为你的拍一拍）';
-window.openModal('新增拍一拍' + hint, '', (v) => {
-v = (v || '').trim();
-if (!v) { toast('请输入拍一拍文字'); return; }
-target[1].push(v);
-pokeUserGroupsSave(kind);
-pokeCurGroup = target[0];
-savePokePref();
-renderPokeCard();
-toast('已添加到「' + target[0] + '」');
-});
-});
+}
 document.addEventListener('contact-switched', function () {
-try { pokeUserGroups.ta = pokeUserGroupsInit('ta'); pokeUserGroups.mine = pokeUserGroupsInit('mine'); } catch (e) {}
+try { pokeDirty.ta = false; pokeDirty.mine = false; pokeUserGroups.ta = pokeUserGroupsInit('ta'); pokeUserGroups.mine = pokeUserGroupsInit('mine'); pokeAdoptAllRerender(); } catch (e) {}
 try { if (pokeCard) pokeCard.hidden = true; } catch (e) {}
 });
 const morePoke = document.getElementById('more-poke');
@@ -3418,6 +3962,7 @@ amtFen = genRpAmount(5200000);
 wish = pick(['心意', '给你花', '小礼物', '辛苦啦', '开心一下']);
 }
 if (amtFen < 1) return;
+const wallet = rpWalletGet();
 wallet.systemBalance -= amtFen;
 rpWalletSet(wallet);
 rpDailyIncr();
@@ -3439,11 +3984,9 @@ const k = ASK_DAILY_PREFIX + new Date().toISOString().slice(0, 10);
 store.set(k, String((Number(store.get(k)) || 0) + 1));
 }
 // v3.15.x：TA 也会随机「向 Mochi 申请」心意币——金额与红包同款随机分布（genRpAmount），
-// 概率门同自动红包（平时 4% / 七夕 8%），日上限 2 次；入 TA 的 systemBalance，聊天留 askcoin 卡片
+// 概率门固定 4%（不沿用红包七夕加成），无次数上限；入 TA 的 systemBalance，聊天留 askcoin 卡片
 function trySystemAskMochi() {
-if (askDailyCount() >= 2) return;
-const qixi = isQixiToday();
-const baseRate = qixi ? 0.08 : 0.04;
+const baseRate = 0.04;
 if (Math.random() >= baseRate) return;
 const amtFen = genRpAmount(5200000);
 if (amtFen < 1) return;
@@ -3551,7 +4094,7 @@ function rpRenderBalance() {
 const el = document.getElementById('rp-balance');
 if (!el) return;
 const w = rpWalletGet();
-el.textContent = '心意币 ¥' + (w.myBalance / 100).toFixed(2) + ' · ' + chatPartnerName() + ' ¥' + (w.systemBalance / 100).toFixed(2) + ' · 点此向 Mochi 申请';
+el.textContent = '心意币 ¥' + (w.myBalance / 100).toFixed(2) + ' · ' + chatPartnerName() + ' ¥' + (w.systemBalance / 100).toFixed(2) + ' · 向 Mochi 申请心意币';
 }
 // v3.15.x：余额行改为「向 Mochi 申请心意币」——不再直接改账本数值；
 // 选收款方（我/TA）输入申请金额，确定即模拟 Mochi 打款并入账（累加），留空点【完成】结束
@@ -3600,8 +4143,7 @@ staticText: hintTxt(),
 pills: [{ value: 'my', label: '我的心意币' }, { value: 'ta', label: taName + ' 的心意币' }],
 pill: 'my',
 placeholder: '输入申请金额（元），留空结束',
-inputmode: 'decimal',
-maxlength: 9
+inputmode: 'decimal'
 });
 if (ctl) ctl.okText('申请');
 }
@@ -3747,6 +4289,7 @@ try {
 const histList = document.getElementById('div-chat-history');
 if (histList && !histList.hidden && window.divineHistLoad) renderChatHistory();
 } catch (err) {}
+try { if (window.divineRenderTargets) window.divineRenderTargets('div-chat-targets'); } catch (err) {}
 }
 const moreDivine = document.getElementById('more-divine');
 if (moreDivine) {
@@ -3919,6 +4462,8 @@ return;
 if (chatDrawCancel) { try { chatDrawCancel(); } catch (err) {} chatDrawCancel = null; }
 const question = (document.getElementById('div-chat-question') || {}).value || '';
 const snapMode = chatDivineMode, snapCount = chatDivineCount;
+// v3.26.x：快照点击时的占卜对象——流程期间切换对象不影响本次记录归属
+const snapTarget = (window.divineGetTarget && window.divineGetTarget()) || '';
 const deck = snapMode === 'tarot' ? (window.__TAROT__ || []) : (window.__LENO__ || []);
 if (!window.startDivineDraw || !deck.length) { r.innerHTML = '<div class="div-result-empty">占卜牌库加载中…</div>'; return; }
 divDraw.textContent = '抽牌中…';
@@ -3938,12 +4483,16 @@ setTimeout(() => { try { window.divineSendResult(snapMode, cards, summary, quest
 }
 if (window.divineHistSave && window.divineHistLoad) {
 try {
+const record = { ts: Date.now(), mode: snapMode, count: snapCount, question: question, cards: cards, summary: summary };
+if (snapTarget && window.divineTargetName) record.target = window.divineTargetName(snapTarget);
 const list = window.divineHistLoad();
 if (!Array.isArray(list)) { if (window.divineHistSave) window.divineHistSave([]); }
 else {
-list.unshift({ ts: Date.now(), mode: snapMode, count: snapCount, question: question, cards: cards, summary: summary });
+list.unshift(record);
 window.divineHistSave(list);
 }
+// v3.26.x：选了对象（或不选）→ 同步写入该对象/当前桌面的主页「占卜记录」
+if (window.divineSaveToHomeHistory) { try { window.divineSaveToHomeHistory(record, snapTarget); } catch (err2) {} }
 } catch (err) {}
 try { renderChatHistory(); } catch (err) {
 try { if (window.__jsErrors) window.__jsErrors.push('divineHist: ' + (err && err.message)); } catch (e2) {}
@@ -4569,8 +5118,23 @@ document.addEventListener('contact-switched', function () {
 try { closeChatCall(); } catch (e) {}
 });
 if (pokeClose) pokeClose.addEventListener('click', (e) => { e.stopPropagation(); closePokeCard(); });
+// 冷启动回填预算把字卡库大键挂起在 IDB（__xyIdbDeferredKeys）时，聊天页表情包/拍一拍
+// 面板会读成空库。这里在面板打开时按需取回（复用字卡库同一套 hydrateLibScopes），
+// 完成后若面板仍打开则重绘——不启动自动拉取，遵守「用户正在看的场景才拉」红线。
+function hydrateCcForChatPanels(done) {
+try {
+if (window.libScopesDeferred && window.hydrateLibScopes &&
+window.libScopesDeferred(['public', 'own'])) {
+try { toast('字卡较多，正在加载…'); } catch (e) {}
+window.hydrateLibScopes(['public', 'own'], done);
+return true;
+}
+} catch (e) {}
+return false;
+}
 function openPokeCard() {
 if (!pokeCard) return;
+pokeAdoptAllRerender(); // 慢 IDB（iOS 挂后台杀连接）下 restore-done 兜底可能落空，开面板再补一次
 const ep = document.getElementById('emoji-panel');
 if (ep) ep.hidden = true;
 if (window.closeAvlib) window.closeAvlib();
@@ -4581,6 +5145,7 @@ if (pokeInput) pokeInput.value = '';
 try { const p = store.get('poke-tab'); if (p === 'mine') pokeMode = 'mine'; else if (p === 'ta') pokeMode = 'ta'; } catch (e) {}
 try { const g = store.get('poke-group-' + pokeMode); if (typeof g === 'string' && g) pokeCurGroup = g; } catch (e) {}
 renderPokeCard();
+hydrateCcForChatPanels(() => { if (pokeCard && !pokeCard.hidden) renderPokeCard(); });
 }
 document.addEventListener('click', (e) => {
 if (pokeCard && !pokeCard.hidden && !pokeCard.contains(e.target)) closePokeCard();
@@ -4604,20 +5169,22 @@ changed = true;
 });
 if (changed) saveFav(fav);
 }
-function favDup(list, f) {
-return list.some(x => (x.kind || 'msg') === (f.kind || 'msg') &&
+function favDup(list, f, by) {
+// v3.26.x：按归属判重——「我的收藏」与「联系人的收藏」是两个独立 tab，
+// TA 自动收藏的副本不应挡住用户收藏同一内容（反之亦然）
+return list.some(x => (x.by || 'me') === by && (x.kind || 'msg') === (f.kind || 'msg') &&
 (x.q || '') === (f.q || '') && (x.text || '') === (f.text || '') && x.ts === f.ts);
 }
 window.addMyFavItem = function (f) {
 const fav = getFav();
-if (favDup(fav, f)) return false;
+if (favDup(fav, f, 'me')) return false;
 fav.push(Object.assign({ by: 'me' }, f));
 saveFav(fav);
 return true;
 };
 window.addTaFavItem = function (f) {
 const fav = getFav();
-if (favDup(fav, f)) return false;
+if (favDup(fav, f, 'ta')) return false;
 fav.push(Object.assign({ by: 'ta' }, f));
 saveFav(fav);
 return true;
@@ -4655,8 +5222,8 @@ function closeMsgActions() {
 if (msgActions) msgActions.hidden = true;
 activeMsgEl = null;
 }
-function quoteSnapOf(m) {
-let qi = (m.parts || []).filter(p => p.k === 'img').map(p => p.v).slice(0, 3);
+function quoteTextOf(m) {
+const qi = (m.parts || []).filter(p => p.k === 'img').map(p => p.v).slice(0, 3);
 if (!qi.length && (m.type === 'sticker' || m.type === 'image')
 && typeof m.text === 'string'
 && (m.text.indexOf('data:') === 0 || /^https?:\/\//i.test(m.text))) {
@@ -4666,7 +5233,13 @@ let qt = m.text;
 if (m.type === 'voice') qt = '[语音] ' + String(qt || '').split('|||')[0];
 else if (m.type === 'sticker') qt = '表情包';
 else if (qi.length && (String(qt || '').indexOf('data:') === 0 || /^https?:\/\//i.test(String(qt || '')))) qt = '图片';
-return qi.length ? { t: qt, imgs: qi } : qt;
+// 兜底：type 仍是 text 却夹带 |||data: 载荷的记录（导入的字卡音频/历史数据）
+else if (typeof qt === 'string' && qt.indexOf('|||') > 0 && qt.indexOf('data:') > 0) qt = qt.split('|||')[0];
+return { text: qt, imgs: qi };
+}
+function quoteSnapOf(m) {
+const q = quoteTextOf(m);
+return q.imgs.length ? { t: q.text, imgs: q.imgs } : q.text;
 }
 function quoteEq(a, b) {
 if (a === b) return true;
@@ -4712,20 +5285,28 @@ if (tIdx < 0 || !jumpToMsg(tIdx)) toast('未找到原消息');
 });
 }
 if (body) {
-body.addEventListener('click', (e) => {
-const b = e.target.closest('.msg-bubble');
-if (!b) { closeMsgActions(); return; }
-if (e.target.closest('.msg-quote')) return;
+// v3.26.x：消息操作菜单（引用/收藏/撤回/编辑/删除）支持「长按 + 轻点」双手势。
+// 长按气泡弹出菜单，松开时抑制随之而来的轻点，避免菜单被立刻关闭；统一复用 openMsgActionsAt 打开逻辑。
+let msgHoldTimer = null;
+let msgHoldEl = null;
+let msgHoldFired = false;
+let msgSuppressClickUntil = 0;
+function msgActionEligible(t) {
+// 沿用原「点气泡弹菜单」的判定规则：可弹返回 {item, b}，不可弹返回 null（引用气泡/拍一拍/撤回/已读不回等）
+const b = t.closest('.msg-bubble');
+if (!b) return null;
+if (t.closest('.msg-quote')) return null;
 const item = b.closest('.msg');
-if (!item) return;
-const special = item.classList.contains('msg-poke');
-if (special) return;
-if (e.target.closest('.msg-poke-seg')) return;
-if (b.textContent.indexOf('撤回了一条消息') >= 0 || b.textContent.indexOf('已读不回') >= 0) return;
-e.stopPropagation();
+if (!item || item.classList.contains('msg-poke')) return null;
+if (t.closest('.msg-poke-seg')) return null;
+const txt = b.textContent;
+if (txt.indexOf('撤回了一条消息') >= 0 || txt.indexOf('已读不回') >= 0) return null;
+return { item, b };
+}
+function openMsgActionsAt(item, b) {
 activeMsgEl = item;
 activeSide = item.classList.contains('msg-out') ? 'out' : 'in';
-if (msgActions) {
+if (!msgActions) return;
 msgActions.querySelectorAll('.ma-mine').forEach(b2 => b2.hidden = activeSide !== 'out');
 const delBtn = msgActions.querySelector('.ma-del-ta');
 if (delBtn) {
@@ -4750,6 +5331,35 @@ y = aboveFits || !belowFits ? y : below;
 msgActions.style.left = x + 'px';
 msgActions.style.top = y + 'px';
 }
+body.addEventListener('contextmenu', (e) => {
+// 长按/右键由应用接管：抑制系统默认菜单与文本选中，但不吞掉「引用气泡跳原消息」等其它元素自身行为
+if (e.target.closest('.msg-bubble') && !e.target.closest('.msg-quote')) e.preventDefault();
+});
+body.addEventListener('touchstart', (e) => {
+const r = msgActionEligible(e.target);
+if (!r) return;
+msgHoldEl = r.item;
+msgHoldTimer = setTimeout(() => {
+msgHoldTimer = null;
+msgHoldFired = true;
+msgSuppressClickUntil = Date.now() + 800; // 松开后抑制随之而来的轻点，防菜单被刚弹即关
+if (window.getSelection) { try { const s = window.getSelection(); if (s && s.removeAllRanges) s.removeAllRanges(); } catch (err) {} }
+openMsgActionsAt(msgHoldEl, r.b);
+}, 500);
+}, { passive: true });
+function endMsgHold() { if (msgHoldTimer) { clearTimeout(msgHoldTimer); msgHoldTimer = null; } }
+body.addEventListener('touchmove', endMsgHold, { passive: true });   // 手指滑动=滚动，取消长按
+body.addEventListener('touchend', endMsgHold);
+body.addEventListener('touchcancel', endMsgHold);
+body.addEventListener('click', (e) => {
+if (msgSuppressClickUntil && Date.now() < msgSuppressClickUntil) { e.preventDefault(); e.stopPropagation(); return; }
+const r = msgActionEligible(e.target);
+if (!r) {
+if (!e.target.closest('.msg-bubble') && !e.target.closest('.msg-quote')) closeMsgActions();
+return;
+}
+e.stopPropagation();
+openMsgActionsAt(r.item, r.b);
 });
 document.addEventListener('click', (e) => {
 if (msgActions && !msgActions.hidden && !msgActions.contains(e.target)) closeMsgActions();
@@ -4764,28 +5374,18 @@ const idx = activeMsgEl ? Number(activeMsgEl.dataset.idx) : -1;
 const rec = (idx >= 0 && msgs[idx]) ? msgs[idx] : null;
 if (act === 'quote') {
 if (rec) {
-const qimgs = (rec.parts || []).filter(p => p.k === 'img').map(p => p.v).slice(0, 3);
-if (!qimgs.length && (rec.type === 'sticker' || rec.type === 'image')
-&& typeof rec.text === 'string'
-&& (rec.text.indexOf('data:') === 0 || /^https?:\/\//i.test(rec.text))) {
-qimgs.push(rec.text);
-}
-let qtext = rec.text;
-if (rec.type === 'voice') {
-qtext = '[语音] ' + String(rec.text || '').split('|||')[0];
-} else if (rec.type === 'sticker') {
-qtext = '表情包';
-} else if (qimgs.length && (String(qtext || '').indexOf('data:') === 0 || /^https?:\/\//i.test(String(qtext || '')))) {
-qtext = '图片';
-}
-lastQuote = { side: rec.side, text: qtext, type: rec.type, imgs: qimgs, idx: idx };
+const qsnap = quoteTextOf(rec);
+lastQuote = { side: rec.side, text: qsnap.text, type: rec.type, imgs: qsnap.imgs, idx: idx };
 renderDraft();
 }
 closeMsgActions();
 } else if (act === 'fav') {
 if (rec) {
 const fav = getFav();
-if (fav.some(f => f.side === rec.side && f.text === rec.text)) {
+// v3.26.x 修复（iOS 反馈：收藏 5 条页面只显示 3 条、再收藏提示已收藏过却没显示）：
+// 判重只限「我的」收藏（TA 自动收藏的 by:'ta' 副本在另一个 tab，不应挡住我的收藏），
+// 且加 ts 比较——同文案的不同消息（时间戳不同）允许分别收藏，仅拦截同一条消息重复点收藏
+if (fav.some(f => (f.by || 'me') !== 'ta' && f.side === rec.side && (f.text || '') === (rec.text || '') && (!rec.ts || f.ts === rec.ts))) {
 toast('已收藏过这条消息');
 } else {
 fav.push({ side: rec.side, text: rec.text, type: rec.type || 'text', ts: rec.ts || Date.now(), by: 'me', mood: (rec.mood || []).slice(), parts: rec.parts && rec.parts.length ? rec.parts.map(p => ({ k: p.k, v: p.v, sub: p.sub })) : undefined });
@@ -4806,6 +5406,12 @@ const val = (v || '').trim();
 if (!val) return;
 rec.text = val;
 rec.type = 'text';
+// v3.26.x 修复（红米 K80 Chrome）：普通文字消息渲染走 rec.parts（renderMsg 的
+// parts 分支优先于 rec.text）。旧逻辑只改 rec.text，发送新消息触发该气泡重渲染时，
+// 老 parts 里的原文被重新渲染出来 → 编辑内容「变回编辑前」。重建 parts：保留图片段，
+// 文字段替换为新值。
+rec.parts = (Array.isArray(rec.parts) ? rec.parts.filter(p => p && p.k !== 'text') : []);
+rec.parts.push({ k: 'text', v: val });
 syncFavMsgText(orig, val); // v3.7.x：编辑后收藏夹里同一条消息快照同步更新（含 TA 收藏）
 sessionChangedIdx.add(idx); // v3.6.x：标记本会话变更，防 loadMsgs 合并回滚编辑
 saveMsgs();
@@ -4902,7 +5508,7 @@ const re = /((?:sticker|image):)?(data:image\/[a-zA-Z0-9.+-]+;base64,[A-Za-z0-9+
 let last = 0, mm;
 while ((mm = re.exec(str))) {
 html += escTxt(str.slice(last, mm.index));
-html += '<img class="fav-item-img" src="' + mm[2] + '" alt="图片">';
+html += '<img class="fav-item-img" src="' + mm[2] + '" alt="图片" loading="lazy" decoding="async">';
 last = mm.index + mm[0].length;
 }
 html += escTxt(str.slice(last));
@@ -4938,7 +5544,7 @@ fillAvatar(m.querySelector('.msg-av'), 'cs-avatar-user');
 let html = '<div class="fav-item-card">' +
 '<span class="fav-item-tag">朋友圈动态</span>' +
 (f.text ? '<div class="fav-item-body">' + favTextHtml(f.text) + '</div>' : '') +
-((f.imgs && f.imgs.length) ? '<div class="fav-item-imgs">' + f.imgs.map(u => '<img src="' + attrEsc(u) + '" alt="图片">').join('') + '</div>' : '') +
+((f.imgs && f.imgs.length) ? '<div class="fav-item-imgs">' + f.imgs.map(u => '<img src="' + attrEsc(u) + '" alt="图片" loading="lazy" decoding="async">').join('') + '</div>' : '') +
 '</div>';
 m.innerHTML = html + side;
 fillAvatar(m.querySelector('.msg-av'), 'cs-avatar-user');
@@ -4967,10 +5573,14 @@ if (window.viewChatImage) window.viewChatImage(img.src);
 });
 });
 } else {
+const isVoice = f.type === 'voice' || (typeof f.text === 'string' && f.text.indexOf('|||data:audio/') > 0);
 const isImg = f.type === 'sticker' || f.type === 'image' || (typeof f.text === 'string' && f.text.indexOf('data:') === 0);
-if (isImg) {
+if (isVoice) {
+b.style.padding = '8px 10px';
+fillVoiceBubble(b, f.text);
+} else if (isImg) {
 b.style.padding = '6px';
-b.innerHTML = '<img class="msg-img" src="' + f.text + '" alt="表情">';
+b.innerHTML = '<img class="msg-img" src="' + attrEsc(f.text) + '" alt="表情">';
 } else {
 b.innerHTML = '<span style="opacity:.85">' + escTxtBr(f.text) + '</span>';
 }
@@ -5098,7 +5708,10 @@ function saveEmojiGroupPref() {
 // v3.15.x：mode 一并持久化——每次打开表情包直接落在上次用的模式+分组，不用重复点
 store.set('emoji-last', JSON.stringify({ mode: emojiMode, ta: emojiCurGroup, mine: myCurGroup, pub: pubCurGroup }));
 }
-(function () {
+// v3.26.x：把上次 tab/分组偏好恢复抽成函数，在模块初始化 + 每次打开面板 + 切换联系人时
+// 都用 store 里的 emoji-last 重新落位——确保打开表情包永远落在「上次用的顶部分组 + 上次打开的表情包分组」，
+// 不再因为 idbRestore 晚于模块初始化（回填前读空）或切换联系人后没重读而回退到默认「TA 的表情包」。
+function loadEmojiPref() {
 try {
 const pref = JSON.parse(store.get('emoji-last') || 'null');
 if (pref && typeof pref === 'object') {
@@ -5108,7 +5721,8 @@ if (typeof pref.mine === 'string') myCurGroup = pref.mine;
 if (typeof pref.pub === 'string') pubCurGroup = pref.pub;
 }
 } catch (e) {}
-})();
+}
+loadEmojiPref();
 function myEmojiLoad() {
 try { const v = JSON.parse(myEmojiStore().get('my-emoji-groups') || 'null'); if (Array.isArray(v)) return v; } catch (e) {}
 return [];
@@ -5367,6 +5981,7 @@ updateBatchCount();
 }
 function openEmojiPanel() {
 if (!emojiPanel) return;
+loadEmojiPref(); // v3.26.x：打开即按上次用的顶部分组+分组落位（覆盖 idbRestore 晚到 / 切换联系人未重读的场景）
 reloadMyEmojiFromIdb();
 const pc = document.getElementById('poke-card');
 if (pc) pc.hidden = true;
@@ -5379,6 +5994,7 @@ renderEmojiPanel();
 emojiPanel.hidden = false;
 scrollChatBottom();
 if (morePanel) morePanel.hidden = true;
+hydrateCcForChatPanels(() => { if (emojiPanel && !emojiPanel.hidden) renderEmojiPanel(); });
 }
 function closeEmojiPanel() {
 if (emojiPanel) emojiPanel.hidden = true;
@@ -5405,6 +6021,7 @@ if (!emojiPanel.hidden) renderEmojiPanel();
 }
 document.addEventListener('contact-switched', function () {
 myGroups = myEmojiLoad();
+loadEmojiPref(); // v3.26.x：切换联系人后按该桌面的上次 tab/分组偏好落位，不复用上一桌面状态
 if (!emojiPanel.hidden) renderEmojiPanel();
 reloadMyEmojiFromIdb();
 });
@@ -5704,11 +6321,28 @@ scrollChatBottom();
 window.openVoicePanelFor = function (onSend) { openVoicePanel({ onSend: onSend }); };
 function pickVoiceMime() {
 if (typeof MediaRecorder === 'undefined' || !MediaRecorder.isTypeSupported) return '';
+// 优先级：mp4/aac 在最前——这是本机「能录又能播」的稳妥格式（字卡里 mp3/caf/amr/aac 都能播，
+// mp4/aac 覆盖面最广，也是 iOS Safari 唯一可录可播的格式）。webm/opus 只做兜底：
+// 部分安卓 WebView（vivo/iQOO 的雨见等）对 webm/opus 能录却解不了——录出来试听/播放没声。
 const list = ['audio/mp4', 'audio/aac', 'audio/webm;codecs=opus', 'audio/webm', 'audio/ogg;codecs=opus'];
 for (let i = 0; i < list.length; i++) {
 try { if (MediaRecorder.isTypeSupported(list[i])) return list[i]; } catch (e) {}
 }
 return '';
+}
+// 获取麦克风轨道：先以「关闭回声消除/降噪/自动增益 + 单声道」请求——这是 vivo/iQOO 等
+// 安卓机上「权限开了却录不到声/录出来为空」的已知根因；若该约束组合不被设备支持
+//（OverconstrainedError 等）则回退到最普通的 {audio:true}，绝不让报障机型彻底录不了。
+async function acquireVoiceStream() {
+const tries = [
+  { audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false, channelCount: 1 } },
+  { audio: true }
+];
+let lastErr = null;
+for (let i = 0; i < tries.length; i++) {
+try { return await navigator.mediaDevices.getUserMedia(tries[i]); } catch (e) { lastErr = e; }
+}
+throw lastErr;
 }
 async function startVoiceRec() {
 if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia || typeof MediaRecorder === 'undefined') {
@@ -5716,7 +6350,7 @@ toast('当前浏览器不支持录音'); return;
 }
 let stream = null;
 try {
-stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+stream = await acquireVoiceStream();
 } catch (e) {
 toast(e && e.name === 'NotAllowedError' ? '麦克风权限被拒绝，请在浏览器设置里允许后重试' : '无法访问麦克风');
 return;
@@ -5731,6 +6365,16 @@ rec = mime ? new MediaRecorder(stream, { mimeType: mime }) : new MediaRecorder(s
 } catch (e) {}
 if (!rec) { voiceStopStream(); toast('当前浏览器不支持录音'); return; }
 rec.ondataavailable = (ev) => { if (ev.data && ev.data.size) voiceChunks.push(ev.data); };
+rec.onerror = (ev) => {
+  try {
+    if (voiceTimer) { clearInterval(voiceTimer); voiceTimer = null; }
+    if (voiceVisHandler) { document.removeEventListener('visibilitychange', voiceVisHandler); voiceVisHandler = null; }
+    voiceStopStream();
+    voiceRec = null;
+    renderVoiceIdle();
+  } catch (e) {}
+  toast('录音设备出错，请检查麦克风后重试');
+};
 rec.onstop = onVoiceRecStop;
 voiceRec = rec;
 voiceStartTs = Date.now();
@@ -5808,16 +6452,22 @@ if (voiceRec && voiceRec.state === 'recording') stopVoiceRec(false);
 else await startVoiceRec();
 }
 function toggleVoicePlay() {
-if (!voiceDataUrl) return;
+if (!voiceDataUrl) { toast('还没有录音'); return; }
 if (voicePreviewAudio && !voicePreviewAudio.paused) { voiceStopPreview(); return; }
 voiceStopPreview();
 const a = new Audio(voiceDataUrl);
 voicePreviewAudio = a;
+// v3.16.x 修复：把 Audio 元素挂到 DOM 再播——部分安卓 WebView（雨见等）对未挂载的
+// Audio 会静默空放（play() 走完却不出声），挂进 DOM 走标准解码管线更稳；播完/出错即卸
+a.style.display = 'none';
+document.body.appendChild(a);
+const detached = () => { try { if (a.parentNode) a.parentNode.removeChild(a); } catch (e) {} if (voicePreviewAudio === a) voicePreviewAudio = null; };
 const pb = document.getElementById('voice-play-btn');
 if (pb) pb.classList.add('playing');
-a.addEventListener('ended', voiceStopPreview);
-a.addEventListener('error', () => { voiceStopPreview(); toast('语音播放失败'); });
-a.play().catch(() => { voiceStopPreview(); toast('语音播放失败'); });
+const cleanup = () => { detached(); voiceStopPreview(); };
+a.addEventListener('ended', () => { detached(); voiceStopPreview(); });
+a.addEventListener('error', () => { cleanup(); toast('语音播放失败'); });
+a.play().then(() => {}).catch(() => { cleanup(); toast('语音播放失败'); });
 }
 let voiceSendTarget = null; // 群聊等外部页面打开语音面板时设置：function(dataUrl, durSec) 把录好的语音发到自己的消息列表
 function sendVoiceMsg() {
@@ -5835,7 +6485,6 @@ closeVoicePanel();
 if (window.playSfx) window.playSfx('out');
 if (window.logFish) window.logFish();
 scheduleReply();
-toast('语音已发送');
 }
 if (micBtn) micBtn.addEventListener('click', (e) => {
 e.stopPropagation();
@@ -6237,7 +6886,7 @@ bar.appendChild(img);
 }
 const t = document.createElement('span');
 t.className = 'chat-draft-quote-text';
-const raw = lastQuote.text || '';
+const raw = quoteTextSafe(lastQuote.text || '');
 const hidePh = !!(thumb && QUOTE_PLACEHOLDER.test(raw));
 t.textContent = (raw.indexOf('data:') === 0 && raw.length > 64)
 ? (lastQuote.type === 'sticker' ? '表情包' : '图片')
@@ -6463,7 +7112,14 @@ if (window.idbGet) {
 const myPrefix = window.activePrefix();
 window.idbGet(myPrefix + ':fav-msgs').then(v => {
 if (window.activePrefix() !== myPrefix) return;
-if (v && typeof v === 'string' && v.length > 2) store.set('fav-msgs', v);
+if (v && typeof v === 'string' && v.length > 2) {
+// v3.26.x 修复（iOS 收藏丢失）：只在本地无收藏时从 IDB 补入，不再无条件覆盖——
+// idbSet 是异步 fire-and-forget，iOS 杀后台时 IDB 可能落后于 localStorage，
+// 无条件覆盖会把最新收藏回滚成旧快照（收藏 5 条重开后只剩 3 条）
+let cur = null;
+try { cur = store.get('fav-msgs'); } catch (e) {}
+if (!cur || cur.length <= 2) store.set('fav-msgs', v);
+}
 });
 }
 } catch (e) {}

@@ -28,54 +28,184 @@
 <body>
   <!-- 开屏加载动画 -->
   <div class="splash" id="splash">
-    <div class="splash-box">
-      <div class="splash-logo">
-        <svg viewBox="0 0 24 24" fill="none" stroke="#111111" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 21s-7.5-4.7-9.3-9A5.3 5.3 0 0112 6.4a5.3 5.3 0 019.3 5.6c-1.8 4.3-9.3 9-9.3 9z"/></svg>
-      </div>
-      <div class="splash-title">mochi 摸鱼字卡</div>
-      <!-- v3.5.112：开屏公告（发布说明） -->
-      <!-- v3.6.x：公告内容可由 notice.json 远程覆盖（clock.js 拉取），此处写死内容为离线兜底 -->
-      <div class="splash-notice" id="splash-notice">
-        <div class="splash-notice-sub">【8.12开搓三十个小时，8.15发布，目前还在日更修，暂时不建议开始二传二改】</div>
-        <div class="splash-notice-list">
-          <p>1. 感谢内测反馈：大家的每条反馈我都有认真看，谢谢参与内测的各位</p>
-          <p>2. mochi字卡内测时间已定8.15～8.29（链接已在GitHub，但内测时间内暂不公开宣传）</p>
-          <p>3. mochi字卡8.30完全公开后可二传二改。在边修边部署网站，有问题可以报修，使用时如果有问题也可以重新刷新用新版试试，修一天我会部署一天</p>
-          <p>4. 不开测试群，有问题直接评论和私信</p>
-          <p>5. 反馈问题请附上手机型号和浏览器，因为很多问题不是代码本身出错，大部分问题是因为不同设备差异出现的特定bug</p>
-          <p>6. 关于bug：如果参与测试的人较多，不同设备差异导致的bug我可能无法全部修完——如果需要二传二改和自行部署，建议等我公开发帖后的版本，自己拿最新版代码让AI协助修复。</p>
-          <p>7. 使用规范（8.30完全公开后适用）：支持二传、二改和自行部署，但要遵守——转载要署名（小红书@言序（1842523578））、二次修改要注明原作者、禁止商用。</p>
-          <p>8. 网站与我更新修复问题是同步的，可查看开屏最新部署时间。如果浏览器还没进入新版，可以关掉浏览器再打开多试几次流量刷新，或者过一段时间再打开</p>
-          <p>9. Mochi字卡虽然是以我的另一个字卡「星言」为基础修改的，但字卡基础回复逻辑和灵感来源：小红书@milk（2777299956）；帮我决定功能参考：小红书@FelixFelicis（9416318007）。</p>
-          <p>10. 新增可导入milk字卡库的【主字卡】【emoji】【拍一拍】</p>
-          <p>11. 关于数据丢失：有可能有bug，也有可能是浏览器触发丢失。如果不是高频率丢失，就是正常情况，浏览器自身正常概率丢失数据，所以需要备份。目前还在内测更新多，也有可能更新的时候出现问题，建议提示有新版本需要刷新使用的时候备份一下数据</p>
-          <p>12. 关于更新和bug修复：其实灵感是有的，就是修改和修设备bug要花的时间太多，所以会比较慢，这点确实很力竭。网站一直有部署更新，跟我反馈的每个问题都修了，但是否修好只能用自己的设备验证，我没有设备，无法验证修复程度。反馈问题后都可以晚点刷新到新版试试（消息太多，反馈的问题修完后不会一一回复已修，可以晚一些刷新新版本后再试）。另外开屏是无法跳过的，只能等加载完后点击进入</p>
+    <div class="splash-box" id="splash-box">
+      <!-- v3.8.y：顶部品牌区统一装进一个卡片框（logo/标题/署名/原作信息成一个整体，更端庄精致） -->
+      <div class="splash-brandcard">
+        <div class="splash-logo">
+          <svg viewBox="0 0 24 24" fill="none" stroke="#111111" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 21s-7.5-4.7-9.3-9A5.3 5.3 0 0112 6.4a5.3 5.3 0 019.3 5.6c-1.8 4.3-9.3 9-9.3 9z"/></svg>
+        </div>
+        <div class="splash-title">mochi 摸鱼字卡</div>
+        <!-- v3.8.y：署名（小红书）移到顶部，紧跟标题下方 -->
+        <div class="splash-brand">小红书@言序（1842523578）</div>
+        <!-- v3.8.y：原作/部署信息——本人原作本人部署，使用网站 + GitHub 库（每条单行完整显示） -->
+        <div class="splash-source">
+          <div class="splash-source-line">本人原作，本人部署。</div>
+          <div class="splash-source-line">使用网站为：<span class="splash-source-url">https://ling233330-star.github.io/mochi/</span></div>
+          <div class="splash-source-line">github库为：<span class="splash-source-url">https://github.com/ling233330-star/mochi</span></div>
         </div>
       </div>
-      <div class="splash-dots"><i></i><i></i><i></i></div>
-      <div class="splash-brand">小红书@言序（1842523578）</div>
-      <div class="splash-ver" id="splash-ver" data-build-ts="__BUILD_TS__">Mochi 字卡传讯 __APP_VERSION__ · __BUILD_INFO__</div>
+      <!-- v3.5.112：开屏公告（发布说明） -->
+      <!-- v3.6.x：公告内容可由 notice.json 远程覆盖（clock.js 拉取），此处写死内容为离线兜底 -->
+      <!-- v3.8.x：开屏即公告1页——原「开屏公告 + 点进入后的报修确认层」两页合并为一页：
+           全部说明直接展示在开屏上，点底部【点击进入】即进入（点击即视为已阅读知晓），无二次确认层 -->
+      <div class="splash-notice" id="splash-notice">
+        <div class="splash-notice-title">Mochi字卡 · 开屏说明</div>
+        <div class="splash-notice-sub">（请认真阅读）</div>
+        <div class="splash-notice-list">
+          <div class="splash-summary">
+            <p class="splash-summary-title">必读摘要</p>
+            <p>本站完全免费，开放二传二改，但禁止商用、禁止以盈利为目的。</p>
+            <p>报修 / 反馈请按【手机型号 + 浏览器 + 具体现象】提交，缺一不回；基础疑问可直接问 AI，比我回复快。</p>
+            <p>系统或浏览器版本不同，适配表现可能不同，属正常现象。</p>
+            <p>数据丢失属浏览器正常概率，请定期备份。</p>
+            <p>完整说明在各章节内，可点上方目录跳转查看。</p>
+          </div>
+          <div class="splash-sec-wrap splash-sec-collapsible is-collapsed">
+            <p class="splash-sec">其他说明与常见问题</p>
+            <div class="splash-sec-content">
+              <div class="splash-tip">
+                <p>本站完全免费，没有收过任何人一分钱，个人出资和花费时间搭建的。开放二传二改但禁止以盈利为目的。</p>
+              </div>
+              <div class="splash-tip">
+                <p class="splash-tip-h">关于“会不会做成 App”</p>
+                <p>暂不考虑。原因是网站功能非常多——如果功能少还好说，功能太多的情况下，做成 App 可能出现的 Bug 只会更多，而且和设备、浏览器一样存在适配问题：不同手机的屏幕、系统、性能都不一样，要做到所有手机都适配，Bug 可能需要全部重写一遍。我没有这种精力和金钱。</p>
+              </div>
+              <div class="splash-tip">
+                <p class="splash-tip-h">关于“自己转 App 使用”</p>
+                <p>类似“一个木函”那种链接转应用的方式，没有我的原代码，本质是浏览器套壳，不是真正的 App，反而可能出现非常多的适配问题。所以不如直接浏览器使用，体验更稳定。</p>
+              </div>
+              <div class="splash-tip">
+                <p>本站的系统预设字卡都是补充类和小功能衍生字卡，关于个人使用得根据个人情况添加mj聊天字卡。</p>
+                <p>聊天、写信、朋友圈 添加 自定义字卡里的【公用字卡】和【专享字卡】即可</p>
+              </div>
+            </div>
+          </div>
+          <div class="splash-sec-wrap">
+            <p class="splash-sec">【一、当前状态】</p>
+            <p class="splash-item">8.12开搓，8.15~8.29内测，谢谢参与内测的各位。</p>
+            <p class="splash-item">Mochi字卡 8.29 已完全公开，可二传二改。</p>
+            <p class="splash-item">网站与我更新修复问题是同步的：边修边部署，修一天部署一天；开屏有最新部署时间。</p>
+            <p class="splash-item">如果浏览器还没进入新版，可以关掉浏览器再打开，多试几次流量刷新，或者过一段时间再打开。</p>
+            <p class="splash-sub">【关于反馈与建议】</p>
+            <p class="splash-item">有问题可以在评论区或互助群艾特我，但我精力有限，不一定全部回复也不一定及时回复。</p>
+            <p class="splash-bullet">另外小红书可能会吞消息，如果没收到回复，可以重复艾特我。</p>
+            <p class="splash-item">网站首先是做给我自己用的，不需要的细节不做，所以不一定采纳建议。</p>
+            <p class="splash-bullet">个人精力有限，许愿的功能不一定做，按我自己的节奏和需求调整。</p>
+            <p class="splash-item">做这个网站花了我非常多的时间、精力和心血，自己做过网站的都能明白。</p>
+            <p class="splash-item">本站完全免费，用不用随你。我不是客服，没有义务按任何人的标准修改。</p>
+            <p class="splash-bullet">提建议欢迎，指手画脚免谈。无法接受的请使用其他网站。或自行修改代码，本站已公开全部代码且开了二传二改权限。谢谢配合。</p>
+          </div>
+          <div class="splash-sec-wrap">
+            <p class="splash-sec">【二、关于 Bug 与报修】</p>
+            <p class="splash-sub">为什么不同设备表现不一样：</p>
+            <p class="splash-bullet">不同手机型号和浏览器都有可能出现不同的适配问题；</p>
+            <p class="splash-bullet">即使是同一个手机、同一个浏览器，系统版本不同、浏览器版本不同，也可能出现不同表现；</p>
+            <p class="splash-bullet">我自己的设备一直在用，发现bug会自己修，但我没有其他人的手机，无法验证其他设备上的问题；</p>
+            <p class="splash-bullet">所以光说"用不了""点不动""好多bug"是不够的——没有【手机型号 + 浏览器 + 具体现象】，我这边真的没法查。</p>
+            <p class="splash-sub">Bug 报修格式：</p>
+            <p class="splash-item">请按【手机型号 + 浏览器 + 具体现象】提交，缺一不回。</p>
+            <p class="splash-bullet">例：小米14 / 自带浏览器 / 点击字卡没反应</p>
+            <p class="splash-sub">问「为什么会出现这个问题」这类基础疑问：</p>
+            <p class="splash-item">建议直接问 AI，比我回复快。</p>
+            <p class="splash-item">反馈后不需要等我回复：消息太多，修完会直接部署，可以晚些刷新到新版再试。反馈的每个问题都修了，但能否修好只能用自己的设备验证，我没有其他设备，无法验证修复程度。</p>
+            <p class="splash-item">如果有设备问题bug一直修不好，我建议可以拿我的代码自行部署和修缮，有自己的手机自己验证bug是否修复会方便很多。</p>
+            <p class="splash-item">8.29公开已开群友互助群，但我不一定有时间看，只是群友互助群，有问题直接评论或群里艾特，个人精力有限也不一定及时回复。</p>
+            <p class="splash-item">关于数据丢失：有可能有bug，也有可能是浏览器触发丢失。如果不是高频率丢失，就是正常情况（浏览器自身正常概率丢失数据），需要定期备份。建议提示有新版本需要刷新时先备份数据。</p>
+          </div>
+          <div class="splash-sec-wrap">
+            <p class="splash-sec">【三、关于浏览器使用与桌面快捷方式】</p>
+            <p class="splash-sub">数据不互通说明：</p>
+            <p class="splash-item">手机浏览器打开网站使用，和把网站安装快捷方式到手机桌面使用，是两种使用方式。</p>
+            <p class="splash-item">浏览器限制有可能会自行隔离数据，导致两边数据不互通——之前使用的数据，只能自己手动导入。</p>
+            <p class="splash-sub">重要提醒：</p>
+            <p class="splash-item">浏览器打开网站 和 安装到桌面的快捷方式，不能同时打开使用，会导致两边数据不统一。</p>
+          </div>
+          <div class="splash-sec-wrap">
+            <p class="splash-sec">【四、关于全屏模式失效】</p>
+            <p class="splash-item">如果你是把浏览器切到后台，再切回来，全屏会失效——这是浏览器限制，只能手动重新开全屏。</p>
+            <p class="splash-item">或者可以使用“浏览器安装快捷方式到手机桌面”的方式使用，这样可以全屏。</p>
+            <p class="splash-sub">但注意：</p>
+            <p class="splash-item">手机自身顶部栏是手机系统限制，需要自己手动开全屏模式隐藏，且切到后台后同样会失效。</p>
+          </div>
+          <div class="splash-sec-wrap">
+            <p class="splash-sec">【五、使用规范（8.29 完全公开后适用）】</p>
+            <p class="splash-item">本站完全免费，没有收过任何人一分钱，个人出资和花费时间搭建的。开放二传二改但禁止以盈利为目的。</p>
+            <p class="splash-sub">许可与署名：</p>
+            <p class="splash-item">Mochi字卡为原创独立作品（即原版），代码已在GitHub完全公开，支持私人部署，与网站同步更新</p>
+            <p class="splash-item">可自由二传、二改、自行部署；必须保留署名：小红书 @言序（1842523578）（禁止删除或修改）</p>
+            <p class="splash-item">二次修改要注明原作者；借鉴功能或代码，希望标注灵感来源</p>
+            <p class="splash-item">禁止商用</p>
+            <p class="splash-item">本站并非复刻他人网站，代码均从零编写</p>
+            <p class="splash-item">星言字卡为同一作者的另一部独立作品，其本体禁止二传二改</p>
+            <p class="splash-item">开屏公告为本站内容，不可删除或修改</p>
+            <p class="splash-sub">二传二改说明：</p>
+            <p class="splash-bullet">二传：可自由转发、转载、分享本站链接与文件，传播方式不限</p>
+            <p class="splash-bullet">二改：可自由修改、二次开发、自行部署，代码已在 GitHub 完全公开、与网站同步更新</p>
+            <p class="splash-bullet">8.29 完全公开后即可二传二改</p>
+            <p class="splash-bullet">必须保留署名：小红书 @言序（1842523578），禁止删除或修改</p>
+            <p class="splash-bullet">二次修改要注明原作者；借鉴功能或代码，希望标注灵感来源</p>
+            <p class="splash-bullet">禁止商用、禁止以盈利为目的</p>
+          </div>
+          <div class="splash-sec-wrap">
+            <p class="splash-sec">【六、版权与灵感来源】</p>
+            <p class="splash-sub">许可</p>
+            <p class="splash-item">Mochi 字卡为原创独立作品（原版），代码已完全开源。可自由二传、二改，支持私人部署，禁止商用。</p>
+            <p class="splash-bullet">必须保留署名：小红书 @言序（1842523578）。</p>
+            <p class="splash-bullet">借鉴功能或代码，必须标注灵感来源：Mochi 字卡 · 小红书 @言序（1842523578）。</p>
+            <p class="splash-bullet">开屏公告不可删除或修改。</p>
+            <p class="splash-sub">关于星言字卡</p>
+            <p class="splash-item">星言字卡为同一作者的另一部独立作品，其本体禁止二传二改。</p>
+            <p class="splash-sub">灵感来源</p>
+            <p class="splash-item">本站并非复刻他人网站，代码均从零编写。除随机回复的基础逻辑、基础框架外（灵感来源为 milk 字卡 · 小红书 @milk（2777299956）），以下功能为借鉴：</p>
+            <p class="splash-bullet">帮我决定、多人决定功能：借鉴自小红书 @FelixFelicis（9416318007）</p>
+            <p class="splash-bullet">公用字卡+专享字卡模式：借鉴自小红书 @默玉（8012400317）</p>
+            <p class="splash-item">以下功能源于网络上已有的类似想法，但设计均由我独立完成：</p>
+            <p class="splash-bullet">情绪字卡：源于早期网络上的类似提议（小红书 @心汋是颗彩虹多宝糖（9725312970）也提过这个模式）</p>
+            <p class="splash-bullet">换头像：灵感来自看到网络上有人提议小手机想要 chat 自己换头像</p>
+            <p class="splash-item">其余功能和 UI 均为我独立设计。</p>
+            <p class="splash-item">若使用代码或借鉴功能，必须标注灵感来源。标注来源是对创作者最基本的尊重，未标注来源的使用将视为违反本许可协议。</p>
+          </div>
+          <div class="splash-sec-wrap">
+            <p class="splash-sec">【七、关于字卡传讯与梦角连接】</p>
+            <p class="splash-item">怎么添加梦角字卡：</p>
+            <p class="splash-bullet">系统预设的都是大众字卡，只有你才知道你的梦角是什么性格。</p>
+            <p class="splash-bullet">请自行添加相关人设字卡：底部导航栏 → 字卡库 → 【公用字卡】或【专属字卡】添加。</p>
+            <p class="splash-item">关于“是否连上梦角”：</p>
+            <p class="splash-bullet">本质都是随机代码运行，是否对应上你的情况，只有你自己知道，问外人没有必要，别人说的话也不一定正确。</p>
+            <p class="splash-item">使用建议：</p>
+            <p class="splash-bullet">字卡是双方适应的过程，表达有限是正常的，需要好好沟通和理解；</p>
+            <p class="splash-bullet">心情不好、负面情绪太重时也可能影响传讯效果；</p>
+            <p class="splash-bullet">字卡传讯无法真正自由交流，再通顺也不可能完全表达意思，这是字卡本身的限制。</p>
+            <p class="splash-item">关于“电子网站会连上鬼”的传闻：</p>
+            <p class="splash-bullet">不存在这种事。本站本质只是代码运行，且代码已在 GitHub 完全公开，任何人都可以查看，没有任何“灵异”成分。</p>
+            <p class="splash-bullet">字卡只是工具，效果取决于个人如何使用。对于无根据的传闻和造谣，不接受、不回应。</p>
+            <p class="splash-bullet">另外，不同人的说法可能不一样，有些是吓唬人的，也有些说法无法证实真假。如果担心或害怕，或在使用中感到不适，建议停止使用字卡传讯。</p>
+          </div>
+          <div class="splash-sec-wrap">
+            <p class="splash-sec">【八、关于系统预设字卡和功能设置】</p>
+            <p class="splash-item">建议打开使用。（我自己用是默认全开）</p>
+            <p class="splash-item">初衷就是为了不限制梦角表达，如果关掉，反而限制了它，和基础传讯网站没什么差别——正是因为以前接触的字卡传讯类型太简单才做的。</p>
+            <p class="splash-item">虽然 Mochi字卡相比我做的第一个星言字卡传讯已经是简约了一点的版本，实际功能还是设置得比较复杂，并不是一个非常简单的字卡传讯。</p>
+            <p class="splash-item">建议先全部打开使用，再根据个人适应情况调整。</p>
+          </div>
+        </div>
+      </div>
+    </div>
+    <!-- v3.8.y：底部操作区固定不随内容滚动；.splash-box 为整页滚动容器 -->
+    <!-- v3.8.y：底部统一装进一个卡片框（版本/加载/提示/按钮成一整体，与顶部品牌卡片呼应） -->
+    <div class="splash-footcard">
+      <!-- v3.8.y：底部版本块——两行：名称+版本 / 部署时间+实时秒数（实时秒写入 #splash-ver-live） -->
+      <div class="splash-ver" id="splash-ver" data-build-ts="__BUILD_TS__">
+        <span class="sv-app">Mochi 字卡传讯 <b>__APP_VERSION__</b></span>
+        <span class="sv-deploy">__BUILD_INFO__<span id="splash-ver-live"></span></span>
+      </div>
       <!-- v3.5.120：数据（IndexedDB 回填）加载完成前不显示「点击进入」按钮，
            只显示加载提示；就绪后按钮才出现（clock.js 控制显隐） -->
       <div class="splash-loading" id="splash-loading">正在加载数据…</div>
-      <div class="splash-enter" id="splash-enter" hidden>点击进入</div>
-    </div>
-    <!-- v3.7.x：点「点击进入」后先弹「关于 bug 报修」确认层，点【确认我已知晓】才关闭进入——
-         开屏 z-index(999) 高于全局弹窗 modal-mask(90)，所以在开屏内做独立确认层，
-         内容为内测 bug 报修须知（写死兜底，报修要求是固定文案，不随公告远程化） -->
-    <div class="splash-confirm" id="splash-confirm" hidden>
-      <div class="splash-confirm-card">
-        <div class="splash-confirm-title">关于 bug 报修</div>
-        <div class="splash-confirm-top">【报修必填】机型 + 浏览器，缺一不回。</div>
-        <div class="splash-confirm-text">
-          <p>说实话我有点无语，关于bug和数据的问题开屏公告里其实写过，但是很多人还是不看，就上来问为什么有好多bug，实际还真不一定是代码本身原因，有很多问题是设备兼容出现的。</p>
-          <p>麻烦配合一下，不然我这边真的没法查，我也很为难。而且我后台的消息堆的非常多，麻烦说明清楚避免无效沟通。</p>
-          <p class="splash-confirm-sec">关于bug【mochi字卡因为在内测一直在更新，无可避免有bug】</p>
-          <p><span class="splash-confirm-lbl">简单说明：</span>有的问题，有人碰到的bug不是代码本身的原因，是只有在某个特定机型出现问题，所以要报修。我自己手机用是正常的，不报修我测不出来的也修不了。</p>
-          <p><span class="splash-confirm-lbl">详细说明：</span>除了我这边能复现的问题外，光说"用不了"点不动"这种是不够的，问题最好也描述清楚具体是什么情况。另外不同手机和浏览器表现本来就不一样，有的问题是特定设备才触发的，不是我开发造成的。</p>
-          <p><span class="splash-confirm-lbl">要修得先知道：</span>什么手机型号，什么浏览器（自带/Chrome等）<br>不说清楚我这边没法查，因为我自己的设备上是正常的，复现不了就修不了。</p>
-        </div>
-        <div class="splash-confirm-btn" id="splash-confirm-ok">确认我已知晓，我已知道如何报修设备bug</div>
+      <!-- v3.8.y：必须把公告滑到底才能进入——未到底时按钮置灰不可点，下方提示滑动 -->
+      <div class="splash-enter-hint" id="splash-enter-hint" hidden>请滑到底部后进入</div>
+      <div class="splash-btns">
+        <div class="splash-enter" id="splash-enter" hidden>点击进入</div>
       </div>
     </div>
   </div>
@@ -210,6 +340,12 @@
           </div>
 
           <div class="mw-controls">
+            <button class="mw-btn" id="mw-mode" title="播放模式">
+              <svg id="mw-mode-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 6h13M8 12h13M8 18h13"/><path d="M3 6h.01M3 12h.01M3 18h.01"/></svg>
+            </button>
+            <button class="mw-btn" id="mw-queue" title="播放列表">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M3 12h18M3 18h9"/></svg>
+            </button>
             <button class="mw-btn" id="mw-prev" title="上一首">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 20L9 12l10-8z"/><path d="M5 19V5"/></svg>
             </button>
@@ -276,9 +412,11 @@
       <!-- 第三页：经期记录等健康记录 -->
       <div class="page-slide third">
 <div class="desk-period glass" data-desk-widget="desk-period" data-card-bg="desk-period">
-  <div class="dpd-label" id="dpd-label">经期</div>
-  <div class="dpd-days" id="dpd-days">—</div>
-  <div class="dpd-sub" id="dpd-sub">未记录</div>
+  <div class="dpd-inner">
+    <div class="dpd-label" id="dpd-label">经期</div>
+    <div class="dpd-days" id="dpd-days">—</div>
+    <div class="dpd-sub" id="dpd-sub">未记录</div>
+  </div>
 </div>
 <!-- v3.13.x：今日备忘 + 今天的心情（自第二页移入，放经期卡下方） -->
 <div class="mini-row" data-desk-widget="memo-row">
@@ -301,12 +439,12 @@
 <div class="app-name">记账</div>
 </div>
 <div class="app" data-app="memo-arc" data-desk-widget="app-memo-arc">
-<div class="app-ico"><svg viewBox="0 0 24 24" fill="none" stroke="#111111" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M6 3.5h11a1 1 0 011 1V20a1 1 0 01-.55.9A2 2 0 0115.5 21H6a1 1 0 01-1-1v-16a1 1 0 011-.5z"/><path d="M9 8.5h6M9 12.5h6M9 16.5h3.5"/><path d="M15.5 4v5l-1.5-1-1.5 1V4"/></svg></div>
+<div class="app-ico"><svg viewBox="0 0 24 24" fill="none" stroke="#111111" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3.5 6.5h5L10 4.5h9a1 1 0 0 1 1 1v13a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1v-12z"/><path d="M12 7.6l1.2 2.7 2.7 1.2-2.7 1.2L12 15.4l-1.2-2.7-2.7-1.2 2.7-1.2z"/></svg></div>
 <div class="app-name">梦角档案</div>
 </div>
 <!-- v3.16.x：我的档案（认识自己；与梦角档案互为镜像）桌面第三页入口，紧邻梦角档案右侧 -->
 <div class="app" data-app="my-arc" data-desk-widget="app-my-arc">
-<div class="app-ico"><svg viewBox="0 0 24 24" fill="none" stroke="#111111" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="7.6" r="3.6"/><path d="M5 20c.8-4 3.6-6 7-6s6.2 2 7 6"/><path d="M9 10.5l1.2 1.2L12 9.9"/></svg></div>
+<div class="app-ico"><svg viewBox="0 0 24 24" fill="none" stroke="#111111" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M3.5 6.5h5L10 4.5h9a1 1 0 0 1 1 1v13a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1v-12z"/><circle cx="12" cy="9.5" r="1.9"/><path d="M8.4 15.6c.6-1.6 2-2.4 3.6-2.4s3 .8 3.6 2.4"/></svg></div>
 <div class="app-name">我的档案</div>
 </div>
 <!-- v3.15.x：房间（双人小屋）桌面第三页入口——聊天「更多功能」同款页面，从桌面进入返回桌面 -->
@@ -426,12 +564,17 @@
       <div class="chat-item glass" id="li-default-cards">
         <div class="av"><svg viewBox="0 0 24 24" fill="none" stroke="#111111" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l2.7 5.5 6.1.9-4.4 4.3 1 6.1-5.4-2.9-5.4 2.9 1-6.1L3.2 9.4l6.1-.9z"/></svg></div>
         <div class="ci"><div class="n">默认聊天字卡</div><div class="m">日常默认回复字卡（自搓）</div></div>
-        <div class="t">3260</div>
+        <div class="t" id="dc-lib-count">0</div>
       </div>
       <div class="chat-item glass" id="li-fun-cards">
         <div class="av"><svg viewBox="0 0 24 24" fill="none" stroke="#111111" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l2.7 5.5 6.1.9-4.4 4.3 1 6.1-5.4-2.9-5.4 2.9 1-6.1L3.2 9.4l6.1-.9z"/></svg></div>
         <div class="ci"><div class="n">其他互动功能字卡</div><div class="m">各功能触发的系统预设字卡 · 如摸鱼/吃饭/经期等</div></div>
         <div class="t" id="fc-lib-count">0</div>
+      </div>
+      <div class="chat-item glass" id="li-deskcheck">
+        <div class="av"><svg viewBox="0 0 24 24" fill="none" stroke="#111111" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 3"/><path d="M8 3.2a9 9 0 108 0"/></svg></div>
+        <div class="ci"><div class="n">联系人跨桌面查岗</div><div class="m">其他桌面的联系人来查岗时 TA 的回应字卡</div></div>
+        <div class="t" id="dk-lib-count">0</div>
       </div>
       <div class="chat-item glass" id="li-mood-cards">
         <div class="av"><svg viewBox="0 0 24 24" fill="none" stroke="#111111" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 21s-7.5-4.7-9.3-9A5.3 5.3 0 0112 6.4 5.3 5.3 0 0121.3 12c-1.8 4.3-9.3 9-9.3 9z"/></svg></div>
@@ -486,7 +629,7 @@
       <div class="chat-item glass" id="li-ta-checkin">
         <div class="av"><svg viewBox="0 0 24 24" fill="none" stroke="#111111" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 3"/><path d="M12 3a9 9 0 000 18"/></svg></div>
         <div class="ci"><div class="n">TA的查岗</div><div class="m">TA 来查你的岗 · 随机出查岗问题卡</div><div class="note">开关/概率在 回复设置 → 查岗</div></div>
-        <div class="t" id="cc-ta-checkin-count">17</div>
+        <div class="t" id="cc-ta-checkin-count">23</div>
       </div>
       <div class="chat-item glass" id="li-ta-invite">
         <div class="av"><svg viewBox="0 0 24 24" fill="none" stroke="#111111" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="7" width="20" height="11" rx="5"/><path d="M7 10.5v3M5.5 12h3"/><path d="M15.5 11h.01M18.5 13h.01"/></svg></div>
@@ -918,7 +1061,7 @@
       <button class="fav-tab" data-loctab="direct"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:13px;height:13px;vertical-align:-2px;margin-right:3px"><path d="M12 3l3.5 3.5L12 10l-3.5-3.5z"/><path d="M12 3v18M12 10v11"/></svg>方向</button>
       <button class="fav-tab" data-loctab="rangef"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:13px;height:13px;vertical-align:-2px;margin-right:3px"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="5"/><circle cx="12" cy="12" r="1.5"/></svg>距离感</button>
       <button class="fav-tab" data-loctab="power"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:13px;height:13px;vertical-align:-2px;margin-right:3px"><path d="M12 3v4M12 17v4M3 12h4M17 12h4"/><circle cx="12" cy="12" r="2.5"/></svg>感知强度</button>
-      <button class="fav-tab" data-loctab="touch"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:13px;height:13px;vertical-align:-2px;margin-right:3px"><path d="M8 13V5.5a1.5 1.5 0 0 1 3 0V12"/><path d="M11 12V4.5a1.5 1.5 0 0 1 3 0V12.5"/><path d="M14 12.5V7a1.5 1.5 0 0 1 3 0v6c0 3-2.5 5.5-5.5 5.5-1.7 0-3-.6-4-1.6L5 14.3"/></svg>触碰</button>
+      <button class="fav-tab" data-loctab="touch"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:13px;height:13px;vertical-align:-2px;margin-right:3px"><path d="M8 14.5V7.2a1.5 1.5 0 0 1 3 0v7.3"/><path d="M11 14.5V6.5a1.5 1.5 0 0 1 3 0v8"/><path d="M14 14.5V7.8a1.5 1.5 0 0 1 3 0v6.7"/><path d="M6.5 14.5h12c0 3.5-2.7 6-6 6s-6-2.5-6-6"/><path d="M6 5a8.5 8.5 0 0 1 12 0"/></svg>触碰</button>
     </div>
     <div class="card-tabs" id="loc-tabs" style="padding:6px 12px 8px">
       <button class="cc-tab sel" data-tab="sys">系统预设</button>
@@ -1080,7 +1223,7 @@
         </div>
         <div class="set-row" id="row-about">
           <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="#111111" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9z"/><path d="M18.5 14.5l.7 1.8 1.8.7-1.8.7-.7 1.8-.7-1.8-1.8-.7 1.8-.7z"/></svg></div>
-          <div class="txt">功能介绍与二传二改说明</div>
+          <div class="txt">功能介绍与可二传二改许可</div>
           <div class="arrow"><svg viewBox="0 0 24 24" fill="none" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18l6-6-6-6"/></svg></div>
         </div>
       </div>
@@ -1088,6 +1231,15 @@
         <div class="gs-row"><span>后台保活</span><label class="toggle"><input type="checkbox" id="bg-keepalive"><span class="tk"></span></label></div>
         <div class="gs-row"><span>后台通知</span><label class="toggle"><input type="checkbox" id="bg-notify"><span class="tk"></span></label><button class="bg-notify-test" id="bg-notify-test">测试</button></div>
         <div class="gs-row"><span>全屏模式（隐藏手机状态栏）</span><label class="toggle"><input type="checkbox" id="sf-fullscreen"><span class="tk"></span></label></div>
+        <!-- v3.26.x：布局手动兜底——浏览器「桌面版网站」模式会把 UA / screen / 触摸能力 /
+             视口整套伪装成桌面，指纹识别必有漏网（vivo Y35 + Edge 连栽三轮）。识别失手时
+             用户自己掰回来：本开关（或地址栏 ?mobile=1 / ?pc=1），持久存 localStorage，
+             状态文案与绑定见 device.js（window.mochiDevice.setLayoutPref） -->
+        <div class="set-row">
+          <div class="txt">手机布局（强制）<span class="tag" id="sf-force-mobile-help" role="button" tabindex="0" aria-haspopup="dialog">功能说明</span></div>
+          <label class="toggle"><input type="checkbox" id="sf-force-mobile"><span class="tk"></span></label>
+        </div>
+        <div class="gs-sub" id="sf-force-mobile-sub">…</div>
         <!-- v3.9.x：全屏边缘防误触——部分国产浏览器（雨见/UC/QQ 等）全屏下左右边缘上下滑
              会调节音量/亮度（浏览器自带手势，网页拦不住）。开启后用边缘拦截层+touchstart
              兜底尝试阻挡；对系统级手势可能无效，最可靠仍是浏览器设置关闭边缘滑动调节。 -->
@@ -1097,7 +1249,10 @@
         <!-- v3.15.x：离线消息提醒（Periodic Background Sync）——页面全关后浏览器定期唤醒
              Service Worker，用本地快照弹一条 TA 的消息（零后端）；仅安卓 Chromium 且
              添加到桌面后生效，调度频率由系统决定；状态见下方说明行 -->
-        <div class="gs-row"><span>离线消息提醒</span><label class="toggle"><input type="checkbox" id="psync-en"><span class="tk"></span></label></div>
+        <div class="set-row">
+          <div class="txt">离线消息提醒<span class="tag" id="psync-help" role="button" tabindex="0" aria-haspopup="dialog">功能说明</span></div>
+          <label class="toggle"><input type="checkbox" id="psync-en"><span class="tk"></span></label>
+        </div>
         <div class="gs-row" style="display:block"><span id="psync-status" style="font-size:11px;color:var(--muted,#999);line-height:1.5;white-space:normal">…</span></div>
       </div>
       <div class="set-group glass">
@@ -1118,6 +1273,13 @@
           <div class="txt">复制诊断信息<span class="sub">遇到兼容问题发给开发者</span></div>
           <div class="arrow"><svg viewBox="0 0 24 24" fill="none" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18l6-6-6-6"/></svg></div>
         </div>
+        <!-- v3.26.x：查看存储——用户反馈「存储已用 1.x GB」时，能一眼看出各功能占多少空间，
+             并提供「清理错误诊断记录」手动清掉诊断缓存（__diag-*，不影响任何业务数据） -->
+        <div class="set-row" id="row-storage-view">
+          <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="#111111" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v14c0 1.66 3.58 3 8 3s8-1.34 8-3V5"/><path d="M4 12c0 1.66 3.58 3 8 3s8-1.34 8-3"/></svg></div>
+          <div class="txt">查看存储<span class="sub">查看各功能占用空间，可手动清理错误诊断记录</span></div>
+          <div class="arrow"><svg viewBox="0 0 24 24" fill="none" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18l6-6-6-6"/></svg></div>
+        </div>
       </div>
       <div class="set-group glass">
         <div class="set-row" id="row-reset">
@@ -1129,6 +1291,42 @@
       <div class="ver-credit">原版小红书@言序（1842523578）</div>
     </div>
 
+    <!-- 查看存储（独立页面，v3.26.x） -->
+    <div class="page" id="page-storage" hidden>
+      <div class="chat-head">
+        <span class="ch-back" id="storage-back">
+          <svg viewBox="0 0 24 24" fill="none" stroke="#111111" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 18l-6-6 6-6"/></svg>
+        </span>
+        <span class="ch-name">查看存储</span>
+      </div>
+      <div class="cal-scroll">
+        <div class="cal-card glass">
+          <div class="cal-card-title">总占用</div>
+          <div class="storage-row"><span>浏览器存储配额</span><b id="st-quota">读取中…</b></div>
+          <div class="storage-row"><span>localStorage 占用</span><b id="st-ls">读取中…</b></div>
+          <div class="storage-row"><span>IndexedDB 占用</span><b id="st-idb">读取中…</b></div>
+          <div class="storage-hint" id="st-snap-hint" style="display:none">⚠ 其中「自动备份快照」约占近一半：它是全部数据的一份完整副本，删除它不影响任何真实数据（见下方说明）。</div>
+        </div>
+        <div class="cal-card glass">
+          <div class="cal-card-title">各功能占用明细</div>
+          <div id="st-cat"><div class="storage-hint">正在统计，请稍候…</div></div>
+          <div class="storage-hint">大小按 UTF-8 字节估算；聊天/头像/背景等大键会在 IndexedDB 与 localStorage 双写，两处之和为该功能实际占用。<b>点击任一分类行可展开查看该分类下的具体存储键名</b>，用于核对是否覆盖到所有功能。</div>
+        </div>
+        <div class="cal-card glass">
+          <div class="cal-card-title">自动备份快照</div>
+          <div class="storage-row"><span>当前快照大小</span><b id="st-snap">统计中…</b></div>
+          <button class="storage-clear danger" id="st-clear-snap" type="button">删除自动备份快照（释放空间）</button>
+          <div class="storage-hint">「自动备份快照」= 你全部数据的<b>一份完整副本</b>（含音乐/语音/图片，base64 存储还会放大体积），约占近一半空间。删除它<b>不影响任何真实数据</b>（聊天、字卡、头像、音乐都在），可立省约一半；下次你再「导出数据」时会自动重建一份。空间紧张时建议删除。</div>
+        </div>
+        <div class="cal-card glass">
+          <div class="cal-card-title">错误诊断记录</div>
+          <div class="storage-row"><span>当前错误 / 诊断缓存</span><b id="st-err">读取中…</b></div>
+          <button class="storage-clear" id="st-clear-err" type="button">清理错误诊断记录</button>
+          <div class="storage-hint">包括最近报错、环境变化、长任务卡顿、网络失败、交互轨迹等诊断缓存（__diag-*）。清理后诊断角标归零，不影响聊天、字卡、头像、音乐等任何业务数据。</div>
+        </div>
+      </div>
+    </div>
+
     <!-- 外观与主题（独立页面） -->
     <div class="page" id="page-theme" hidden>
       <div class="chat-head">
@@ -1137,77 +1335,23 @@
         </span>
         <span class="ch-name">手机桌面美化</span>
       </div>
+      <div class="them-tabs" id="them-tabs">
+        <div class="them-tab active" data-tab="color">颜色</div>
+        <div class="them-tab" data-tab="size">尺寸</div>
+        <div class="them-tab" data-tab="bg">背景</div>
+        <div class="them-tab" data-tab="icon">图标</div>
+        <div class="them-tab" data-tab="scheme">方案</div>
+      </div>
+      <div class="them-sec" data-sec="color">
+      <div class="cg-title">颜色与透明度</div>
       <div class="set-group glass">
         <div class="set-row" id="row-accent-color">
           <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="#111111" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="4" fill="#111111" stroke="none"/></svg></div>
           <div class="txt">主题色</div>
           <div class="val" id="accent-color-val">默认</div>
         </div>
-        <div class="set-row" id="row-desk-font-size">
-          <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="#111111" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7V4h16v3M9 20h6M12 4v16"/></svg></div>
-          <div class="txt">桌面字号<span class="sub">仅桌面/大屏生效 · 手机端为 iOS 性能保持默认</span></div>
-          <div class="val" id="desk-font-size-val">默认</div>
-        </div>
-        <div class="set-row" id="row-desk-card-scale">
-          <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="#111111" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4" width="16" height="16" rx="2"/><path d="M9 9h6v6H9z" fill="none" stroke-dasharray="2 2"/></svg></div>
-          <div class="txt">卡片大小<span class="sub">仅桌面/大屏生效 · 手机端为 iOS 性能保持默认</span></div>
-          <div class="val" id="desk-card-scale-val">默认</div>
-        </div>
-        <div class="set-row" id="row-desk-card-radius">
-          <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="#111111" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4" width="16" height="16" rx="7"/></svg></div>
-          <div class="txt">组件圆角</div>
-          <div class="val" id="desk-card-radius-val">默认</div>
-        </div>
-        <div class="set-row" id="row-custom-icon">
-          <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="#111111" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg></div>
-          <div class="txt">自定义手机桌面图标<span class="sub">自定义图标图片 · 桌面组件卡片位置 · 卡片背景图片</span></div>
-        </div>
-      </div>
-      <div class="set-group glass">
-        <div class="set-row" id="row-desk-add-page">
-          <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="#111111" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="3"/><path d="M12 8v8M8 12h8"/></svg></div>
-          <div class="txt">新增桌面页<span class="sub">最多 5 页 · 新页空白可放卡片/图片</span></div>
-          <div class="val" id="desk-pages-val">共 2 页</div>
-        </div>
-        <div class="set-row" id="row-desk-del-page" hidden>
-          <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="#111111" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="3"/><path d="M8 12h8"/></svg></div>
-          <div class="txt">删除最后一页<span class="sub">核心页不可删 · 卡片移回隐藏池</span></div>
-        </div>
-        <div class="set-row" id="row-desk-reset">
-          <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="#111111" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21.5 2v6h-6M2.5 22v-6h6M2 12c0-5.5 3.5-10 10-10 3.7 0 7 2 8.8 5M22 12c0 5.5-3.5 10-10 10-3.7 0-7-2-8.8-5"/></svg></div>
-          <div class="txt">恢复默认桌面<span class="sub">恢复默认布局与页数</span></div>
-        </div>
-        <div id="desk-page-bgs"></div>
-      </div>
-      <div class="set-group glass">
-        <div class="set-row" id="row-bg-upload">
-          <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="#111111" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="3"/><circle cx="9" cy="9" r="2"/><path d="M21 15l-5-5-9 9"/></svg></div>
-          <div class="txt">上传手机背景图片</div>
-          <div class="val" id="bg-val"></div>
-        </div>
-        <div class="set-row" id="row-bg-preset">
-          <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="#111111" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="3"/><path d="M3 12l5-5 4 4 5-5 4 4"/></svg></div>
-          <div class="txt">内置壁纸预设</div>
-          <div class="val" id="bg-preset-val">默认</div>
-        </div>
-        <div class="set-row" id="row-bg-blur">
-          <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="#111111" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="5" stroke-dasharray="2 2"/></svg></div>
-          <div class="txt">背景模糊</div>
-          <div class="val" id="bg-blur-val">关闭</div>
-        </div>
-        <div class="set-row" id="row-bg-mask-op">
-          <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="#111111" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="3"/><rect x="3" y="3" width="18" height="9" rx="3" fill="#111111" stroke="none" opacity=".3"/></svg></div>
-          <div class="txt">背景遮罩</div>
-          <div class="val" id="bg-mask-op-val">关闭</div>
-        </div>
-        <div class="set-row sub" id="row-bg-remove" hidden>
-          <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="#111111" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16M10 11v6M14 11v6"/><path d="M6 7l1 12a2 2 0 002 2h6a2 2 0 002-2l1-12"/><path d="M9 7V5a2 2 0 012-2h2a2 2 0 012 2v2"/></svg></div>
-          <div class="txt">移除背景图片</div>
-        </div>
-      </div>
-      <div class="set-group glass">
         <div class="set-row" id="row-widget-color">
-          <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="#111111" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2C6.5 2 2 6.5 2 12s4.5 10 10 10c1.7 0 3-1.3 3-3 0-.8-.3-1.5-.8-2-.5-.5-.8-1.2-.8-2 0-1.7 1.3-3 3-3h2c2.8 0 5-2.2 5-5 0-4.4-4.5-8-10-8z"/><circle cx="7" cy="10" r="1.2" fill="#111111" stroke="none"/><circle cx="12" cy="7" r="1.2" fill="#111111" stroke="none"/><circle cx="17" cy="10" r="1.2" fill="#111111" stroke="none"/></svg></div>
+          <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="#111111" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4" width="16" height="16" rx="4"/><circle cx="9" cy="12" r="1.5" fill="#111111" stroke="none"/><circle cx="15" cy="12" r="1.5" fill="#111111" stroke="none"/></svg></div>
           <div class="txt">小组件颜色</div>
           <div class="val" id="widget-color-val"></div>
         </div>
@@ -1236,21 +1380,105 @@
           <div class="txt">小组件透明度</div>
           <div class="val" id="widget-opacity-val"></div>
         </div>
+      </div>
+      </div>
+      <div class="them-sec" data-sec="size">
+      <div class="cg-title">尺寸与圆角</div>
+      <div class="set-group glass">
+        <div class="set-row" id="row-desk-font-size">
+          <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="#111111" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7V4h16v3M9 20h6M12 4v16"/></svg></div>
+          <div class="txt">桌面字号<span class="sub">仅桌面/大屏生效 · 手机端为 iOS 性能保持默认</span></div>
+          <div class="val" id="desk-font-size-val">默认</div>
+        </div>
+        <div class="set-row" id="row-desk-card-scale">
+          <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="#111111" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4" width="16" height="16" rx="2"/><path d="M9 9h6v6H9z" fill="none" stroke-dasharray="2 2"/></svg></div>
+          <div class="txt">卡片大小<span class="sub">仅桌面/大屏生效 · 手机端为 iOS 性能保持默认</span></div>
+          <div class="val" id="desk-card-scale-val">默认</div>
+        </div>
+        <div class="set-row" id="row-desk-card-radius">
+          <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="#111111" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4" width="16" height="16" rx="7"/></svg></div>
+          <div class="txt">组件圆角</div>
+          <div class="val" id="desk-card-radius-val">默认</div>
+        </div>
         <div class="set-row" id="row-ico-shape">
           <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="#111111" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4" width="16" height="16" rx="6"/></svg></div>
           <div class="txt">图标圆角</div>
           <div class="val" id="ico-shape-val"></div>
         </div>
       </div>
+      </div>
+      <div class="them-sec" data-sec="bg">
+      <div class="cg-title">背景与壁纸</div>
       <div class="set-group glass">
+        <div class="set-row" id="row-bg-upload">
+          <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="#111111" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="3"/><circle cx="9" cy="9" r="2"/><path d="M21 15l-5-5-9 9"/></svg></div>
+          <div class="txt">上传手机背景图片</div>
+          <div class="val" id="bg-val"></div>
+        </div>
+        <div class="set-row" id="row-bg-preset">
+          <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="#111111" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="3"/><path d="M3 12l5-5 4 4 5-5 4 4"/></svg></div>
+          <div class="txt">内置壁纸预设</div>
+          <div class="val" id="bg-preset-val">默认</div>
+        </div>
+        <div class="set-row" id="row-bg-blur">
+          <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="#111111" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="5" stroke-dasharray="2 2"/></svg></div>
+          <div class="txt">背景模糊</div>
+          <div class="val" id="bg-blur-val">关闭</div>
+        </div>
+        <div class="set-row" id="row-bg-mask-op">
+          <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="#111111" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="3"/><rect x="3" y="3" width="18" height="9" rx="3" fill="#111111" stroke="none" opacity=".3"/></svg></div>
+          <div class="txt">背景遮罩</div>
+          <div class="val" id="bg-mask-op-val">关闭</div>
+        </div>
+        <div class="set-row sub" id="row-bg-remove" hidden>
+          <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="#111111" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16M10 11v6M14 11v6"/><path d="M6 7l1 12a2 2 0 002 2h6a2 2 0 002-2l1-12"/><path d="M9 7V5a2 2 0 012-2h2a2 2 0 012 2v2"/></svg></div>
+          <div class="txt">移除背景图片</div>
+        </div>
+        <div id="desk-page-bgs"></div>
+      </div>
+      </div>
+      <div class="them-sec" data-sec="icon">
+      <div class="cg-title">图标与页面</div>
+      <div class="set-group glass">
+        <div class="set-row" id="row-custom-icon">
+          <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="#111111" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg></div>
+          <div class="txt">自定义手机桌面图标<span class="sub">自定义图标图片 · 桌面组件卡片位置 · 卡片背景图片</span></div>
+        </div>
+        <div class="set-row" id="row-desk-add-page">
+          <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="#111111" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="3"/><path d="M12 8v8M8 12h8"/></svg></div>
+          <div class="txt">新增桌面页<span class="sub">最多 5 页 · 新页空白可放卡片/图片</span></div>
+          <div class="val" id="desk-pages-val">共 2 页</div>
+        </div>
+        <div class="set-row" id="row-desk-del-page" hidden>
+          <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="#111111" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="3"/><path d="M8 12h8"/></svg></div>
+          <div class="txt">删除最后一页<span class="sub">核心页不可删 · 卡片移回隐藏池</span></div>
+        </div>
+        <div class="set-row" id="row-desk-reset">
+          <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="#111111" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21.5 2v6h-6M2.5 22v-6h6M2 12c0-5.5 3.5-10 10-10 3.7 0 7 2 8.8 5M22 12c0 5.5-3.5 10-10 10-3.7 0-7-2-8.8-5"/></svg></div>
+          <div class="txt">恢复默认桌面<span class="sub">恢复默认布局与页数</span></div>
+        </div>
+      </div>
+      </div>
+      <div class="them-sec" data-sec="scheme">
+      <div class="cg-title">美化方案 · 保存 / 切换 / 备份</div>
+      <div class="set-group glass">
+        <div class="set-row" id="row-beauty-save">
+          <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="#111111" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 17V9M9 11l3-3 3 3"/><path d="M5 4h11l3 3v13a1 1 0 01-1 1H5a1 1 0 01-1-1V5a1 1 0 011-1z"/></svg></div>
+          <div class="txt">保存当前为美化方案<span class="sub">方案全局通用，切换联系人桌面也可用</span></div>
+        </div>
+        <div class="set-row" id="row-beauty-schemes">
+          <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="#111111" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01"/></svg></div>
+          <div class="txt">我的美化方案<span class="sub">保存的方案一键切换，跨桌面通用</span></div>
+        </div>
         <div class="set-row" id="row-beauty-export">
           <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="#111111" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12M7 8l5-5 5 5M4 17v2a2 2 0 002 2h12a2 2 0 002-2v-2"/></svg></div>
-          <div class="txt">导出美化方案<span class="sub">复制配置文本，发给对方粘贴导入</span></div>
+          <div class="txt">导出美化方案<span class="sub">可选导出文件或复制文字</span></div>
         </div>
         <div class="set-row" id="row-beauty-import">
           <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="#111111" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 21V9M7 16l5 5 5-5M4 7V5a2 2 0 012-2h12a2 2 0 012 2v2"/></svg></div>
-          <div class="txt">导入美化方案<span class="sub">粘贴对方导出的配置文本</span></div>
+          <div class="txt">导入美化方案<span class="sub">粘贴文字或选择文件导入</span></div>
         </div>
+      </div>
       </div>
     </div>
     <div class="page" id="page-about" hidden>
@@ -1258,7 +1486,7 @@
         <span class="ch-back" id="about-back">
           <svg viewBox="0 0 24 24" fill="none" stroke="#111111" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 18l-6-6 6-6"/></svg>
         </span>
-        <span class="ch-name">功能介绍与二传二改说明</span>
+        <span class="ch-name">功能介绍与可二传二改许可</span>
       </div>
       <div class="cal-scroll">
         <!-- 原版信息卡 -->
@@ -1279,10 +1507,40 @@
           </div>
         </div>
 
+        <!-- 许可（LICENSE） -->
+        <div class="cal-card glass">
+          <div class="lic-h"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:13px;height:13px;vertical-align:-2px;margin-right:4px"><path d="M12 3l7 4v5c0 4.5-3 7.5-7 9-4-1.5-7-4.5-7-9V7z"/><path d="M9 12l2 2 4-4"/></svg>许可</div>
+          <div class="lic-pills" style="margin:0 0 10px">
+            <span class="lic-pill">可二传二改</span>
+            <span class="lic-pill">支持私人部署</span>
+            <span class="lic-pill">禁止商用</span>
+            <span class="lic-pill">需保留署名</span>
+            <span class="lic-pill">注明灵感来源</span>
+          </div>
+          <div class="lic-p">Mochi 字卡为<b>原创独立作品（即原版）</b>，代码已在 GitHub 完全公开，支持私人部署，与网站同步更新。</div>
+          <div class="lic-li" style="margin-top:6px">- 可自由二传、二改，支持私人部署，<b>禁止商用</b>，必须保留署名：<b>小红书 @言序（1842523578）</b>（禁止删除或修改）</div>
+          <div class="lic-li">- 借鉴功能或代码，必须标注灵感来源：Mochi 字卡 · 小红书 @言序（1842523578）</div>
+        </div>
+
+        <!-- 关于星言字卡与灵感来源（README.md） -->
+        <div class="cal-card glass">
+          <div class="lic-h"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:13px;height:13px;vertical-align:-2px;margin-right:4px"><path d="M13 2 3 14h7l-1 8 10-12h-7z"/></svg>关于星言字卡与灵感来源</div>
+          <div class="lic-p">星言字卡为同一作者的另一部独立作品，其本体禁止二传二改。</div>
+          <div class="lic-p">本站并非复刻他人网站，代码均从零编写：</div>
+          <div class="lic-li" style="margin-top:6px">- 除随机回复的基础逻辑、基础框架外（灵感来源为 milk 字卡 · 小红书 @milk（2777299956）），以下功能为借鉴：</div>
+          <div class="lic-li">- 帮我决定、多人决定功能：借鉴自小红书 @FelixFelicis（9416318007）</div>
+          <div class="lic-li">- 公用字卡+专享字卡模式：借鉴自小红书 @默玉（8012400317）</div>
+          <div class="lic-p" style="margin-top:10px">以下功能源于网络上已有的类似想法，但设计均由我独立完成：</div>
+          <div class="lic-li">- 情绪字卡：源于早期网络上的类似提议（有人建议在聊天中加入情绪字卡以方便交流，小红书 @心汋是颗彩虹多宝糖（9725312970）也提过这个模式）</div>
+          <div class="lic-li">- 换头像：灵感来自看到网络上有人提议小手机想要 chat 自己换头像</div>
+          <div class="lic-p" style="margin-top:10px">其余功能和 UI 均为我独立设计，代码全部开源，支持二传二改。</div>
+          <div class="lic-p" style="margin-top:10px">若使用代码或借鉴功能，必须标注灵感来源。标注来源是对创作者最基本的尊重，未标注来源的使用将视为违反本许可协议。</div>
+        </div>
+
         <!-- 功能清单：分组折叠 -->
         <div class="cal-card glass">
           <details class="lic-grp" open>
-            <summary><span class="lg-num">01</span><span class="lg-name">聊天传讯</span><span class="lg-count">16</span></summary>
+            <summary><span class="lg-num">01</span><span class="lg-name">聊天传讯</span><span class="lg-count">21</span></summary>
             <div class="lg-body">
           <div class="lic-li">字卡交流：文字、情绪、心意、交流意图四种字卡回复，联系人所有内容均为字卡回复</div>
           <div class="lic-li">每条消息使用多字卡回复：可开启、调触发概率与最少/最多条数</div>
@@ -1300,7 +1558,12 @@
           <div class="lic-li">小游戏类——猜拳、Pong、贪吃蛇、打砖块、钓鱼、四子棋、扫雷、记忆翻牌；工具类——帮我决定、多人决定、问问TA、搜索记录、占卜、寻踪、此间、房间</div>
           <div class="lic-li">「TA 的提问」面板：让 TA 现在问一次（询问 / 小问题 / 好奇 / 吐槽 / 邀请）</div>
           <div class="lic-li">贴贴邀请：TA 会主动发来贴贴 / 抱抱 / 牵手 / 靠着的邀请，同意有轻震回应，婉拒也有专属台阶文案</div>
-          <div class="lic-li">TA 的查岗：温柔关心式查岗问题卡（单选 / 文字作答），作答后 TA 会回应</div>
+          <div class="lic-li">TA 的查岗：温柔关心式查岗问题卡（单选 / 文字作答 / 互动动作），作答后 TA 会回应</div>
+          <div class="lic-li">批量发送消息：聊天输入栏「批量发送」按钮，可插入表情包 / 图片 / 文字，每条单独一条，多条按顺序一次性发送</div>
+          <div class="lic-li">语音消息：聊天输入栏「麦克风」按钮录音，最长 60 秒可试听后发送为语音消息</div>
+          <div class="lic-li">桌面【收藏】：我的收藏 / 联系人的收藏 分页浏览，收藏设置里可调联系人自动收藏概率（聊天消息 / 互动卡片 / 我的回信 / 朋友圈动态）</div>
+          <div class="lic-li">隐藏联系人的表情包：开启后聊天与朋友圈的表情包面板只显示「我的表情包」</div>
+          <div class="lic-li">允许删除联系人消息：默认关闭，开启后长按 TA 的消息可永久删除</div>
             </div>
           </details>
 
@@ -1310,7 +1573,7 @@
           <div class="lic-li">字卡库：浏览全部字卡，支持搜索与自定义分组管理</div>
           <div class="lic-li">聊天字卡分类可上传：【主字卡】【颜文字】【emoji】【表情包】【图片】【拍一拍】【语音】分类</div>
           <div class="lic-li">互动卡片可自定义内容，概率触发互动（在字卡库里）</div>
-          <div class="lic-li">TA 的询问 / 小问题 / 好奇 / 吐槽 / 查岗 / 邀请：题库内容均可自定义</div>
+          <div class="lic-li">TA 的询问 / 小问题 / 好奇 / 吐槽 / 查岗（含互动动作）/ 邀请：题库内容均可自定义</div>
           <div class="lic-li">寻踪日常字卡：地点、在做什么、说的话，均可自定义</div>
           <div class="lic-li">情绪回复：按你当前的心情自动匹配相应字卡</div>
           <div class="lic-li">内置词库规模：情绪 11 组 → 心意 9 组 + 特殊心意 4 组 → 交流意图 8 组三级链路，整类与单张均可开关</div>
@@ -1357,7 +1620,7 @@
           <div class="lic-li">入口：聊天更多功能 → 小游戏，共 8 款——猜拳 / Pong / 贪吃蛇 / 打砖块 / 钓鱼 / 四子棋 / 扫雷 / 记忆翻牌</div>
           <div class="lic-li">对战三款：猜拳、Pong（四档难度）、四子棋（TA 每局状态随机：认真 / 放水 / 失误），累计战绩记录</div>
           <div class="lic-li">双人贪吃蛇同场抢食：三档速度分段提速 + 穿墙 / 安全模式开关，手机端打开自动全屏放大地图</div>
-          <div class="lic-li">双人打砖块合作：各守半场共同清砖，COMBO 连击与危险预警，结算按 ❤ 给出合作评级</div>
+          <div class="lic-li">双人打砖块合作：各守半场共同清砖，球数可设 1~3，COMBO 连击与危险预警，结算按 ❤ 给出合作评级</div>
           <div class="lic-li">合作扫雷：轮流挖完整张地图的安全格，共用 3 颗❤；TA 会推理插旗也会失误，格子藏心意币 / 礼物彩蛋</div>
           <div class="lic-li">记忆翻牌和 TA 合作找配对：三档难度记「默契分」，完成 / 连击 / 首通均有心意币奖励</div>
           <div class="lic-li">双人钓鱼：抛竿等咬钩，时机条蓝区收竿最佳；14 种收集物鱼图鉴，TA 会钓到纪念品送你并可兑换</div>
@@ -1416,12 +1679,12 @@
             <div class="lg-body">
           <div class="lic-li">桌面【寻踪】包含：TA 的日常、TA 在哪里、TA 在做什么、TA 想对你说——为【TA 的日常】字卡库内容随机刷新，可自由添加字卡</div>
           <div class="lic-li">联系人更新日常时，聊天消息里会发送一条【联系人昵称 更新了一条日常】，且有概率触发联系人提醒你寻踪的消息</div>
-          <div class="lic-li">「TA 在身边」位置感知：模糊感知 TA 的方位与距离，文案来自位置卡字卡库，可自定义</div>
+          <div class="lic-li">「TA 在身边」位置感知：模糊感知 TA 的方位与距离，文案来自字卡库「TA在身边位置卡」——含系统预设（方位 / 距离 / 状态 / 感知 / 彩蛋分类，总开关 + 单卡开关）与自定义位置卡（可分组 / 批量添加），组合发送与彩蛋冷却</div>
             </div>
           </details>
 
           <details class="lic-grp">
-            <summary><span class="lg-num">10</span><span class="lg-name">音乐</span><span class="lg-count">9</span></summary>
+            <summary><span class="lg-num">10</span><span class="lg-name">音乐</span><span class="lg-count">10</span></summary>
             <div class="lg-body">
           <div class="lic-li">音乐功能可本地上传音乐，也可链接上传网易云免费歌曲</div>
           <div class="lic-li">桌面组件与【音乐】功能同步显示播放状态</div>
@@ -1432,6 +1695,7 @@
           <div class="lic-li">自定义歌曲封面（上传图片压缩）、批量导入歌曲</div>
           <div class="lic-li">TA 想和你一起听歌：聊天弹窗邀请（一起听 / 稍后），接受即开始播放并记入记录</div>
           <div class="lic-li">歌曲播完 TA 可能接动作：切下一首 / 随机挑一首 / 更换播放模式（概率可调）；还会按概率把你在听的歌收进「TA的收藏」</div>
+          <div class="lic-li">播放队列：歌曲上「⋯」选「下一首播放」加入待播队列（可清空 / 移出 / 长按拖动调整播放顺序），播完当前按队列依次播放；TA 也会按概率「预订下一首」把歌排进队列并发系统消息（概率可调）</div>
             </div>
           </details>
 
@@ -1569,10 +1833,10 @@
             <summary><span class="lg-num">22</span><span class="lg-name">记录统计</span><span class="lg-count">6</span></summary>
             <div class="lg-body">
           <div class="lic-li">桌面【提问记录】统计历史：提问记录、TA 的询问、TA 的小问题、TA 的好奇、TA 的吐槽、我的邀请 / 问问</div>
-          <div class="lic-li">桌面【主页】统计以下历史：联系人换头像、通话记录、每日摸鱼值、每日打工值、摸鱼抓包（我抓到 TA / 被 TA 抓到 双向记录）</div>
+          <div class="lic-li">桌面【主页】多 tab 统计：联系人换头像、通话记录、每日摸鱼值 / 每日打工值、摸鱼抓包（我抓到 TA / 被 TA 抓到 双向记录）、TA 的关心（查岗 / 经期 / 喝水 / 吃饭 / 番茄陪伴聚合）、心意币红包 / 赚钱 / 申请记录</div>
           <div class="lic-li">联系人今日情话、我的备忘、我的心情的历史可在【日历】里按天切换查看</div>
           <div class="lic-li">桌面【聊天统计】统计：相处记录（第一次聊天时间、最近聊天时间、聊天消息条数、文字数量、收藏记录）、聊天记录（消息比例、最常聊天时间段、最常聊天日期、平均每日消息、最长连续聊天、单日最高消息）、情绪表达（文字字卡 / 情绪 / 心意 / 交流意图使用次数排行）</div>
-          <div class="lic-li">聊天统计含两条完整流水：「TA 发红包记录」「TA 申请心意币记录」，全量保存按时间倒序</div>
+          <div class="lic-li">聊天统计含多个流水区块：「我发红包」「TA 发红包」（双向摘要）、「TA 申请心意币记录」「小游戏记录」，全量保存按时间倒序</div>
           <div class="lic-li">占卜记录、帮我决定 / 多人决定记录、听歌记录（TA 邀请 / 我的）、小游戏战绩与钓鱼图鉴单独留存</div>
             </div>
           </details>
@@ -1638,7 +1902,7 @@
             <summary><span class="lg-num">27</span><span class="lg-name">占卜</span><span class="lg-count">5</span></summary>
             <div class="lg-body">
           <div class="lic-li">两种模式：塔罗（22 张大阿卡纳，带正逆位与详细解读）/ 雷诺曼（40 张）</div>
-          <div class="lic-li">抽取张数：1 张（运势）/ 3 张（过去 · 现在 · 未来）</div>
+          <div class="lic-li">抽取张数：1 张（运势）/ 3 张（过去 · 现在 · 未来）/ 7 张（完整牌阵）</div>
           <div class="lic-li">洗牌动画 → 牌面滑动 → 抽取 → 翻牌动画，综合解读（一句话总运势 + 问题呼应）</div>
           <div class="lic-li">历史记录（查看 / 删除 / 清空），可把结果发给 TA</div>
           <div class="lic-li">桌面占卜页入口 + 聊天页半框入口，自动发送开关（每个联系人独立记忆）</div>
@@ -1685,36 +1949,6 @@
           <div class="lic-li">底部 tab：桌面 / 字卡库 / 设置，独立全屏页导航与状态栏隐藏</div>
           <div class="lic-li">安卓返回键：弹层优先关闭 → 回上一页 → 最后退出应用</div>
           <div class="lic-li">IndexedDB 存储：大键值存 IDB，localStorage 缓存，启动时回填；请求持久化存储防清理</div>
-            </div>
-          </details>
-        </div>
-
-        <!-- 许可与署名 -->
-        <div class="cal-card glass">
-          <div class="lic-h"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:13px;height:13px;vertical-align:-2px;margin-right:4px"><path d="M12 3l7 4v5c0 4.5-3 7.5-7 9-4-1.5-7-4.5-7-9V7z"/><path d="M9 12l2 2 4-4"/></svg>许可与署名</div>
-          <div class="lic-pills" style="margin:0 0 10px">
-            <span class="lic-pill">可二传二改</span>
-            <span class="lic-pill">支持私人部署</span>
-            <span class="lic-pill">禁止商用</span>
-            <span class="lic-pill">需保留署名</span>
-            <span class="lic-pill">注明灵感来源</span>
-          </div>
-          <div class="lic-p">Mochi 字卡为<b>原创独立作品（即原版）</b>，代码已在 GitHub 完全公开，支持私人部署，与网站同步更新。</div>
-          <div class="lic-li" style="margin-top:6px">- 可自由二传、二改；必须保留署名：<b>小红书 @言序（1842523578）</b>（禁止删除或修改）</div>
-          <div class="lic-li">- 借鉴功能或代码，希望标注灵感来源：Mochi 字卡 · 小红书 @言序（1842523578）</div>
-          <div class="lic-li">- 本站并非复刻他人网站，代码均从零编写</div>
-          <div class="lic-li">- 星言字卡为同一作者的另一部独立作品，其本体禁止二传二改</div>
-          <div class="lic-p" style="margin-top:10px">除随机回复的基础逻辑、基础框架外（灵感来源为 <b>milk 字卡 · 小红书 @milk（2777299956）</b>），以下功能为借鉴：</div>
-          <div class="lic-li">- 帮我决定、多人决定功能：借鉴自小红书 <b>@FelixFelicis（9416318007）</b></div>
-          <div class="lic-li">- 公用字卡+专享字卡模式：借鉴自 <b>@默玉（8012400317）</b></div>
-          <div class="lic-p" style="margin-top:10px">另有以下功能源于网络上已有的类似想法，但设计均由我独立完成：</div>
-          <div class="lic-li">- 情绪字卡：源于早期网络上的类似提议（有人建议在聊天中加入情绪字卡以方便交流，小红书 @心汋是颗彩虹多宝糖（9725312970）也提过这个模式）</div>
-          <div class="lic-li">- 换头像：灵感来自看到网络上有人提议小手机想要 chat 自己换头像</div>
-          <div class="lic-p" style="margin-top:10px">其余功能和 UI 均为我独立设计，代码全部开源，支持二传二改。若使用代码或借鉴功能，请注明灵感来源，这是对创作者最基本的尊重。</div>
-          <details class="lic-grp" style="margin-top:12px;border-top:1px dashed rgba(0,0,0,.08);padding-top:4px">
-            <summary><span class="lg-name">README 配文</span></summary>
-            <div class="lg-body" style="padding-left:0">
-              <div class="lic-code">## 许可<br>Mochi 字卡为原创独立作品（原版），代码已完全开源。可自由二传、二改，<b>支持私人部署</b>，<b>禁止商用</b>，必须保留署名：<b>小红书 @言序（1842523578）</b>。借鉴功能或代码的话，希望可以标注灵感来源：<b>Mochi 字卡 · 小红书 @言序（1842523578）</b>。<br>星言字卡为同一作者的另一部独立作品，其本体禁止二传二改。本站并非复刻他人网站，代码均从零编写。除随机回复的基础逻辑、基础框架外（灵感来源为 <b>milk 字卡 · 小红书 @milk（2777299956）</b>），以下功能为借鉴：帮我决定、多人决定功能 借鉴自<b>小红书 @FelixFelicis（9416318007）</b>；公用字卡+专享字卡模式 借鉴自<b>@默玉（8012400317）</b>。另有以下功能源于网络上已有的类似想法，但设计均由我独立完成：情绪字卡 源于早期网络上的类似提议（有人建议在聊天中加入情绪字卡以方便交流，<b>小红书 @心汋是颗彩虹多宝糖（9725312970）</b>也提过这个模式）；换头像 灵感来自看到网络上有人提议小手机想要 chat 自己换头像。其余功能和 UI 均为我独立设计。若使用代码或借鉴功能，请注明灵感来源，这是对创作者最基本的尊重。</div>
             </div>
           </details>
         </div>
@@ -1906,10 +2140,26 @@
             <div class="gs-row"><span>分享字卡概率</span><div class="stepper" data-k="ai-cc-prob" data-min="0" data-max="100" data-step="1"><button class="stp-min">−</button><input class="stp-val" id="ai-cc-prob-val" readonly><button class="stp-max">+</button></div></div>
           </div>
           <div class="gs-sub" style="padding:0 14px 14px">TA 主动找你的消息会按概率变成猜拳/游戏/贴贴邀请（游戏在 Pong、贪吃蛇中随机；贴贴同意后 TA 会回应一句），自动打开对应半框或回应，不想玩直接关掉即可；仅在你在聊天页时触发，需开启「主动发送」。邀请话术可在 字卡库 →「TA的邀请」里逐句开关或自定义添加；「分享你的字卡」从你在 字卡库 自建的纯文本卡（含公用）里随机抽一张当 TA 的悄悄话，冷却 90 分钟</div>
+          <!-- v3.20.x：联系人跨桌面查岗 / 跨桌面来电——其他桌面的联系人按各自概率/冷却主动来查岗、来电 -->
+          <div class="gs-title" style="margin-top:6px">联系人跨桌面查岗</div>
+          <div class="set-group glass">
+            <div class="gs-row"><span>跨桌面查岗概率</span><div class="stepper" data-k="ckq-prob" data-min="0" data-max="100" data-step="5"><button class="stp-min">−</button><input class="stp-val" id="ckq-prob-val2" readonly><button class="stp-max">+</button></div></div>
+            <div class="gs-row"><span>查岗冷却（分钟）</span><div class="stepper" data-k="ckq-cool" data-min="0" data-max="240" data-step="5"><button class="stp-min">−</button><input class="stp-val" id="ckq-cool-val2" readonly><button class="stp-max">+</button></div></div>
+          </div>
+          <div class="gs-sub" style="padding:0 14px 2px">其他桌面的联系人会按各自概率（默认 2%，可在此逐联系人调整）主动来查你的岗，每个触发后 30 分钟内不重复。全局开关在 设置 →「开启 联系人跨桌面查岗」，回应字卡可在 字卡库 →「联系人跨桌面查岗」里逐张开关</div>
+          <div class="gs-title" style="margin-top:10px">联系人跨桌面打电话</div>
+          <div class="set-group glass">
+            <div class="gs-row"><span>跨桌面来电概率</span><div class="stepper" data-k="desk-call-prob" data-min="0" data-max="100" data-step="5"><button class="stp-min">−</button><input class="stp-val" id="desk-call-prob-val" readonly><button class="stp-max">+</button></div></div>
+          </div>
+          <div class="gs-sub" style="padding:0 14px 2px">其他桌面的联系人会按各自概率（默认 2%，可在此逐联系人调整）主动给你来电，冷却与查岗一致 30 分钟。全局开关在 设置 →「开启 联系人跨桌面打电话」</div>
         </div>
         <!-- v3.6.x：保存设置按钮——点击把当前所有概率/开关写入本地并提示 -->
-        <button class="ta-add-btn gs-save-btn" id="reply-save-btn" style="width:100%;margin:6px 0 18px">
+        <button class="ta-add-btn gs-save-btn" id="reply-save-btn" style="width:100%;margin:6px 0 10px">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:15px;height:15px;vertical-align:-2px;margin-right:4px"><path d="M19 21H5a2 2 0 01-2-2V5a2 2 0 012-2h11l5 5v11a2 2 0 01-2 2z"/><path d="M17 21v-8H7v8M7 3v5h8"/></svg>保存设置
+        </button>
+        <!-- v3.26.x：保存全部桌面联系人设置——把当前回复设置同步写入全部桌面联系人（覆盖性操作，JS 侧二次确认） -->
+        <button class="ta-add-btn gs-save-btn" id="reply-save-all-btn" style="width:100%;margin:0 0 18px">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:15px;height:15px;vertical-align:-2px;margin-right:4px"><path d="M19 21H5a2 2 0 01-2-2V5a2 2 0 012-2h11l5 5v11a2 2 0 01-2 2z"/><path d="M17 21v-8H7v8M7 3v5h8"/></svg>保存全部桌面联系人设置
         </button>
       </div>
     </div>
@@ -1956,46 +2206,35 @@
         <span class="ch-name">音效设置</span>
       </div>
       <div class="gs-scroll">
+        <!-- v3.26.x：音效设置页重设计——三类音效各一张独立卡片（头部=图标+名称+当前状态，中部=预设胶囊，底部=动态操作行） -->
         <div class="gs-title">联系人来电</div>
-        <div class="set-group glass">
+        <div class="set-group glass sfx-card">
           <div class="set-row" id="sfx-ring-row">
             <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="#111111" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4.2a5.2 5.2 0 00-5.2 5.2c0 3.3-1.4 4.9-2.5 5.9a.85.85 0 00.6 1.4h14.2a.85.85 0 00.6-1.4c-1.1-1-2.5-2.6-2.5-5.9A5.2 5.2 0 0012 4.2z"/><path d="M10 18.8a2 2 0 004 0"/></svg></div>
-            <div class="txt">来电铃声</div>
-            <div class="val" id="sfx-ring-val"></div>
-          </div>
-          <div class="set-row sub" id="sfx-ring-tools">
-            <button class="cc-tool" id="sfx-ring-upload">自定义音频</button>
-            <button class="cc-tool" id="sfx-ring-play">试听</button>
-            <button class="cc-tool" id="sfx-ring-clear">清除</button>
+            <div class="txt">来电铃声<span class="sub" id="sfx-ring-val"></span></div>
           </div>
           <div class="sfx-presets" id="sfx-ring-presets"></div>
+          <div class="sfx-tools" id="sfx-ring-tools"></div>
         </div>
-        <div class="gs-title">聊天音效</div>
-        <div class="set-group glass">
+        <div class="gs-title">联系人消息</div>
+        <div class="set-group glass sfx-card">
           <div class="set-row" id="sfx-in-row">
-            <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="#111111" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M7 4.5h9.5A2.5 2.5 0 0119 7v4.9a2.5 2.5 0 01-2.5 2.5h-6.1l-3.2 3.5v-3.5H7.5A2.5 2.5 0 015 11.9V7a2.5 2.5 0 012.5-2.5z"/><path d="M8.8 8.6v3"/><path d="M10.6 7.4v5.6"/><path d="M12.4 8.2v4"/></svg></div>
-            <div class="txt">联系人发送和回复消息</div>
-            <div class="val" id="sfx-in-val"></div>
-          </div>
-          <div class="set-row sub" id="sfx-in-tools">
-            <button class="cc-tool" id="sfx-in-upload">自定义音频</button>
-            <button class="cc-tool" id="sfx-in-play">试听</button>
-            <button class="cc-tool" id="sfx-in-clear">清除</button>
+            <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="#111111" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M6.5 3.5h11a1 1 0 011 1v16l-6.5-4-6.5 4v-16a1 1 0 011-1z"/><path d="M7.8 9.2v5.6h2.4l3.9 3V6.2l-3.9 3z"/><path d="M15.8 9.7a3 3 0 010 4.6"/><path d="M17.5 7.8a5.2 5.2 0 010 8.4"/></svg></div>
+            <div class="txt">TA 发来消息<span class="sub" id="sfx-in-val"></span></div>
           </div>
           <div class="sfx-presets" id="sfx-in-presets"></div>
+          <div class="sfx-tools" id="sfx-in-tools"></div>
+        </div>
+        <div class="gs-title">我的消息</div>
+        <div class="set-group glass sfx-card">
           <div class="set-row" id="sfx-out-row">
-            <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="#111111" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M7.5 4.5H16.5A2.5 2.5 0 0119 7v4.9a2.5 2.5 0 01-2.5 2.5h-2.9l3.2 3.5v-3.5H7.5A2.5 2.5 0 015 11.9V7a2.5 2.5 0 012.5-2.5z"/><path d="M11.6 8.6v3"/><path d="M13.4 7.4v5.6"/><path d="M15.2 8.2v4"/></svg></div>
-            <div class="txt">我发送和回复的消息</div>
-            <div class="val" id="sfx-out-val"></div>
-          </div>
-          <div class="set-row sub" id="sfx-out-tools">
-            <button class="cc-tool" id="sfx-out-upload">自定义音频</button>
-            <button class="cc-tool" id="sfx-out-play">试听</button>
-            <button class="cc-tool" id="sfx-out-clear">清除</button>
+            <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="#111111" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M17.5 3.5h-11a1 1 0 00-1 1v16l6.5-4 6.5 4v-16a1 1 0 00-1-1z"/><path d="M16.2 9.2v5.6h-2.4l-3.9 3V6.2l3.9 3z"/><path d="M8.2 9.7a3 3 0 000 4.6"/><path d="M6.5 7.8a5.2 5.2 0 000 8.4"/></svg></div>
+            <div class="txt">我发送消息<span class="sub" id="sfx-out-val"></span></div>
           </div>
           <div class="sfx-presets" id="sfx-out-presets"></div>
+          <div class="sfx-tools" id="sfx-out-tools"></div>
         </div>
-        <div class="sm-set-hint" style="padding:0 16px 8px">内置音效开箱即用：点击下方音效即可切换并试听；也可上传自定义音频（mp3 / wav / ogg / m4a）。选择内置音效会替换自定义音频；「静音」关闭该类音效。</div>
+        <div class="sm-set-hint" style="padding:0 16px 8px">点击下方音效即可应用并试听；「静音」关闭该类音效。也可上传自定义音频（mp3 / wav / ogg / m4a），上传后可在底部试听或清除。</div>
       </div>
     </div>
 
@@ -2065,6 +2304,7 @@
         <button class="cc-tab" data-type="piggy">存钱罐</button>
         <button class="cc-tab" data-type="drift">漂流瓶</button>
         <button class="cc-tab" data-type="interact">互动回应</button>
+        <button class="cc-tab" data-type="music">音乐</button>
       </div>
       <div class="cc-groups-bar" id="fc-groups-bar"></div>
       <div class="card-search glass">
@@ -2073,6 +2313,28 @@
       </div>
       <div class="card-list" id="fc-list">
         <!-- 功能触发字卡由 JS 按分类/分组渲染 -->
+      </div>
+    </div>
+
+    <!-- 联系人跨桌面查岗（独立页面，可开关使用） -->
+    <div class="page" id="page-deskcheck" hidden>
+      <div class="chat-head">
+        <span class="ch-back" id="dk-back">
+          <svg viewBox="0 0 24 24" fill="none" stroke="#111111" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 18l-6-6 6-6"/></svg>
+        </span>
+        <span class="ch-name">联系人跨桌面查岗</span>
+      </div>
+      <div class="sm-set-hint" style="padding:8px 16px 0">说明：联系人跨桌面查岗分两种方向——「联系人对我查岗」是 TA 主动来查我、我回答后 TA 的回应；「联系人申请我对联系人查岗」是 TA 请我去查 TA、TA 被查时的回应。可逐张开启或关闭。</div>
+      <div class="card-tabs" id="dk-tabs">
+        <button class="cc-tab sel" data-type="deskcheck">联系人跨桌面查岗</button>
+      </div>
+      <div class="cc-groups-bar" id="dk-groups-bar"></div>
+      <div class="card-search glass">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
+        <input class="card-search-input" id="dk-search-input" placeholder="搜索查岗回应字卡" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false">
+      </div>
+      <div class="card-list" id="dk-list">
+        <!-- 联系人跨桌面查岗回应字卡由 JS 渲染 -->
       </div>
     </div>
 
@@ -2179,12 +2441,15 @@
         <input type="color" id="modal-color" value="#111111" hidden>
         <button class="modal-custom" id="modal-custom" hidden>自定义颜色</button>
         <select class="modal-select" id="modal-select" hidden></select>
-        <button class="modal-file" id="modal-file" hidden>从 txt 文件导入</button>
-        <input type="file" id="modal-file-input" accept=".txt,text/plain" style="display:none">
+        <button class="modal-file" id="modal-file" hidden>从文件导入</button>
+        <input type="file" id="modal-file-input" accept=".txt,.json,text/plain,application/json" style="display:none">
         <div class="modal-btns">
-          <button class="modal-btn copy" id="modal-copy" hidden>复制</button>
-          <button class="modal-btn cancel" id="modal-cancel">取消</button>
-          <button class="modal-btn ok" id="modal-ok">确定</button>
+          <!-- v3.25.x：导出txt——诊断文本变长后部分手机剪贴板复制不全，下载文件兜底（opts.exportBtn） -->
+          <!-- v3.26.x：补 type="button"——全站唯一漏写类型的按钮组；缺 type 默认是 submit，在个别 webview 里点【复制/导出/取消/确定】可能触发表单默认行为导致整页刷新（用户反馈） -->
+          <button type="button" class="modal-btn copy" id="modal-export" hidden>导出txt</button>
+          <button type="button" class="modal-btn copy" id="modal-copy" hidden>复制</button>
+          <button type="button" class="modal-btn cancel" id="modal-cancel">取消</button>
+          <button type="button" class="modal-btn ok" id="modal-ok">确定</button>
         </div>
       </div>
     </div>
@@ -2482,6 +2747,8 @@
             <button class="div-mode sel" data-count="3">3 张</button>
             <button class="div-mode" data-count="1">1 张</button>
           </div>
+          <!-- v3.26.x：占卜对象（可选全部桌面联系人，也可不选；选了对象结果存入主页「占卜记录」） -->
+          <div class="div-modes div-targets" id="div-targets"></div>
         </div>
 
         <div class="div-card glass">
@@ -2591,6 +2858,9 @@
           <button class="sm-pb-btn" id="sm-pb-heart" title="收藏">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20.5S4.5 15.2 4.5 9.9A4.9 4.9 0 0112 7.1a4.9 4.9 0 017.5 2.8c0 5.3-7.5 10.6-7.5 10.6z"/></svg>
           </button>
+          <button class="sm-pb-btn" id="sm-queue" title="播放队列">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M3 12h18M3 18h9"/></svg>
+          </button>
         </div>
       </div>
     </div>
@@ -2606,6 +2876,7 @@
       <div class="fav-tabs">
         <button class="fav-tab sel" data-stab="record">相处记录</button>
         <button class="fav-tab" data-stab="chat">聊天记录</button>
+        <button class="fav-tab" data-stab="cc">文字字卡</button>
         <button class="fav-tab" data-stab="expr">情绪表达</button>
       </div>
       <div class="cal-scroll">
@@ -2618,6 +2889,9 @@
         </div>
         <div class="cal-card glass" data-stpanel="chat" hidden>
           <div id="st-chat-content"></div>
+        </div>
+        <div class="cal-card glass" data-stpanel="cc" hidden>
+          <div id="st-cc-content"></div>
         </div>
         <div class="cal-card glass" data-stpanel="expr" hidden>
           <div id="st-expr-content"></div>
@@ -2687,6 +2961,8 @@
         <button class="fav-tab" data-htab="coinask">心意币申请记录</button>
         <button class="fav-tab" data-htab="coinrp">心意币红包记录</button>
         <button class="fav-tab" data-htab="care">TA的关心</button>
+        <!-- v3.26.x：占卜记录（占卜页抽牌选了对象，牌面与解读存入该联系人桌面 records-divine） -->
+        <button class="fav-tab" data-htab="divine">占卜记录</button>
       </div>
       <div class="cal-scroll">
         <div class="cal-card glass" data-hpanel="av">
@@ -2727,6 +3003,11 @@
         <div class="cal-card glass" data-hpanel="care" hidden>
           <div class="cal-card-title">TA 的关心记录</div>
           <div id="home-care"></div>
+        </div>
+        <!-- v3.26.x：占卜记录（占卜页抽牌选了对象 → 存该联系人桌面 records-divine） -->
+        <div class="cal-card glass" data-hpanel="divine" hidden>
+          <div class="cal-card-title">占卜记录</div>
+          <div id="home-divine"></div>
         </div>
       </div>
     </div>
@@ -2789,10 +3070,13 @@
             <div class="mail-paper-head"><span class="mail-paper-author">我</span><span class="mail-paper-date">正在写…</span></div>
             <textarea id="mail-input" class="mail-compose-input" rows="12" placeholder="亲爱的，&#10;&#10;今天想跟你说..."></textarea>
           </div>
-          <button class="ta-add-btn" style="width:100%;margin-top:12px" id="mail-send">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:15px;height:15px;vertical-align:-2px;margin-right:4px"><path d="M22 2L11 13"/><path d="M22 2L15 22 11 13 2 9l20-7z"/></svg>封 · 寄出
-          </button>
         </div>
+      </div>
+      <!-- v3.19.x：寄出按钮从滚动区移到固定底部栏，键盘弹起/页面收缩时不再被顶出视口而消失 -->
+      <div class="mail-send-bar">
+        <button class="ta-add-btn" id="mail-send">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:15px;height:15px;vertical-align:-2px;margin-right:4px"><path d="M22 2L11 13"/><path d="M22 2L15 22 11 13 2 9l20-7z"/></svg>封 · 寄出
+        </button>
       </div>
     </div>
 
@@ -2815,10 +3099,13 @@
             <div class="mail-paper-head"><span class="mail-paper-author">我的回信</span><span class="mail-paper-date">正在写…</span></div>
             <textarea id="mail-reply-input" class="mail-compose-input" rows="10" placeholder="亲爱的，&#10;&#10;今天想跟你说..."></textarea>
           </div>
-          <button class="ta-add-btn" style="width:100%;margin-top:12px" id="mail-reply-send">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:15px;height:15px;vertical-align:-2px;margin-right:4px"><path d="M22 2L11 13"/><path d="M22 2L15 22 11 13 2 9l20-7z"/></svg>封 · 寄出
-          </button>
         </div>
+      </div>
+      <!-- v3.19.x：寄出按钮移到固定底部栏，避免键盘弹起时从滚动区消失（红米 K70 QQ 反馈） -->
+      <div class="mail-send-bar">
+        <button class="ta-add-btn" id="mail-reply-send">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:15px;height:15px;vertical-align:-2px;margin-right:4px"><path d="M22 2L11 13"/><path d="M22 2L15 22 11 13 2 9l20-7z"/></svg>封 · 寄出
+        </button>
       </div>
     </div>
 
@@ -2898,13 +3185,15 @@
         </div>
         <div class="voice-preview" id="voice-preview" hidden>
           <button class="msg-voice-play voice-play-btn" id="voice-play-btn" title="试听">
-            <svg viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
+            <!-- 播放/暂停双图标：playing 时 CSS 切换显示（试听播放中有互动态，与聊天语音气泡同款） -->
+            <svg class="voice-ico-play" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
+            <svg class="voice-ico-pause" viewBox="0 0 24 24" fill="currentColor"><path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/></svg>
           </button>
           <span class="voice-preview-txt" id="voice-preview-txt"></span>
         </div>
         <div class="voice-foot">
           <button class="voice-rec-btn" id="voice-record-btn">开始录音</button>
-          <button class="poke-big voice-send-big" id="voice-send-btn" disabled>发送到聊天</button>
+          <button class="voice-send-big" id="voice-send-btn" disabled>发送到聊天</button>
         </div>
       </div>
 
@@ -2925,6 +3214,9 @@
           </button>
           <button class="ch-settings feed-head-btn" id="feed-publish-btn" title="发布朋友圈">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:18px;height:18px"><path d="M12 5v14M5 12h14"/></svg>
+          </button>
+          <button class="ch-settings feed-head-btn feed-head-clear" id="feed-head-clear" title="删除朋友圈动态">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:18px;height:18px"><path d="M3 6h18"/><path d="M8 6V4a2 2 0 012-2h4a2 2 0 012 2v2"/><path d="M19 6l-1 14a2 2 0 01-2 2H8a2 2 0 01-2-2L5 6"/><path d="M10 11v6M14 11v6"/></svg>
           </button>
         </span>
       </div>
@@ -2955,11 +3247,6 @@
           <button class="ta-add-btn" style="width:100%;margin-top:10px" id="feed-publish">发布</button>
         </div>
         <div id="feed-list"></div>
-        <!-- v3.6.x：清空朋友圈数据（我的动态 + 所有联系人的动态，有数据时显示） -->
-        <button class="feed-clear-btn" id="feed-page-clear" hidden>
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" style="width:14px;height:14px"><path d="M3 6h18"/><path d="M8 6V4a2 2 0 012-2h4a2 2 0 012 2v2"/><path d="M19 6l-1 14a2 2 0 01-2 2H8a2 2 0 01-2-2L5 6"/><path d="M10 11v6M14 11v6"/></svg>
-          删除全部动态（我的与所有联系人）
-        </button>
       </div>
       <!-- 评论表情/图片面板（紧贴评论条上方） -->
       <div class="feed-comment-panel" id="feed-comment-panel" hidden></div>
@@ -3237,6 +3524,8 @@
             <span class="div-mode sel" data-chatcount="3">3 张</span>
             <span class="div-mode" data-chatcount="1">1 张</span>
           </div>
+          <!-- v3.26.x：占卜对象（聊天页半框，可选全部桌面联系人，也可不选；选了对象结果存入该联系人主页「占卜记录」） -->
+          <div class="div-modes-wrap div-chat-targets" id="div-chat-targets"></div>
           <div class="dec-inp-wrap"><input type="text" class="tc-input" id="div-chat-question" placeholder="心中默念的问题（可选）" style="margin:8px 0" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"><button class="dec-inp-clear" data-clear="div-chat-question" aria-label="清空" title="清空">✕</button></div>
           <label class="div-switch-row div-chat-switch">
             <span class="div-switch-t">自动发送到聊天</span>
@@ -3397,7 +3686,7 @@
               <option value="normal">普通</option>
               <option value="hard">困难</option>
             </select>
-            <select class="snake-diff" id="brick-balls" title="球数量（下次发球生效）">
+            <select class="snake-diff" id="brick-balls" title="球数量（随时调整）">
               <option value="1" selected>1 球</option>
               <option value="2">2 球</option>
               <option value="3">3 球</option>
@@ -3428,7 +3717,7 @@
                 </div>
               </div>
             </div>
-            <div class="pong-foot">你控制右挡板 · <span id="brick-foot-name">TA</span> 控制左挡板 · 手机按住拖动 · 电脑 A/D 或 ← →</div>
+            <div class="pong-foot">你控制右挡板 · <span id="brick-foot-name">TA</span> 控制左挡板 · 按住拖动</div>
           </div>
         </div>
       </div>
@@ -3533,6 +3822,7 @@
                 </div>
               </div>
             </div>
+            <div class="ms-talk" id="ms-talk" hidden><div class="ms-talk-bubble"></div></div>
             <div class="ms-status" id="ms-status">选择难度开始探索</div>
             <div class="ms-foot">点击挖开 · 长按插旗 · 数字=周围雷数 · 🪙🎁🌸 藏在格子里</div>
           </div>
@@ -3860,16 +4150,19 @@
           <div class="ds-bob" id="drift-bob">🫙</div>
           <div class="ds-cap" id="drift-sea-cap">两个世界之间的海</div>
         </div>
-        <button class="d-pick" id="drift-pick" type="button">捡一个</button>
+        <div class="d-actions">
+          <button class="d-pick" id="drift-pick" type="button">捡一个</button>
+          <button class="d-put" id="d-put" type="button">🌊 我也放一个</button>
+        </div>
         <div class="d-open glass" id="d-open" hidden></div>
         <div class="d-stats" id="d-stats"></div>
         <div class="d-tabs">
           <button class="d-tab sel" data-t="mine" type="button">我的瓶子</button>
           <button class="d-tab" data-t="got" type="button">捡到的</button>
+          <button class="d-tab" data-t="theirs" id="d-tab-theirs" type="button"></button>
           <button class="d-tab" data-t="fav" type="button">收藏</button>
         </div>
         <div class="d-list" id="d-list"></div>
-        <button class="d-put" id="d-put" type="button">🌊 我也放一个</button>
       </div>
     </div>
 
@@ -4003,13 +4296,10 @@
             <span>帮我决定</span>
           </button>
           <button class="more-item" id="more-gdecide" data-mcat="tool" title="多人决定">
-            <span class="mi-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 00-4-4H7a4 4 0 00-4 4v2"/><circle cx="10" cy="7" r="4"/><path d="M21 21v-2a4 4 0 00-3-3.87"/><path d="M16 3.13a4 4 0 010 7.75"/></svg></span>
+            <span class="mi-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="8.6" cy="8.8" r="2.4"/><path d="M3.4 19c.6-3.3 2.8-5 5.2-5s4.6 1.7 5.2 5"/><circle cx="15.4" cy="8.8" r="2.4"/><path d="M10.2 19c.6-3.3 2.8-5 5.2-5s4.6 1.7 5.2 5"/></svg></span>
             <span>多人决定</span>
           </button>
-          <button class="more-item" id="more-invite" data-mcat="chat" title="邀请TA">
-            <span class="mi-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 00-4-4H6a4 4 0 00-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M19 8v6M22 11h-6"/></svg></span>
-            <span>邀请TA</span>
-          </button>
+
           <button class="more-item" id="more-ask" data-mcat="tool" title="问问TA">
             <span class="mi-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M9.6 9.6a2.4 2.4 0 114.8.4c0 1.7-2.4 2.1-2.4 3.3"/><path d="M12 16.7h.01"/></svg></span>
             <span>问问TA</span>
@@ -4023,7 +4313,7 @@
             <span>通话</span>
           </button>
           <button class="more-item" id="more-poke" data-mcat="chat" title="打开拍一拍页面">
-            <span class="mi-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M8 13V5.5a1.5 1.5 0 0 1 3 0V12"/><path d="M11 12V4.5a1.5 1.5 0 0 1 3 0V12.5"/><path d="M14 12.5V7a1.5 1.5 0 0 1 3 0v6c0 3-2.5 5.5-5.5 5.5-1.7 0-3-.6-4-1.6L5 14.3"/></svg></span>
+            <span class="mi-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M8 14.5V7.2a1.5 1.5 0 0 1 3 0v7.3"/><path d="M11 14.5V6.5a1.5 1.5 0 0 1 3 0v8"/><path d="M14 14.5V7.8a1.5 1.5 0 0 1 3 0v6.7"/><path d="M6.5 14.5h12c0 3.5-2.7 6-6 6s-6-2.5-6-6"/><path d="M6 5a8.5 8.5 0 0 1 12 0"/></svg></span>
             <span>拍一拍</span>
           </button>
           <button class="more-item" id="more-rps" data-mcat="game" title="猜拳">
@@ -4033,6 +4323,10 @@
           <button class="more-item" id="more-rp" data-mcat="chat" title="发红包">
             <span class="mi-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 9c3 2 6 3 9 3s6-1 9-3"/><circle cx="12" cy="9" r="1.4"/></svg></span>
             <span>红包</span>
+          </button>
+          <button class="more-item" id="more-invite" data-mcat="chat" title="邀请TA">
+            <span class="mi-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 00-4-4H6a4 4 0 00-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M19 8v6M22 11h-6"/></svg></span>
+            <span>邀请TA</span>
           </button>
           <button class="more-item" id="more-gift" data-mcat="chat" title="心意集市">
             <span class="mi-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="8" width="18" height="4" rx="1"/><path d="M5 12v8a1 1 0 001 1h12a1 1 0 001-1v-8"/><path d="M12 8v13"/>            <path d="M12 8S10.5 4 8 4 5 6 5 8"/><path d="M12 8s1.5-4 4-4 3 2 3 4"/></svg></span>
@@ -4067,7 +4361,7 @@
             <span>打砖块</span>
           </button>
           <button class="more-item" id="more-fish" data-mcat="game" title="双人钓鱼">
-            <span class="mi-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M19 3l-3.2.6c-2 .4-3.8 1.4-5.3 2.9-1.4 1.4-2.4 3.2-3 5.1L4.5 16.5"/><path d="M19 3c-.4 2.8.5 5.6 2.4 7.5"/><path d="M8 14.5a2.3 2.3 0 115.3 0 6 6 0 01-4.8 5c0-1 .2-3 .4-4.5l-.9-.5z"/><path d="M11.5 15l-.9-2.4M7 16.8l1.4-1.2"/></svg></span>
+            <span class="mi-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M17.8 8.8l4.2-3.3"/><path d="M17.8 16.2l4.2 3.3"/><ellipse cx="10.6" cy="12.5" rx="7.2" ry="4.3"/><circle cx="7.2" cy="11.3" r=".6" fill="currentColor" stroke="none"/><path d="M3 5.2q1.7-1.1 3.4 0q1.7-1.1 3.4 0q1.7-1.1 3.4 0"/></svg></span>
             <span>钓鱼</span>
           </button>
           <button class="more-item" id="more-c4" data-mcat="game" title="四子棋">
@@ -4075,11 +4369,11 @@
             <span>四子棋</span>
           </button>
           <button class="more-item" id="more-ms" data-mcat="game" title="合作扫雷（和TA一起探索雷区）">
-            <span class="mi-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="10" cy="14" r="4"/><path d="M13.2 10.8L15.5 8.5"/><path d="M17.5 5.5h3"/><path d="M19 4v3"/></svg></span>
+            <span class="mi-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M9 3v18M15 3v18M3 9h18M3 15h18"/><circle cx="12" cy="12" r="2.3"/></svg></span>
             <span>扫雷</span>
           </button>
           <button class="more-item" id="more-memory" data-mcat="game" title="记忆翻牌（和TA合作）">
-            <span class="mi-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4.5" width="12.5" height="17" rx="2"/><path d="M9.5 2.5H19a2 2 0 012 2v14"/><path d="M9.25 12.6l1.05 2.15 2.15 1.05-2.15 1.05-1.05 2.15-1.05-2.15-2.15-1.05 2.15-1.05z"/></svg></span>
+            <span class="mi-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M8.6 3.4l8.8-2 3.4 3.2-8.8 2z"/><rect x="3.4" y="7" width="15.6" height="13.4" rx="1.8"/><path d="M11.2 11.8l.9 1.9 1.9.9-1.9.9-.9 1.9-.9-1.9-1.9-.9 1.9-.9z"/></svg></span>
             <span>记忆翻牌</span>
           </button>
           <button class="more-item" id="more-ck" data-mcat="tool" title="寻踪（打开 TA 的日常）">
@@ -4120,20 +4414,32 @@
       </div>
 
     <!-- TA在身边·位置面板（聊天寻踪半框 / 桌面寻踪页「TA在身边」入口共用，必须放在所有 .page 之外——
-         position:fixed 弹层若嵌在 .page 内，页面切换时会被父级 hidden 隐藏，桌面寻踪页点开就会"跑到聊天页"） -->
+         position:fixed 弹层若嵌在 .page 内，页面切换时会被父级 hidden 隐藏，桌面寻踪页点开就会"跑到聊天页"；
+         v3.26.x：两入口统一 .loc-full 全屏打开） -->
     <div class="loc-panel" id="loc-panel" hidden>
       <div class="loc-head">
-        <span>TA在身边 · <b id="loc-name">TA</b> 的位置</span>
-        <button class="loc-close" id="loc-close">✕</button>
+        <button class="loc-back" id="loc-back" aria-label="返回">
+          <svg viewBox="0 0 24 24" fill="none" stroke="#111111" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 18l-6-6 6-6"/></svg>
+        </button>
+        <span class="loc-title">TA在身边 · <b id="loc-name">TA</b> 的位置</span>
       </div>
-      <!-- 方位感知（v3.13.x：模糊感知，不是精确定位） -->
-      <div class="fw-sense" id="fw-sense">
-        <div class="fw-circle" id="fw-circle"></div>
-        <div class="fw-detail" id="fw-detail"></div>
-        <button class="fw-perceive" id="fw-perceive" type="button">感知一下</button>
-        <div class="fw-result" id="fw-result" hidden></div>
+      <div class="loc-scroll">
+        <!-- 方位感知（v3.13.x：模糊感知，不是精确定位） -->
+        <div class="fw-sense" id="fw-sense">
+          <div class="fw-title">
+            <span class="fw-title-t">方位感知</span>
+            <span class="fw-title-s">不是精确定位 · 是你对 TA 的模糊感觉</span>
+          </div>
+          <div class="fw-circle" id="fw-circle"></div>
+          <div class="fw-detail" id="fw-detail"></div>
+          <button class="fw-perceive" id="fw-perceive" type="button">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v3M12 18v3M3 12h3M18 12h3M5.6 5.6l2.1 2.1M16.3 16.3l2.1 2.1M18.4 5.6l-2.1 2.1M7.7 16.3l-2.1 2.1"/><circle cx="12" cy="12" r="4"/></svg>
+            感知一下
+          </button>
+          <div class="fw-result" id="fw-result" hidden></div>
+        </div>
+        <div class="loc-body" id="loc-body"></div>
       </div>
-      <div class="loc-body" id="loc-body"></div>
     </div>
 
     <!-- 位置卡光点动效层（全局，同样须在 .page 外） -->
@@ -4147,36 +4453,105 @@
         </span>
         <span class="ch-name">聊天设置</span>
       </div>
-      <!-- v3.7.x：全屏模式（镜像设置页 #sf-fullscreen，同一状态双向同步） -->
-      <div class="gs-title" style="padding-top:2px">全屏</div>
+      <!-- 聊天设置页顶部标签切换：美化 / 功能 / 数据（复用 .them-tabs/.them-sec，交互在 chat-settings.js） -->
+      <div class="them-tabs" id="cs-tabs">
+        <div class="them-tab active" data-tab="beautify">美化</div>
+        <div class="them-tab" data-tab="function">功能</div>
+        <div class="them-tab" data-tab="data">数据</div>
+      </div>
+      <div class="them-sec" data-sec="beautify">
+      <div class="gs-title" style="padding-top:2px">聊天美化方案</div>
       <div class="set-group glass">
-        <div class="set-row" id="cs-fullscreen-row">
-          <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="#111111" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M8 3H5a2 2 0 00-2 2v3M16 3h3a2 2 0 012 2v3M8 21H5a2 2 0 01-2-2v-3M16 21h3a2 2 0 002-2v-3"/></svg></div>
-          <div class="txt">全屏模式（隐藏手机状态栏）</div>
-          <label class="toggle"><input type="checkbox" id="cs-fullscreen"><span class="tk"></span></label>
+        <div class="set-row" id="row-chat-beauty-save">
+          <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="#111111" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 17V9M9 11l3-3 3 3"/><path d="M5 4h11l3 3v13a1 1 0 01-1 1H5a1 1 0 01-1-1V5a1 1 0 011-1z"/></svg></div>
+          <div class="txt">保存当前为聊天美化方案<span class="sub">含气泡颜色/CSS、壁纸、字体、时间轴等，全桌面通用</span></div>
         </div>
-        <!-- v3.9.x：全屏边缘防误触（镜像设置页 #sf-edge-guard，同一状态双向同步） -->
-        <div class="set-row" id="cs-edge-guard-row">
-          <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="#111111" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v18M3 12h18"/></svg></div>
-          <div class="txt">全屏边缘防误触</div>
-          <label class="toggle"><input type="checkbox" id="cs-edge-guard"><span class="tk"></span></label>
-        </div>
-        <!-- v3.10.x：「隐藏音乐悬浮小窗」开关（同源 music-global.floatEn，每桌面独立；语义反转：勾选=隐藏，与下方「隐藏通话小框」一致。音乐页 #music-float-en / 音乐设置 #sm-set-float 仍保持勾选=开启） -->
-        <div class="set-row" id="cs-music-float-row">
-          <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="#111111" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg></div>
-          <div class="txt">隐藏音乐悬浮小窗</div>
-          <label class="toggle"><input type="checkbox" id="cs-music-float"><span class="tk"></span></label>
-        </div>
-        <!-- v3.7.x：隐藏通话小框开关（同源 call-mini-enabled，每桌面独立；勾选=接通后不弹出悬浮小框，保持通话大面板常驻） -->
-        <div class="set-row" id="cs-call-mini-hide-row">
-          <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="#111111" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M22 16.92v3a2 2 0 01-2.18 2 19.79 19.79 0 01-8.63-3.07 19.5 19.5 0 01-6-6 19.79 19.79 0 01-3.07-8.67A2 2 0 014.11 2h3a2 2 0 012 1.72 12.84 12.84 0 00.7 2.81 2 2 0 01-.45 2.11L8.09 9.91a16 16 0 006 6l1.27-1.27a2 2 0 012.11-.45 12.84 12.84 0 002.81.7A2 2 0 0122 16.92z"/></svg></div>
-          <div class="txt">隐藏通话小框</div>
-          <label class="toggle"><input type="checkbox" id="cs-call-mini-hide"><span class="tk"></span></label>
+        <div class="set-row" id="row-chat-beauty-schemes">
+          <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="#111111" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01"/></svg></div>
+          <div class="txt">我的聊天美化方案<span class="sub">保存的方案一键切换，跨桌面通用</span></div>
         </div>
       </div>
+      <div class="gs-title" style="padding-top:2px">壁纸</div>
+      <div class="set-group glass">
+        <div class="set-row" id="cs-bg-upload">
+          <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="#111111" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="3"/><circle cx="9" cy="9" r="2"/><path d="M21 15l-5-5-9 9"/></svg></div>
+          <div class="txt">上传聊天壁纸</div>
+          <div class="val" id="cs-bg-val"></div>
+        </div>
+        <div class="set-row" id="cs-bg-remove" hidden>
+          <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="#111111" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16M10 11v6M14 11v6"/><path d="M6 7l1 12a2 2 0 002 2h6a2 2 0 002-2l1-12"/><path d="M9 7V5a2 2 0 012-2h2a2 2 0 012 2v2"/></svg></div>
+          <div class="txt">移除聊天壁纸</div>
+        </div>
+      </div>
+      <div class="gs-title">气泡样式</div>
+      <div class="set-group glass">
+        <div class="set-row" id="cs-font-size">
+          <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="#111111" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16M4 12h16M4 17h10"/></svg></div>
+          <div class="txt">聊天气泡字体大小</div>
+          <div class="val" id="cs-font-size-val">14px</div>
+        </div>
+        <div class="set-row" id="cs-bubble-size">
+          <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="#111111" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="6" width="18" height="12" rx="3"/><path d="M7 10h.01M10 10h.01M13 10h.01"/></svg></div>
+          <div class="txt">聊天气泡框大小</div>
+          <div class="val" id="cs-bubble-size-val">标准</div>
+        </div>
+        <div class="set-row" id="cs-bubble-radius">
+          <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="#111111" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="8"/></svg></div>
+          <div class="txt">聊天气泡边缘圆角<span class="sub">气泡四角圆润程度，小圆角更利落 / 特圆更可爱</span></div>
+          <div class="val" id="cs-bubble-radius-val">标准</div>
+        </div>
+        <div class="set-row" id="cs-av-shape">
+          <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="#111111" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="8" r="4"/><path d="M4 20c0-4 3.5-6 8-6s8 2 8 6"/></svg></div>
+          <div class="txt">聊天头像形状</div>
+          <div class="val" id="cs-av-shape-val">圆形</div>
+        </div>
+        <div class="set-row" id="cs-time-style">
+          <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="#111111" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg></div>
+          <div class="txt">时间轴样式</div>
+          <div class="val" id="cs-time-style-val">头像下方</div>
+        </div>
+      </div>
+      <div class="gs-title">气泡颜色 / CSS</div>
+      <div class="set-group glass">
+        <div class="set-row" id="cs-out-bg">
+          <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="#111111" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 21a9 9 0 110-18"/><path d="M12 3a9 9 0 019 9"/><path d="M21 12a9 9 0 01-9 9"/><circle cx="12" cy="12" r="2"/></svg></div>
+          <div class="txt">我的气泡颜色</div>
+          <div class="val" id="cs-out-bg-val">默认 #111111</div>
+        </div>
+        <div class="set-row" id="cs-out-ink">
+          <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="#111111" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M5 20L10 6h4l5 14"/><path d="M7.5 14.5h9"/></svg></div>
+          <div class="txt">我的消息文字颜色</div>
+          <div class="val" id="cs-out-ink-val">默认 #ffffff</div>
+        </div>
+        <div class="set-row" id="cs-in-bg">
+          <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="#111111" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 21a9 9 0 110-18"/><path d="M12 3a9 9 0 019 9"/><path d="M21 12a9 9 0 01-9 9"/><circle cx="12" cy="12" r="2"/></svg></div>
+          <div class="txt">联系人气泡颜色</div>
+          <div class="val" id="cs-in-bg-val">默认 #ffffff</div>
+        </div>
+        <div class="set-row" id="cs-in-ink">
+          <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="#111111" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M5 20L10 6h4l5 14"/><path d="M7.5 14.5h9"/></svg></div>
+          <div class="txt">联系人消息文字颜色</div>
+          <div class="val" id="cs-in-ink-val">默认 #111111</div>
+        </div>
+        <div class="set-row" id="cs-css">
+          <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="#111111" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><path d="M14 2v6h6"/><path d="M8 13h8M8 17h5"/></svg></div>
+          <div class="txt">气泡 CSS</div>
+          <div class="val" id="cs-css-val">默认</div>
+        </div>
+      </div>
+      <div class="gs-title">字体</div>
+      <div class="set-group glass">
+        <div class="set-row" id="cs-font">
+          <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="#111111" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16M4 12h16M4 17h10"/></svg></div>
+          <div class="txt">全局字体</div>
+          <div class="val" id="cs-font-val">默认</div>
+        </div>
+      </div>
+      </div>
+      <div class="them-sec" data-sec="function" hidden>
       <!-- v3.8.x：聊天专用昵称/头像（与桌面 deco-widget 的 lbl-*/avatar-* 完全独立，
            桌面只能在桌面改，聊天只能在聊天设置改；未设时聊天页显示默认占位 TA/我 + 人形图标） -->
-      <div class="gs-title" style="padding-top:2px">昵称与头像</div>
+      <div class="gs-title">昵称与头像</div>
       <div class="set-group glass">
         <div class="set-row" id="cs-lbl-partner">
           <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="#111111" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="8" r="4"/><path d="M4 20c0-4 3.5-6 8-6s8 2 8 6"/></svg></div>
@@ -4205,64 +4580,6 @@
         <div class="set-row" id="cs-avatar-user-remove" hidden>
           <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="#111111" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16M10 11v6M14 11v6"/><path d="M6 7l1 12a2 2 0 002 2h6a2 2 0 002-2l1-12"/><path d="M9 7V5a2 2 0 012-2h2a2 2 0 012 2v2"/></svg></div>
           <div class="txt">清空我的头像</div>
-        </div>
-      </div>
-      <div class="gs-title" style="padding-top:2px">壁纸</div>
-      <div class="set-group glass">
-        <div class="set-row" id="cs-bg-upload">
-          <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="#111111" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="3"/><circle cx="9" cy="9" r="2"/><path d="M21 15l-5-5-9 9"/></svg></div>
-          <div class="txt">上传聊天壁纸</div>
-          <div class="val" id="cs-bg-val"></div>
-        </div>
-        <div class="set-row" id="cs-bg-remove" hidden>
-          <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="#111111" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16M10 11v6M14 11v6"/><path d="M6 7l1 12a2 2 0 002 2h6a2 2 0 002-2l1-12"/><path d="M9 7V5a2 2 0 012-2h2a2 2 0 012 2v2"/></svg></div>
-          <div class="txt">移除聊天壁纸</div>
-        </div>
-      </div>
-      <div class="gs-title">气泡样式</div>
-      <div class="set-group glass">
-        <div class="set-row" id="cs-font-size">
-          <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="#111111" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16M4 12h16M4 17h10"/></svg></div>
-          <div class="txt">聊天气泡字体大小</div>
-          <div class="val" id="cs-font-size-val">14px</div>
-        </div>
-        <div class="set-row" id="cs-bubble-size">
-          <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="#111111" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="6" width="18" height="12" rx="3"/><path d="M7 10h.01M10 10h.01M13 10h.01"/></svg></div>
-          <div class="txt">聊天气泡框大小</div>
-          <div class="val" id="cs-bubble-size-val">标准</div>
-        </div>
-        <div class="set-row" id="cs-av-shape">
-          <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="#111111" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="8" r="4"/><path d="M4 20c0-4 3.5-6 8-6s8 2 8 6"/></svg></div>
-          <div class="txt">聊天头像形状</div>
-          <div class="val" id="cs-av-shape-val">圆形</div>
-        </div>
-        <div class="set-row" id="cs-time-style">
-          <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="#111111" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg></div>
-          <div class="txt">时间轴样式</div>
-          <div class="val" id="cs-time-style-val">头像下方</div>
-        </div>
-      </div>
-      <div class="gs-title">气泡颜色</div>
-      <div class="set-group glass">
-        <div class="set-row" id="cs-out-bg">
-          <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="#111111" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 21a9 9 0 110-18"/><path d="M12 3a9 9 0 019 9"/><path d="M21 12a9 9 0 01-9 9"/><circle cx="12" cy="12" r="2"/></svg></div>
-          <div class="txt">我的气泡颜色</div>
-          <div class="val" id="cs-out-bg-val">默认 #111111</div>
-        </div>
-        <div class="set-row" id="cs-out-ink">
-          <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="#111111" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M5 20L10 6h4l5 14"/><path d="M7.5 14.5h9"/></svg></div>
-          <div class="txt">我的消息文字颜色</div>
-          <div class="val" id="cs-out-ink-val">默认 #ffffff</div>
-        </div>
-        <div class="set-row" id="cs-in-bg">
-          <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="#111111" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 21a9 9 0 110-18"/><path d="M12 3a9 9 0 019 9"/><path d="M21 12a9 9 0 01-9 9"/><circle cx="12" cy="12" r="2"/></svg></div>
-          <div class="txt">联系人气泡颜色</div>
-          <div class="val" id="cs-in-bg-val">默认 #ffffff</div>
-        </div>
-        <div class="set-row" id="cs-in-ink">
-          <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="#111111" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M5 20L10 6h4l5 14"/><path d="M7.5 14.5h9"/></svg></div>
-          <div class="txt">联系人消息文字颜色</div>
-          <div class="val" id="cs-in-ink-val">默认 #111111</div>
         </div>
       </div>
       <div class="gs-title">发送按钮</div>
@@ -4313,22 +4630,35 @@
           <label class="toggle"><input type="checkbox" id="cs-hide-ta-sticker"><span class="tk"></span></label>
         </div>
       </div>
-      <div class="gs-title">字体</div>
+      <!-- v3.7.x：全屏模式（镜像设置页 #sf-fullscreen，同一状态双向同步） -->
+      <div class="gs-title">全屏</div>
       <div class="set-group glass">
-        <div class="set-row" id="cs-font">
-          <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="#111111" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16M4 12h16M4 17h10"/></svg></div>
-          <div class="txt">全局字体</div>
-          <div class="val" id="cs-font-val">默认</div>
+        <div class="set-row" id="cs-fullscreen-row">
+          <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="#111111" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M8 3H5a2 2 0 00-2 2v3M16 3h3a2 2 0 012 2v3M8 21H5a2 2 0 01-2-2v-3M16 21h3a2 2 0 002-2v-3"/></svg></div>
+          <div class="txt">全屏模式（隐藏手机状态栏）</div>
+          <label class="toggle"><input type="checkbox" id="cs-fullscreen"><span class="tk"></span></label>
+        </div>
+        <!-- v3.9.x：全屏边缘防误触（镜像设置页 #sf-edge-guard，同一状态双向同步） -->
+        <div class="set-row" id="cs-edge-guard-row">
+          <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="#111111" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v18M3 12h18"/></svg></div>
+          <div class="txt">全屏边缘防误触</div>
+          <label class="toggle"><input type="checkbox" id="cs-edge-guard"><span class="tk"></span></label>
+        </div>
+        <!-- v3.10.x：「隐藏音乐悬浮小窗」开关（同源 music-global.floatEn，每桌面独立；语义反转：勾选=隐藏，与下方「隐藏通话小框」一致。音乐页 #music-float-en / 音乐设置 #sm-set-float 仍保持勾选=开启） -->
+        <div class="set-row" id="cs-music-float-row">
+          <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="#111111" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg></div>
+          <div class="txt">隐藏音乐悬浮小窗</div>
+          <label class="toggle"><input type="checkbox" id="cs-music-float"><span class="tk"></span></label>
+        </div>
+        <!-- v3.7.x：隐藏通话小框开关（同源 call-mini-enabled，每桌面独立；勾选=接通后不弹出悬浮小框，保持通话大面板常驻） -->
+        <div class="set-row" id="cs-call-mini-hide-row">
+          <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="#111111" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M22 16.92v3a2 2 0 01-2.18 2 19.79 19.79 0 01-8.63-3.07 19.5 19.5 0 01-6-6 19.79 19.79 0 01-3.07-8.67A2 2 0 014.11 2h3a2 2 0 012 1.72 12.84 12.84 0 00.7 2.81 2 2 0 01-.45 2.11L8.09 9.91a16 16 0 006 6l1.27-1.27a2 2 0 012.11-.45 12.84 12.84 0 002.81.7A2 2 0 0122 16.92z"/></svg></div>
+          <div class="txt">隐藏通话小框</div>
+          <label class="toggle"><input type="checkbox" id="cs-call-mini-hide"><span class="tk"></span></label>
         </div>
       </div>
-      <div class="gs-title">气泡</div>
-      <div class="set-group glass">
-        <div class="set-row" id="cs-css">
-          <div class="ico"><svg viewBox="0 0 24 24" fill="none" stroke="#111111" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><path d="M14 2v6h6"/><path d="M8 13h8M8 17h5"/></svg></div>
-          <div class="txt">气泡 CSS</div>
-          <div class="val" id="cs-css-val">默认</div>
-        </div>
       </div>
+      <div class="them-sec" data-sec="data" hidden>
       <div class="gs-title">数据</div>
       <div class="set-group glass">
         <div class="set-row" id="cs-export-msgs">
@@ -4349,6 +4679,7 @@
           <div class="txt">允许删除联系人消息<span class="sub">点击消息气泡可弹出删除按钮，消息是真的会删除无法回复</span></div>
           <label class="toggle"><input type="checkbox" id="cs-del-ta-msg"><span class="tk"></span></label>
         </div>
+      </div>
       </div>
     </div>
 
@@ -4400,19 +4731,34 @@
   </div>
 </div>
 
-<!-- 悬浮音乐播放小框（播放时显示，可拖动） -->
+<!-- 悬浮音乐播放小框（播放时显示，可拖动；两行布局：上行歌名/歌手，下行控制按钮；右上角可收起为最初版最小单行小框） -->
 <div class="sm-float" id="sm-float" hidden>
+  <button class="sm-f-collapse" id="sm-f-collapse" title="收起为最小小框">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/><path d="M6 19h12"/></svg>
+  </button>
   <div class="sm-f-info">
-    <span class="sm-f-name" id="sm-f-name">正在播放</span>
+    <div class="sm-f-name" id="sm-f-name">正在播放</div>
+    <div class="sm-f-artist" id="sm-f-artist">音乐</div>
     <div class="sm-f-progress"><div class="sm-f-fill" id="sm-f-fill"></div></div>
+    <div class="sm-f-times"><span id="sm-f-cur">0:00</span><span id="sm-f-dur">0:00</span></div>
   </div>
   <div class="sm-f-ctrl">
-    <button class="sm-f-btn sm-f-heart" id="sm-f-heart" title="收藏">
-      <svg id="sm-f-heart-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20.5S4.5 15.2 4.5 9.9A4.9 4.9 0 0112 7.1a4.9 4.9 0 017.5 2.8c0 5.3-7.5 10.6-7.5 10.6z"/></svg>
-    </button>
+    <button class="sm-f-btn" id="sm-f-mode" title="播放模式"><svg id="sm-f-mode-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 6h13M8 12h13M8 18h13"/><path d="M3 6h.01M3 12h.01M3 18h.01"/></svg></button>
+    <button class="sm-f-btn" id="sm-f-queue" title="播放队列"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M3 12h18M3 18h9"/></svg></button>
     <button class="sm-f-btn" id="sm-f-prev" title="上一首"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M6 6h2v12H6zm3.5 6l8.5 6V6z"/></svg></button>
     <button class="sm-f-btn sm-f-play" id="sm-f-play" title="播放/暂停"><svg id="sm-f-play-ico" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg></button>
     <button class="sm-f-btn" id="sm-f-next" title="下一首"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M6 18l8.5-6L6 6v12zM16 6v12h2V6h-2z"/></svg></button>
+    <button class="sm-f-btn sm-f-heart" id="sm-f-heart" title="收藏">
+      <svg id="sm-f-heart-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20.5S4.5 15.2 4.5 9.9A4.9 4.9 0 0112 7.1a4.9 4.9 0 017.5 2.8c0 5.3-7.5 10.6-7.5 10.6z"/></svg>
+    </button>
+  </div>
+  <!-- 最小态：最初版最小单行小框（收起后显示，点播放/展开按钮恢复互动） -->
+  <div class="sm-f-mini" id="sm-f-mini">
+    <button class="sm-f-mini-play" id="sm-f-mini-play" title="播放/暂停"><svg id="sm-f-mini-play-ico" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg></button>
+    <div class="sm-f-mini-name" id="sm-f-mini-name">正在播放</div>
+    <button class="sm-f-mini-expand" id="sm-f-mini-expand" title="展开新版小框">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 3H5a2 2 0 0 0-2 2v3"/><path d="M21 8V5a2 2 0 0 0-2-2h-3"/><path d="M3 16v3a2 2 0 0 0 2 2h3"/><path d="M16 21h3a2 2 0 0 0 2-2v-3"/></svg>
+    </button>
   </div>
 </div>
 

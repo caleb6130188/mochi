@@ -28,6 +28,14 @@
     { label: '标准', value: '11px 14px' },
     { label: '宽松', value: '14px 18px' }
   ];
+  // v3.25.x：聊天气泡边缘（四角圆角大小）
+  const BUBBLE_RADII = [
+    { label: '小圆角', value: '6px' },
+    { label: '标准', value: '12px' },
+    { label: '大圆角', value: '18px' },
+    { label: '特圆', value: '28px' }
+  ];
+  const BUBBLE_RADIUS_DEFAULT = '18px';
   // v3.9.x：时间轴样式（默认头像下方，与原实现一致）
   // under-av=头像下方  under-bubble=气泡下方  bubble=时间气泡  float=气泡外侧悬浮
   // center=消息上方居中  divider=时间分隔线（微信式，消息间隔大时插居中胶囊）  hidden=隐藏
@@ -66,6 +74,9 @@
     root.style.setProperty('--msg-out-ink', outInk);
     root.style.setProperty('--chat-font-size', fs);
     root.style.setProperty('--chat-bubble-pad', pad);
+    // 聊天气泡边缘（四角圆角大小）
+    const rad = store.get('cs-bubble-radius') || BUBBLE_RADIUS_DEFAULT;
+    root.style.setProperty('--chat-bubble-radius', rad);
     // 时间轴颜色（默认黑/深色模式灰）
     const timeInk = store.get('cs-time-ink') || DEF.timeInk;
     root.style.setProperty('--msg-time-ink', timeInk);
@@ -128,6 +139,8 @@
     set('cs-font-size-val', fs);
     const pn = BUBBLE_SIZES.find(p => p.value === pad);
     set('cs-bubble-size-val', pn ? pn.label : '自定义');
+    const rn = BUBBLE_RADII.find(p => p.value === rad);
+    set('cs-bubble-radius-val', rn ? rn.label : (rad === '0px' ? '方形' : rad));
     set('cs-bg-val', bg ? '已设置' : '');
     const rm = document.getElementById('cs-bg-remove');
     if (rm) rm.hidden = !bg;
@@ -280,15 +293,12 @@
   }
   function applyProfile() {
     const set = (id, v) => { const el = document.getElementById(id); if (el) el.textContent = v; };
-    // v3.9.x：聊天昵称未设置时显示「跟随桌面（xx）」，明确当前聊天页使用的昵称来源
-    const follow = (chatKey, deskKey, fb) => {
-      let d = null; try { d = store.get(deskKey); } catch (e) {}
-      return d ? '跟随桌面（' + d + '）' : fb;
-    };
+    // v3.26.x：聊天昵称与桌面解耦（用户要求不再跟随桌面）——未设置时显示默认占位提示，
+    // 不再显示「跟随桌面（xx）」，也不回退读桌面 lbl-partner/lbl-user
     const lp = store.get('cs-lbl-partner');
-    set('cs-lbl-partner-val', lp || follow('cs-lbl-partner', 'lbl-partner', ''));
+    set('cs-lbl-partner-val', lp || '未设置（默认 TA）');
     const lu = store.get('cs-lbl-user');
-    set('cs-lbl-user-val', lu || follow('cs-lbl-user', 'lbl-user', ''));
+    set('cs-lbl-user-val', lu || '未设置（默认 我）');
     const ap = store.get('cs-avatar-partner');
     set('cs-avatar-partner-val', ap ? '已设置' : '');
     const ar = document.getElementById('cs-avatar-partner-remove');
@@ -306,7 +316,13 @@
       const cur = store.get('cs-lbl-partner') || '';
       window.openModal('联系人昵称', cur, (v) => {
         const val = (v || '').trim();
+        // v3.25.x：有效昵称变化时触发系统消息昵称清扫（chat.js），历史系统消息称呼跟随
+        // v3.26.x：与桌面解耦后有效昵称基线只看 cs-lbl-partner（默认 TA），不再掺入桌面键
+        const oldEff = store.get('cs-lbl-partner') || 'TA';
         if (val) store.set('cs-lbl-partner', val); else store.remove('cs-lbl-partner');
+        if (oldEff !== (val || 'TA')) {
+          try { if (window.chatSysNickChanged) window.chatSysNickChanged(oldEff); } catch (e) {}
+        }
         applyProfile();
         try { if (window.renderChatHeader) window.renderChatHeader(); } catch (e) {}
       }, { maxlength: 30 });
@@ -485,6 +501,29 @@
         document.getElementById('tc-mask').hidden = true;
         applySettings();
         toast('气泡框大小已应用');
+      });
+    });
+  }
+  // v3.25.x：聊天气泡边缘（四角圆角大小）——滑块自由调节 + 预设胶囊，实时预览
+  const csRadius = row('cs-bubble-radius');
+  if (csRadius) {
+    csRadius.addEventListener('click', () => {
+      if (!window.openModal) return;
+      const curStr = store.get('cs-bubble-radius') || BUBBLE_RADIUS_DEFAULT;
+      const curNum = (parseInt(curStr, 10) || 0);
+      window.openModal('聊天气泡边缘圆角', '', (v) => {
+        const px = typeof v === 'number' ? v : (parseInt(v, 10) || 0);
+        store.set('cs-bubble-radius', px + 'px');
+        applySettings();
+      }, {
+        noInput: true,
+        slider: {
+          min: 0, max: 40, step: 1, value: Math.max(0, Math.min(40, curNum)),
+          label: '拖动调整气泡圆角', unit: 'px', preview: true,
+          onChange: (val) => { root.style.setProperty('--chat-bubble-radius', val + 'px'); }
+        },
+        pills: BUBBLE_RADII,
+        pill: curStr
       });
     });
   }
@@ -670,6 +709,358 @@
   }
   applyCss();
 
+  // ================= v3.18.x：聊天美化方案（全局保存，所有联系人桌面通用） =================
+  // 用户需求：聊天设置里也能像手机桌面美化一样，把气泡颜色/CSS、壁纸、字体、时间轴等
+  // 全部美化保存成方案；保存后切换联系人/桌面依然可见，可一键应用（读当前桌面的 activeStore）。
+  const gStoreChat = window.xyStore('xy-home-v2');
+  const CHAT_SCHEMES_KEY = 'chat-beauty-schemes';
+  const CHAT_BEAUTY_KEYS = [
+    'cs-bg', 'cs-bubble-css', 'cs-font', 'cs-font-size', 'cs-bubble-size',
+    'cs-bubble-radius', 'cs-av-shape', 'cs-time-style', 'cs-time-ink', 'cs-typing-ink',
+    'cs-out-bg', 'cs-out-ink', 'cs-in-bg', 'cs-in-ink',
+    'cs-send-bg', 'cs-send-ink', 'cs-send-show'
+  ];
+  const getChatSchemes = () => {
+    try { const a = JSON.parse(gStoreChat.get(CHAT_SCHEMES_KEY) || '[]'); return Array.isArray(a) ? a : []; } catch (e) { return []; }
+  };
+  const saveChatSchemesList = (arr) => { try { gStoreChat.set(CHAT_SCHEMES_KEY, JSON.stringify(arr)); } catch (e) {} };
+  const collectChatBeauty = () => {
+    const data = {};
+    CHAT_BEAUTY_KEYS.forEach(k => { const v = store.get(k); if (v !== null && v !== undefined && v !== '') data[k] = v; });
+    return data;
+  };
+  const applyChatBeautyData = (data) => {
+    CHAT_BEAUTY_KEYS.forEach(k => { if (data[k] !== undefined) store.set(k, data[k]); });
+    try { applySettings(); applyCss(); applyFont(); } catch (e) {}
+  };
+  function chatSchemeModalEl() {
+    let m = document.getElementById('chat-beauty-scheme-manager');
+    if (!m) {
+      m = document.createElement('div'); m.id = 'chat-beauty-scheme-manager'; m.hidden = true;
+      m.style.cssText = 'position:fixed;inset:0;z-index:89;align-items:center;justify-content:center;background:rgba(0,0,0,.4)';
+      document.body.appendChild(m);
+      m.addEventListener('click', (e) => { if (e.target === m) { m.style.display = 'none'; m.hidden = true; } });
+    }
+    return m;
+  }
+  function hideChatSchemeModal(m) { if (m) { m.style.display = 'none'; m.hidden = true; } }
+  function applyChatScheme(idx, m) {
+    const s = getChatSchemes()[idx];
+    if (!s || !window.openModal) return;
+    // v3.26.x：预选中唯一「应用」pill——noInput 弹窗只点底部「确定」时 fire() 传
+    // pillVal=null → v!=='ok' 静默不应用（与桌面「应用方案/恢复默认桌面」同因同修）
+    const ctl = window.openModal('应用方案「' + s.name + '」？', '', (v) => {
+      if (v !== 'ok') return;
+      applyChatBeautyData(s.data || {});
+      hideChatSchemeModal(m);
+      toast('已应用「' + s.name + '」，当前聊天立即生效');
+    }, { noInput: true, staticText: '将覆盖当前联系人桌面的聊天美化设置，立即生效', pills: [{ label: '应用', value: 'ok' }] });
+    if (ctl && ctl.pills) ctl.pills([{ label: '应用', value: 'ok' }], 'ok');
+  }
+  function deleteChatScheme(idx, m) {
+    const s = getChatSchemes()[idx];
+    if (!s || !window.openModal) return;
+    // v3.26.x：预选中唯一「删除」pill——否则用户只点底部「确定」时传 null → 静默不删除（反馈"没反应"）
+    const ctl = window.openModal('删除方案「' + s.name + '」？', '', (v) => {
+      if (v !== 'ok') return;
+      const list = getChatSchemes();
+      list.splice(idx, 1);
+      saveChatSchemesList(list);
+      toast('已删除方案');
+      window.openChatBeautySchemes();
+    }, { noInput: true, staticText: '删除后不可恢复', pills: [{ label: '删除', value: 'ok' }] });
+    if (ctl && ctl.pills) ctl.pills([{ label: '删除', value: 'ok' }], 'ok');
+  }
+  // 小按钮构造器
+  function mkBtn(label, css, fn) {
+    const b = document.createElement('button');
+    b.textContent = label;
+    b.style.cssText = css;
+    b.addEventListener('click', fn);
+    return b;
+  }
+  // v3.26.x：聊天美化方案导出——先选「当前设置 / 某个已保存方案」，再走文件/文字（与桌面美化导出一致）
+  function chatSchemeExport() {
+    const schemes = getChatSchemes();
+    const doExport = (data) => {
+      const json = JSON.stringify(data);
+      if (!window.openModal) { toast('导出失败'); return; }
+      window.openModal('导出聊天美化方案', '', (v) => {
+        if (v === 'file') {
+          try {
+            const blob = new Blob([json], { type: 'application/json' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = 'mochi聊天美化方案-' + new Date().toISOString().slice(0, 10) + '.json';
+            document.body.appendChild(a); a.click();
+            setTimeout(() => { try { document.body.removeChild(a); URL.revokeObjectURL(url); } catch (e) {} }, 1000);
+            toast('已导出聊天美化方案文件');
+          } catch (e) { toast('导出文件失败'); }
+        } else if (v === 'text') {
+          if (navigator.clipboard && navigator.clipboard.writeText) {
+            navigator.clipboard.writeText(json).then(() => toast('已复制到剪贴板，发给对方粘贴导入')).catch(() => toast('复制失败，请改用导出文件'));
+          } else { toast('剪贴板不可用，请改用导出文件'); }
+        }
+      }, {
+        noInput: true,
+        staticText: '选择导出方式：\n· 导出文件：生成 .json 文件，可保存或发送\n· 复制文字：复制配置文本，发给对方粘贴导入',
+        pills: [
+          { label: '导出文件', value: 'file' },
+          { label: '复制文字', value: 'text' },
+        ],
+      });
+    };
+    // 无已保存方案时直接导出当前设置
+    if (!schemes.length || !window.openModal) { doExport(collectChatBeauty()); return; }
+    const pills = [{ label: '当前设置', value: 'current' }]
+      .concat(schemes.map((s, i) => ({ label: s.name || ('方案' + (i + 1)), value: 'sch_' + i })));
+    window.openModal('导出聊天美化方案', '', (v) => {
+      let data;
+      if (v && v.indexOf('sch_') === 0) {
+        const i = parseInt(String(v).slice(4), 10);
+        const s = schemes[i];
+        if (!s) { toast('未找到该方案'); return; }
+        data = s.data || {};
+      } else {
+        data = collectChatBeauty();
+      }
+      doExport(data);
+    }, {
+      noInput: true,
+      staticText: '选择要导出的聊天美化方案：\n· 当前设置：导出当前正在使用的聊天美化\n· 已保存方案：导出对应方案（含气泡/壁纸/字体）',
+      pills: pills,
+    });
+  }
+  // v3.26.x：聊天美化方案导入——粘贴文本/选文件 → 校验 → 应用到当前聊天（与桌面美化导入一致）
+  function chatSchemeImport() {
+    if (!window.openModal) return;
+    window.openModal('导入聊天美化方案', '', (v) => {
+      if (!v || !v.trim()) return;
+      try {
+        const data = JSON.parse(v.trim());
+        if (typeof data !== 'object' || Array.isArray(data)) { toast('格式错误'); return; }
+        applyChatBeautyData(data);
+        toast('已导入，当前聊天立即生效');
+        window.openChatBeautySchemes();
+      } catch (e) { toast('解析失败，请检查文本'); }
+    }, { textarea: true, textareaPlaceholder: '粘贴对方导出的聊天美化方案文本，或点下方「从文件导入」选择 .json 文件', txtImport: true });
+  }
+  // v3.25.x：方案缩略图——按方案数据渲染迷你聊天气泡预览
+  function chatSchemeThumb(data) {
+    data = data || {};
+    const inBg = data['cs-in-bg'] || '#ffffff';
+    const inInk = data['cs-in-ink'] || '#111111';
+    const outBg = data['cs-out-bg'] || '#111111';
+    const outInk = data['cs-out-ink'] || '#ffffff';
+    const r = (parseInt(data['cs-bubble-radius'] || '18px', 10) || 18) / 2;
+    const tl = Math.max(0, Math.min(9, Math.round(r)));
+    const bg = data['cs-bg'] || '';
+    const hasCss = !!data['cs-bubble-css'];
+    const wall = bg
+      ? '<div style="position:absolute;inset:0;background-image:url(&quot;' + bg + '&quot;);background-size:cover;background-position:center;opacity:.4"></div>'
+      : '';
+    const cssChip = hasCss
+      ? '<div style="position:absolute;left:5px;bottom:4px;font-size:9px;color:#fff;background:rgba(0,0,0,.5);padding:1px 5px;border-radius:5px">CSS</div>'
+      : '';
+    return '' +
+      '<div style="position:relative;width:100%;height:64px;border-radius:9px;overflow:hidden;background:#e6e9ee;display:flex;align-items:center;padding:8px 10px;box-sizing:border-box;gap:5px">' +
+      wall +
+      '<div style="position:relative;align-self:flex-end;padding:4px 8px;border-radius:' + tl + 'px;font-size:10px;line-height:1.2;color:' + inInk + ';background:' + inBg + ';box-shadow:0 1px 2px rgba(0,0,0,.08);max-width:56%">对方</div>' +
+      '<div style="margin-left:auto;position:relative;align-self:flex-start;padding:4px 8px;border-radius:' + tl + 'px;font-size:10px;line-height:1.2;color:' + outInk + ';background:' + outBg + ';box-shadow:0 1px 2px rgba(0,0,0,.08);max-width:56%">我的</div>' +
+      cssChip +
+      '</div>';
+  }
+  // v3.25.x：当前聊天美化的文字摘要 chips（气泡色/圆角/字号/CSS/壁纸/头像形状/时间轴）
+  function chatBeautySummary(data) {
+    data = data || {};
+    const out = [];
+    const inBg = data['cs-in-bg'], outBg = data['cs-out-bg'];
+    if (inBg || outBg) out.push('气泡色 ' + (inBg || '默认') + ' / ' + (outBg || '默认'));
+    const rad = data['cs-bubble-radius'] || '18px';
+    const rn = BUBBLE_RADII.find(p => p.value === rad);
+    out.push('圆角 ' + (rn ? rn.label : rad));
+    const fs = data['cs-font-size'] || '14px';
+    const fnl = FONT_SIZES.find(p => p.value === fs);
+    out.push('字号 ' + (fnl ? fnl.label : fs));
+    if (data['cs-bubble-css']) out.push('自定义CSS');
+    if (data['cs-bg']) out.push('壁纸');
+    const av = data['cs-av-shape'];
+    if (av) out.push('头像 ' + ({ circle: '圆形', round: '圆角', square: '方形' }[av] || av));
+    return out;
+  }
+  // 保存方案的确认弹窗：实时预览 + 当前设置摘要 + 命名（可视可确认再存）
+  function chatSaveModalEl() {
+    let m = document.getElementById('chat-beauty-save-modal');
+    if (!m) {
+      m = document.createElement('div'); m.id = 'chat-beauty-save-modal'; m.hidden = true;
+      m.style.cssText = 'position:fixed;inset:0;z-index:90;align-items:center;justify-content:center;background:rgba(0,0,0,.4);display:none';
+      document.body.appendChild(m);
+      m.addEventListener('click', (e) => { if (e.target === m) { m.style.display = 'none'; m.hidden = true; } });
+    }
+    return m;
+  }
+  window.saveChatBeautyScheme = function () {
+    const x = chatSaveModalEl();
+    x.innerHTML = '';
+    const wrap = document.createElement('div');
+    wrap.style.cssText = 'box-sizing:border-box;width:min(84vw,340px);max-height:84vh;overflow-y:auto;background:var(--card-bg,#fff);color:var(--ink,#111);border-radius:16px;padding:16px;box-shadow:0 14px 40px rgba(0,0,0,.25)';
+    const hd = document.createElement('div');
+    hd.style.cssText = 'font-size:15px;font-weight:700;text-align:center;margin-bottom:12px';
+    hd.textContent = '保存当前为聊天美化方案';
+    const data = collectChatBeauty();
+    const pv = document.createElement('div');
+    pv.innerHTML = chatSchemeThumb(data);
+    const sub = document.createElement('div');
+    sub.style.cssText = 'font-size:10.5px;color:var(--muted,#999);margin:8px 0 6px';
+    sub.textContent = '正在保存的当前设置：';
+    const sum = document.createElement('div');
+    sum.style.cssText = 'display:flex;flex-wrap:wrap;gap:5px;margin-bottom:12px';
+    const chips = chatBeautySummary(data);
+    if (!chips.length) { const e = document.createElement('span'); e.textContent = '以上传壁纸/气泡等设置为主'; e.style.cssText = 'font-size:10.5px;color:var(--muted,#999)'; sum.appendChild(e); }
+    else chips.forEach(c => { const el = document.createElement('span'); el.textContent = c; el.style.cssText = 'font-size:10.5px;color:var(--muted,#666);background:var(--card-soft,#f2f3f5);border:1px solid var(--card-border,#eee);padding:2px 8px;border-radius:999px'; sum.appendChild(el); });
+    const inp = document.createElement('input');
+    inp.placeholder = '例如：简约白、情侣粉气泡…'; inp.maxLength = 20;
+    inp.style.cssText = 'width:100%;box-sizing:border-box;padding:9px 11px;font-size:13px;border:1px solid var(--card-border,#ddd);border-radius:9px;background:var(--bg-b,#fff);color:var(--ink,#111)';
+    const act = document.createElement('div');
+    act.style.cssText = 'display:flex;gap:8px;margin-top:13px;justify-content:flex-end';
+    const cancel = mkBtn('取消', 'font-size:12.5px;padding:7px 14px;border:1px solid var(--card-border,#eee);border-radius:9px;background:var(--btn-cancel-bg,#fafafa);color:var(--btn-cancel-ink,#555)', () => { x.style.display = 'none'; x.hidden = true; });
+    const ok = mkBtn('保存方案', 'font-size:12.5px;padding:7px 14px;border:none;border-radius:9px;background:var(--ink,#111);color:#fff', () => {
+      const name = (inp.value || '').trim();
+      if (!name) { inp.style.borderColor = '#e05a5a'; return; }
+      const list = getChatSchemes();
+      list.push({ name, time: Date.now(), data });
+      saveChatSchemesList(list);
+      x.style.display = 'none'; x.hidden = true;
+      toast('已保存方案「' + name + '」，所有桌面通用');
+      const m = document.getElementById('chat-beauty-scheme-manager');
+      if (m && !m.hidden) window.openChatBeautySchemes();
+    });
+    act.appendChild(cancel); act.appendChild(ok);
+    wrap.appendChild(hd); wrap.appendChild(pv); wrap.appendChild(sub); wrap.appendChild(sum); wrap.appendChild(inp); wrap.appendChild(act);
+    x.appendChild(wrap);
+    x.style.display = 'flex'; x.hidden = false;
+    setTimeout(() => { try { inp.focus(); } catch (e) {} }, 60);
+  };
+  // v3.25.x：聊天方案预览——暂存当前聊天美化 → 应用所选方案（即时生效，可还原）
+  let chatPreviewBackup = null;
+  function chatPreviewBarEl() {
+    let bar = document.getElementById('chat-beauty-preview-bar');
+    if (!bar) {
+      bar = document.createElement('div'); bar.id = 'chat-beauty-preview-bar';
+      bar.style.cssText = 'position:fixed;left:0;right:0;bottom:0;z-index:96;margin:12px;padding:12px 14px;background:var(--card-bg,#fff);color:var(--ink,#111);border:1px solid var(--card-border,#eee);border-radius:14px;box-shadow:0 8px 30px rgba(0,0,0,.25);display:none;align-items:center;gap:10px';
+      document.body.appendChild(bar);
+    }
+    return bar;
+  }
+  function chatStartPreview(s, m) {
+    if (!s) return;
+    chatPreviewBackup = collectChatBeauty();
+    hideChatSchemeModal(m);
+    applyChatBeautyData(s.data || {});
+    const bar = chatPreviewBarEl();
+    bar.innerHTML = '';
+    const tx = document.createElement('div'); tx.style.flex = '1'; tx.style.fontSize = '13px';
+    tx.innerHTML = '正在预览「<b>' + s.name + '</b>」<div style="font-size:11px;color:var(--muted,#999)">去聊天页查看效果，点「使用」保存 / 「还原」恢复</div>';
+    const re = mkBtn('还原', 'font-size:12px;padding:6px 12px;border:1px solid var(--card-border,#eee);border-radius:8px;background:var(--btn-cancel-bg,#fafafa);color:var(--btn-cancel-ink,#555)', () => {
+      if (chatPreviewBackup) applyChatBeautyData(chatPreviewBackup);
+      chatPreviewBackup = null; bar.style.display = 'none'; toast('已还原');
+    });
+    const keep = mkBtn('使用这个方案', 'font-size:12px;padding:6px 12px;border:none;border-radius:8px;background:var(--ink,#111);color:var(--bg-b,#fff)', () => {
+      chatPreviewBackup = null; bar.style.display = 'none'; toast('已应用「' + s.name + '」');
+    });
+    bar.appendChild(tx); bar.appendChild(re); bar.appendChild(keep);
+    bar.style.display = 'flex';
+  }
+  // v3.25.x：重命名聊天方案
+  function renameChatScheme(idx, m) {
+    const list = getChatSchemes();
+    const s = list[idx];
+    if (!s || !window.openModal) return;
+    const ctl = window.openModal('编辑方案名称', s.name, (name) => {
+      name = (name || '').trim();
+      if (!name) { ctl.hint('名称不能为空'); ctl.stay(); return; }
+      s.name = name; saveChatSchemesList(list); toast('已重命名');
+      window.openChatBeautySchemes();
+    }, { maxlength: 20, placeholder: '输入方案名称' });
+  }
+  window.openChatBeautySchemes = function () {
+    const m = chatSchemeModalEl();
+    m.innerHTML = '';
+    const box = document.createElement('div');
+    box.style.cssText = 'width:min(92vw,420px);max-height:80vh;display:flex;flex-direction:column;background:var(--card-bg,#fff);color:var(--ink,#111);border-radius:16px;padding:18px;box-shadow:0 8px 30px rgba(0,0,0,.2)';
+    const head = document.createElement('div');
+    head.innerHTML = '<div style="font-size:16px;font-weight:600;margin-bottom:4px">聊天美化方案</div><div style="font-size:12px;color:var(--muted,#888);margin-bottom:12px">方案在所有联系人桌面通用（含气泡颜色/CSS、背景图、字体、时间轴等），点「应用」一键切换当前聊天外观</div>';
+    box.appendChild(head);
+    const list = document.createElement('div'); list.className = 'cm-list';
+    list.style.cssText = 'display:flex;flex-direction:column;gap:8px;margin-bottom:12px;overflow-y:auto;overflow-x:hidden;-webkit-overflow-scrolling:touch;flex:1;min-height:0';
+    const schemes = getChatSchemes();
+    if (!schemes.length) {
+      const empty = document.createElement('div');
+      empty.innerHTML = '<div style="font-size:13px;color:var(--muted,#999);text-align:center;padding:20px 0">还没有保存的聊天美化方案<br>先点下方「保存当前为方案」</div>';
+      list.appendChild(empty);
+    }
+    schemes.forEach((s, i) => {
+      const row = document.createElement('div');
+      row.style.cssText = 'display:flex;flex-direction:column;gap:8px;padding:10px;border:1px solid var(--card-border,#eee);border-radius:10px';
+      const th = document.createElement('div');
+      th.innerHTML = chatSchemeThumb(s.data || {});
+      row.appendChild(th);
+      const nm = document.createElement('div');
+      const t = new Date(s.time || Date.now());
+      const ds = (t.getMonth() + 1) + '-' + t.getDate();
+      nm.innerHTML = '<div style="font-size:14px;font-weight:600;word-break:break-all">' + s.name + '</div><div style="font-size:11px;color:var(--muted,#999)">保存于 ' + ds + '</div>';
+      row.appendChild(nm);
+      const btns = document.createElement('div');
+      btns.style.cssText = 'display:flex;align-items:center;gap:7px;flex-wrap:wrap';
+      btns.appendChild(mkBtn('预览', 'font-size:12px;padding:4px 10px;border:1px solid var(--card-border,#ddd);border-radius:8px;background:var(--btn-cancel-bg,#fafafa);color:var(--ink,#111)', () => chatStartPreview(s, m)));
+      btns.appendChild(mkBtn('应用', 'font-size:12px;padding:4px 10px;border:none;border-radius:8px;background:var(--ink,#111);color:var(--bg-b,#fff)', () => applyChatScheme(i, m)));
+      btns.appendChild(mkBtn('改名', 'font-size:12px;padding:4px 10px;border:1px solid var(--card-border,#ddd);border-radius:8px;background:var(--btn-cancel-bg,#fafafa);color:var(--ink,#111)', () => renameChatScheme(i, m)));
+      btns.appendChild(mkBtn('删除', 'font-size:12px;padding:4px 10px;border:1px solid rgba(163,45,45,.35);border-radius:8px;background:var(--danger-soft,#fff5f5);color:var(--danger-ink,#a32d2d)', () => deleteChatScheme(i, m)));
+      row.appendChild(btns);
+      list.appendChild(row);
+    });
+    box.appendChild(list);
+    // v3.26.x：导出/导入聊天美化方案
+    const opera = document.createElement('div');
+    opera.style.cssText = 'display:flex;gap:8px;margin-bottom:8px';
+    const exBtn = mkBtn('导出方案', 'flex:1;padding:10px;border:1px solid var(--card-border,#ddd);border-radius:10px;background:var(--btn-cancel-bg,#fafafa);color:var(--ink,#111);font-size:13px;font-weight:600', () => chatSchemeExport());
+    const imBtn = mkBtn('导入方案', 'flex:1;padding:10px;border:1px solid var(--card-border,#ddd);border-radius:10px;background:var(--btn-cancel-bg,#fafafa);color:var(--ink,#111);font-size:13px;font-weight:600', () => chatSchemeImport());
+    opera.appendChild(exBtn); opera.appendChild(imBtn);
+    box.appendChild(opera);
+    const save = document.createElement('button');
+    save.textContent = '+ 保存当前为方案';
+    save.style.cssText = 'width:100%;padding:12px;border:none;border-radius:10px;background:var(--ink,#111);color:var(--bg-b,#fff);font-size:14px;font-weight:600';
+    save.addEventListener('click', () => { window.saveChatBeautyScheme(); });
+    box.appendChild(save);
+    const close = document.createElement('button');
+    close.textContent = '关闭';
+    close.style.cssText = 'width:100%;margin-top:8px;padding:10px;border:1px solid var(--card-border,#eee);border-radius:10px;background:var(--btn-cancel-bg,#fafafa);color:var(--btn-cancel-ink,#555)';
+    close.addEventListener('click', () => hideChatSchemeModal(m));
+    box.appendChild(close);
+    m.appendChild(box);
+    m.style.display = 'flex'; m.hidden = false;
+  };
+  const chatBeautySaveRow = document.getElementById('row-chat-beauty-save');
+  if (chatBeautySaveRow) chatBeautySaveRow.addEventListener('click', () => window.saveChatBeautyScheme());
+  const chatBeautySchemesRow = document.getElementById('row-chat-beauty-schemes');
+  if (chatBeautySchemesRow) chatBeautySchemesRow.addEventListener('click', () => window.openChatBeautySchemes());
+
+  // 聊天设置页：顶部标签切换（美化 / 功能 / 数据），复用 .them-tabs/.them-sec 结构互斥显示
+  (function initChatSettingsTabs() {
+    const tabsEl = document.getElementById('cs-tabs');
+    const page = document.getElementById('page-chat-settings');
+    if (!tabsEl || !page) return;
+    const tabs = tabsEl.querySelectorAll('.them-tab');
+    const secs = page.querySelectorAll('.them-sec');
+    function show(name) {
+      secs.forEach(s => { s.hidden = (s.dataset.sec !== name); });
+      tabs.forEach(t => { t.classList.toggle('active', t.dataset.tab === name); });
+    }
+    tabs.forEach(t => t.addEventListener('click', () => show(t.dataset.tab)));
+    show(tabs[0] ? tabs[0].dataset.tab : 'beautify');
+  })();
+
   // ================= 导出 / 导入聊天记录（数据，与清空同组） =================
   // 导出：打包为独立 JSON 下载（聊天记录可能含图片 dataURL，体积大也直接下载，不走 localStorage）
   const csExport = row('cs-export-msgs');
@@ -800,6 +1191,39 @@
     try { applyFont(); } catch (e) {}
   });
 
+  // ===== v3.26.x：镜像开关轮询合并为单一 ticker（iOS 卡顿收口）=====
+  // 下方六处「聊天设置页 ⇄ 设置页/存储」镜像开关各写了一个 setInterval(sync,500)，
+  // 且句柄全部丢弃（永不可清）——boot 起常驻 6 个定时器，每秒 12 次读 checkbox /
+  // localStorage，不管用户在不在这一页。合并成一个共享 ticker：
+  //   · 仅在 #page-chat-settings 未 hidden 且文档 visible 时运行，离页/切后台即停；
+  //   · 进页当帧先跑一次（不等 500ms，避免开关显示滞后）；
+  //   · contact-switched（按桌面存的值会变）立即补跑一次。
+  const _csTicker = { fns: [], timer: 0 };
+  function csAddSync(fn) { _csTicker.fns.push(fn); }
+  function _csRun() {
+    for (let i = 0; i < _csTicker.fns.length; i++) { try { _csTicker.fns[i](); } catch (e) {} }
+  }
+  function _csTickOn() {
+    if (_csTicker.timer) return;
+    _csRun();
+    _csTicker.timer = setInterval(_csRun, 500);
+  }
+  function _csTickOff() {
+    if (_csTicker.timer) { clearInterval(_csTicker.timer); _csTicker.timer = 0; }
+  }
+  (function () {
+    const page = document.getElementById('page-chat-settings');
+    if (!page) return;
+    const want = () => {
+      if (!page.hidden && document.visibilityState === 'visible') _csTickOn();
+      else _csTickOff();
+    };
+    try { new MutationObserver(want).observe(page, { attributes: true, attributeFilter: ['hidden'] }); } catch (e) {}
+    document.addEventListener('visibilitychange', want);
+    document.addEventListener('contact-switched', function () { if (_csTicker.timer) _csRun(); });
+    want();
+  })();
+
   // v3.7.x：聊天设置顶部的「全屏模式」开关——镜像设置页 #sf-fullscreen（同一状态）。
   // 本页切换 → 代理到设置页开关并派发 change（走 fullscreen.js 全流程：原生全屏/CSS
   // 兜底/iOS 分支/失败回滚）；设置页或系统（fullscreenchange/切后台恢复/失败回滚）
@@ -815,7 +1239,7 @@
       sfFs.checked = csFs.checked;
       sfFs.dispatchEvent(new Event('change', { bubbles: true }));
     });
-    setInterval(syncCsFs, 500);
+    csAddSync(syncCsFs);
   }
 
   // v3.9.x：聊天设置「全屏边缘防误触」开关——镜像设置页 #sf-edge-guard（同一状态双向同步）。
@@ -831,7 +1255,7 @@
       sfEg.checked = csEg.checked;
       sfEg.dispatchEvent(new Event('change', { bubbles: true }));
     });
-    setInterval(syncCsEg, 500);
+    csAddSync(syncCsEg);
   }
 
   // v3.7.x：聊天设置「隐藏音乐悬浮小窗」开关——与音乐页 #music-float-en / 音乐设置
@@ -864,7 +1288,7 @@
       toast(csMf.checked ? '音乐悬浮小窗已隐藏：播放时不再显示右上角悬浮小框' : '音乐悬浮小窗已恢复显示：播放时右上角出现悬浮小框');
     });
     // 音乐页/音乐设置/桌面部件改动或切桌面后 500ms 内同步回本页开关
-    setInterval(syncCsMf, 500);
+    csAddSync(syncCsMf);
     document.addEventListener('contact-switched', syncCsMf);
   }
 
@@ -889,7 +1313,7 @@
       cmhSet(csCmh.checked);
       toast(csCmh.checked ? '通话小框已隐藏：接通后保持通话面板，不弹出悬浮小框' : '通话小框已开启：接通后自动最小化为悬浮小框');
     });
-    setInterval(syncCsCmh, 500);
+    csAddSync(syncCsCmh);
     document.addEventListener('contact-switched', syncCsCmh);
   }
 
@@ -915,7 +1339,7 @@
       try { document.dispatchEvent(new Event('group-chat-mode-changed')); } catch (e) {}
       toast(sfGc.checked ? '群聊已开启：桌面新增群聊按钮，占卜按钮已隐藏（可在美化装修模式添加到其他页面）' : '群聊已关闭，占卜按钮已恢复');
     });
-    setInterval(syncGc, 500);
+    csAddSync(syncGc);
     document.addEventListener('contact-switched', syncGc);
   }
 
@@ -964,13 +1388,18 @@
     const syncVs = () => { const v = vsGet(); if (v !== csVs.checked) csVs.checked = v; };
     syncVs();
     csVs.addEventListener('change', () => {
-      if (csVs.checked === vsGet()) return;
+      // v3.26.x：去掉「与存储值相同则静默早退」守卫——idbRestore 异步回填 memoryCache
+      // 晚于本模块初始化时，存储值可能是回填进来的旧值而开关 UI 未重同步（荣耀/Edge 杀
+      // 进程回滚 LS 场景，见 idb.js 小键写日志），第一次点按会被守卫静默吃掉，表现为
+      // 「点一次没反应，点第二次才生效」。change 只由用户点按触发，直接按 UI 状态写入。
       vsSet(csVs.checked);
       // 通知聊天页即时刷新「麦克风」按钮显隐（不依赖切联系人）
       try { document.dispatchEvent(new Event('voice-send-changed')); } catch (e) {}
       toast(csVs.checked ? '已开启：聊天输入栏左侧显示「麦克风」按钮，点击可录音并发送语音' : '已关闭：聊天输入栏「麦克风」按钮已隐藏');
     });
     document.addEventListener('contact-switched', syncVs);
+    // v3.26.x：启动回填/写日志合并把存储值修正后，重同步开关 UI（含已打开的设置页）
+    document.addEventListener('mochi-wrj-heal', syncVs);
   }
 
   // v3.12.x：「隐藏联系人的表情包」开关——默认关闭，全局生效（存根命名空间，与
@@ -994,7 +1423,7 @@
       try { document.dispatchEvent(new Event('hide-ta-sticker-changed')); } catch (e) {}
       toast(csHts.checked ? '已隐藏：聊天和朋友圈的表情包面板只显示「我的表情包」' : '已恢复显示 TA 的和公用表情包');
     });
-    setInterval(syncHts, 500);
+    csAddSync(syncHts);
     document.addEventListener('contact-switched', syncHts);
   }
 })();

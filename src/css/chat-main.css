@@ -70,7 +70,7 @@
   position:relative;
   padding: var(--chat-bubble-pad, 11px 14px);
   font-size: var(--chat-font-size, 14px);
-  border-radius:18px; line-height:1.5; word-break:break-word;
+  border-radius: var(--chat-bubble-radius, 18px); line-height:1.5; word-break:break-word;
   background:#fff; border:1px solid rgba(255,255,255,.9); box-shadow:0 2px 8px rgba(0,0,0,.05);
   /* v3.5.107锛氬厑璁告皵娉℃敹缂╋紝闃叉鍥剧墖/闀垮唴瀹规妸鍙充晶澶村儚鍒楁尋鍑哄睆澶栵紙flex 榛樿 min-width:auto锛?*/
   min-width:0;
@@ -79,6 +79,29 @@
 }
 .msg-in .msg-bubble { background: var(--msg-in-bg, #ffffff); color: var(--msg-in-ink, #111111); }
 .msg-out .msg-bubble { background: var(--msg-out-bg, #111111); color: var(--msg-out-ink, #ffffff); }
+
+/* 消息入场动画：仅新增消息（非批量渲染）时触发 */
+.msg-enter {
+  animation: msgFadeUp .28s cubic-bezier(.25,.1,.25,1) both;
+}
+.msg-in.msg-enter {
+  animation-name: msgSlideIn;
+}
+.msg-out.msg-enter {
+  animation-name: msgSlideOut;
+}
+@keyframes msgFadeUp {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+@keyframes msgSlideIn {
+  from { opacity: 0; transform: translateX(-8px); }
+  to { opacity: 1; transform: translateX(0); }
+}
+@keyframes msgSlideOut {
+  from { opacity: 0; transform: translateX(8px); }
+  to { opacity: 1; transform: translateX(0); }
+}
 
 /* 涓诲姩鍙戦€佹爣璇嗭細鑱旂郴浜轰富鍔ㄦ壘浣犵殑娑堟伅锛屾皵娉″乏涓婅涓€鏋氬皬鐖卞績锛堢煝閲忓浘锛?   v3.6.x锛氱埍蹇冩斁鍦ㄦ皵娉″唴閮ㄥ乏涓婅锛?px/4px 鍋忕Щ + 9px 灏哄锛屾伆濂借惤鍦ㄦ皵娉?   11px/14px 鍐呰竟璺濊寖鍥村唴锛屼笉鍘嬫枃瀛楋級锛涙鍓?top/left:-8px 鏄寕鍦ㄦ皵娉″瑙?*/
 .msg-hi-heart {
@@ -317,6 +340,11 @@ body.cs-time-divider .msg-time-divider { display:flex; }
   /* 鍚屼笂锛氬崟閫夐€夐」杈撳叆妗嗗悓鏍峰湪 fixed 鍗婃鍐咃紝鑱氱劍鏈熼棿寤虹嫭绔嬪悎鎴愬眰闃叉枃鏈敊浣?*/
   transform:translateZ(0);
 }
+/* v3.23.x：单选题选项框（安卓转 .ce-box 后带同类名）随行数无限增高，把「发送」
+   顶出半框屏外=「选项太多无法发送」；限高 + 框内滚动（同帮我决定 dec-opts 修法） */
+.ce-box.chat-ask-opts {
+  max-height:150px; overflow-y:auto; overscroll-behavior:contain;
+}
 .chat-ask-actions { display:flex; gap:8px; }
 .chat-ask-actions .cc-tool { flex:1; }
 
@@ -332,6 +360,9 @@ body.cs-time-divider .msg-time-divider { display:flex; }
   -webkit-tap-highlight-color:transparent;
 }
 #chat-divine-body .div-mode.sel { background:var(--ink); color:#fff; border-color:var(--ink); }
+/* v3.26.x：占卜对象选择（聊天页半框）——按钮换行自适应、跟随桌面 pill 样式，覆盖上面 flex:1 全宽 */
+#chat-divine-body .div-chat-targets { flex-wrap:wrap; }
+#chat-divine-body .div-chat-targets .div-mode { flex:0 0 auto; padding:8px 12px; border-radius:99px; }
 #chat-divine-body .div-draw {
   width:100%; margin-top:4px;
 }
@@ -433,7 +464,7 @@ body.cs-time-divider .msg-time-divider { display:flex; }
    v3.5.110锛歜ottom 鍔?safe-area锛屽叏闈㈠睆鍏ㄥ睆妯″紡涓嬩笌杈撳叆鏍忓悓姝ヤ笂绉伙紝涓嶉敊浣?   v3.10.x锛歠ixed 鈫?absolute鈥斺€斿畨鍗?resizes-visual 涓嬮敭鐩樺彧缂?visualViewport锛?   fixed 闈㈡澘閿氬畾鍏ㄩ珮 layout viewport 涓嶅姩锛沘bsolute 閿氬畾 .phone/#page-chat锛?   閿洏寮瑰嚭鏃跺鍣ㄨ syncAndroidKb 鏀剁缉銆侀潰鏉胯窡鐫€鍋滈潬杈撳叆鏍忎笂鏂癸紙鍚﹀垯鎵撳紑鍗?   鑷姩鑱氱劍鐨勫崐妗嗕細鏁翠綋鎺夊埌鍗囪捣鍚庣殑杈撳叆鏍忎笅鏂?閿洏鍚庨潰锛夈€傛墜鏈虹 .phone
    婊″睆鏃朵袱鑰呭嚑浣曠瓑浠凤紱妗岄潰瀹藉睆鏈氨鐢辨枃鏈?@media 鏀?absolute锛屾澶勭粺涓€銆?*/
 .more-panel {
-  position:absolute; left:18px; right:18px; bottom:calc(96px + env(safe-area-inset-bottom, 0px)); z-index:60;
+  position:absolute; left:18px; right:18px; bottom:calc(96px + var(--mochi-safe-bottom,env(safe-area-inset-bottom,0px))); z-index:60;
   background:rgba(255,255,255,.97);
   border:1px solid rgba(0,0,0,.1);
   border-radius:20px; box-shadow:0 12px 32px rgba(0,0,0,.1);
@@ -561,7 +592,7 @@ body.cs-time-divider .msg-time-divider { display:flex; }
 
 /* 鎷嶄竴鎷嶆诞灞傚崱鐗囷紙搴曢儴鍗婃锛岄湶鍑洪《閮ㄨ亰澶╂秷鎭紝鏂逛究杈圭湅杈圭帺锛?   搴曢儴 96px锛氭偓鍋滃湪杈撳叆鏍忎笂鏂癸紝涓嶅帇浣?涓嶈鐩栬緭鍏ユ爮锛堣緭鍏ユ爮椤堕儴绾?82px锛?   v3.5.110锛歜ottom 鍔?safe-area锛屽叏闈㈠睆鍏ㄥ睆妯″紡涓嬩笌杈撳叆鏍忓悓姝ヤ笂绉伙紝涓嶉敊浣?   v3.10.x锛歠ixed 鈫?absolute鈥斺€旈敭鐩樺脊鍑烘椂闅忔敹缂╁悗鐨?.phone/#page-chat 鍋滈潬锛?   涓嶅啀閿氬畾鍏ㄩ珮 layout viewport 鎺夊埌杈撳叆鏍忎笅鏂癸紙璇﹁ .more-panel 澶勬敞閲婏級 */
 .poke-card {
-  position:absolute; top:auto; bottom:calc(96px + env(safe-area-inset-bottom, 0px)); left:18px; right:18px;
+  position:absolute; top:auto; bottom:calc(96px + var(--mochi-safe-bottom,env(safe-area-inset-bottom,0px))); left:18px; right:18px;
   height:auto; max-height:48%;
   display:flex; flex-direction:column;
   background:rgba(255,255,255,.97);
@@ -572,6 +603,11 @@ body.cs-time-divider .msg-time-divider { display:flex; }
   z-index:70; padding:14px 16px 14px;
 }
 .poke-card[hidden] { display:none; }
+/* v3.25.x：横屏/矮视口（小米15 Pro 横屏全屏等，CSS 高约 384px）下 48% 放不下
+   我的拍一拍 tab 的固定行（tabs+分组栏+输入 footer），内容溢出面板底边=UI 错乱 */
+@media (max-height:560px) {
+  .poke-card { max-height:76%; }
+}
 .poke-card-head {
   display:flex; align-items:center; justify-content:space-between;
   font-size:15px; font-weight:700; margin-bottom:10px;
@@ -616,17 +652,32 @@ body.cs-time-divider .msg-time-divider { display:flex; }
 .poke-groups .emoji-g-chip {
   padding:9px 14px; font-size:13px; font-weight:700; border-radius:11px;
 }
+/* v3.25.x：分组栏尾部「＋ 分组」chip（新建分组入口，仅我的拍一拍显示） */
+.poke-g-add {
+  border:1px dashed rgba(0,0,0,.3); background:rgba(255,255,255,.92); color:#888;
+}
 /* 鎷嶄竴鎷嶅崱鐗囷細鑷畾涔夋枃瀛楄緭鍏ヨ锛堝鐢ㄨ亰澶╂悳绱㈣緭鍏ヨ椋庢牸锛?*/
+/* v3.25.x 重设计：输入行=面板 footer，位于列表之后（面板最底部）——键盘弹起面板收缩时
+   它是最后一行、离键盘最近不会被盖住。旧版在分组栏与列表之间，键盘弹起时被固定行挤出
+   面板底边，输入框被顶到输入栏/键盘后面，浏览器为露焦点平移视口=整页飞（用户报障） */
 .poke-input-row {
-  display:flex; gap:8px; padding:0 2px 10px; flex-shrink:0;
+  display:flex; gap:8px; align-items:center; padding:10px 2px 0; margin-top:2px;
+  border-top:1px solid rgba(0,0,0,.08); flex-shrink:0;
 }
 .poke-input {
-  flex:1; min-width:0; border:1px solid rgba(0,0,0,.1); border-radius:99px;
-  padding:9px 14px; font-size:14px; font-family:inherit; outline:none; background:#f6f6f6;
+  flex:1; min-width:0; border:1px solid transparent; border-radius:99px;
+  padding:9px 14px; font-size:14px; font-family:inherit; outline:none; background:#f4f4f5;
 }
 .poke-input:focus { border-color:var(--ink); background:#fff; }
+/* 存入：把输入的文字保存到当前选中的分组（描边次级按钮，与发送区分） */
+.poke-input-save {
+  flex-shrink:0; border:1px solid rgba(0,0,0,.18); border-radius:99px; padding:8px 14px;
+  background:#fff; color:var(--ink); font-size:13px; font-weight:700;
+  cursor:pointer; font-family:inherit; -webkit-tap-highlight-color:transparent;
+}
+.poke-input-save:active { background:rgba(0,0,0,.06); }
 .poke-input-go {
-  flex-shrink:0; border:none; border-radius:99px; padding:0 16px;
+  flex-shrink:0; border:none; border-radius:99px; padding:8px 16px;
   background:var(--ink); color:#fff; font-size:13px; font-weight:700;
   cursor:pointer; font-family:inherit; -webkit-tap-highlight-color:transparent;
 }
@@ -654,10 +705,10 @@ body.cs-time-divider .msg-time-divider { display:flex; }
 .poke-tabs-row .poke-tab.poke-tab-mine.sel {
   background:var(--ink); color:var(--card-bg, #fff); border-color:var(--ink); font-weight:800;
 }
-/* v3.11.x锛氬叕鐢ㄦ媿涓€鎷?tab锛堜笁鍒嗗尯锛夆€斺€旇櫄绾挎弿杈癸紙瀛楀崱搴?鍏变韩璇箟锛屽尯鍒簬鑱旂郴浜?鎴戯級 */
+/* v3.26.x: public poke tab selected - solid fill, unified with mine tab */
 .poke-tabs-row .poke-tab.poke-tab-pub.sel {
-  background:rgba(255,255,255,.92); color:var(--ink); border-color:var(--ink);
-  border-style:dashed; border-width:1.5px; font-weight:800;
+  background:var(--ink); color:var(--card-bg, #fff); border-color:var(--ink); font-weight:800;
+}
 }
 .poke-add-btn {
   flex:0 0 auto; padding:9px 12px; border-radius:11px;
@@ -666,13 +717,8 @@ body.cs-time-divider .msg-time-divider { display:flex; }
   font-family:inherit; -webkit-tap-highlight-color:transparent;
 }
 .poke-add-btn:active { opacity:.85; }
-/* 鎷嶄竴鎷嶅伐鍏疯锛堟柊寤哄垎缁?/ 鏂板鎷嶄竴鎷嶏紝澶嶇敤 .emoji-tool锛?*/
-.poke-tools {
-  display:flex; gap:6px; margin-bottom:8px; flex-shrink:0;
-}
 /* display:flex 浼氳鐩?hidden 灞炴€э紝蹇呴』鏄惧紡琛?[hidden] 鎵嶇湡姝ｉ殣钘忥紙v3.7.x锛氳仈绯讳汉鐨勬媿涓€鎷嶉殣钘忓伐鍏疯/杈撳叆琛岋級 */
-.poke-tools[hidden], .poke-input-row[hidden] { display:none; }
-.poke-tools .emoji-tool { flex:1; }
+.poke-input-row[hidden] { display:none; }
 /* 鎷嶄竴鎷嶅垪琛細棰勮/鑷畾涔?灏忚妭鏍囬 */
 .poke-sec-label {
   font-size:11px; color:var(--muted); padding:8px 2px 4px; flex-shrink:0;
@@ -694,7 +740,7 @@ body.cs-time-divider .msg-time-divider { display:flex; }
 /* 琛ㄦ儏鍖呴潰鏉匡細搴曢儴鍗婃锛岄湶鍑洪《閮ㄨ亰澶╂秷鎭紝楂樺害闅忓唴瀹硅嚜閫傚簲锛堟渶澶氬崐灞忥紝绌烘€佺揣鍑戯級
    v3.5.110锛歜ottom 鍔?safe-area锛屽叏闈㈠睆鍏ㄥ睆妯″紡涓嬩笌杈撳叆鏍忓悓姝ヤ笂绉伙紝涓嶉敊浣?   v3.10.x锛歠ixed 鈫?absolute锛堝悓 .poke-card鈥斺€旈敭鐩樺脊鍑烘椂闅忓鍣ㄥ仠闈犺緭鍏ユ爮涓婃柟锛?*/
 .emoji-card {
-  position:absolute; top:auto; bottom:calc(96px + env(safe-area-inset-bottom, 0px)); left:18px; right:18px;
+  position:absolute; top:auto; bottom:calc(96px + var(--mochi-safe-bottom,env(safe-area-inset-bottom,0px))); left:18px; right:18px;
   height:auto; max-height:55%;
   display:flex; flex-direction:column;
   background:rgba(255,255,255,.97);
@@ -910,6 +956,10 @@ body.cs-time-divider .msg-time-divider { display:flex; }
 }
 .msg-quote-text {
   color:inherit; opacity:.8; word-break:break-word;
+  /* 超长内容（旧数据里的 base64 引用）最多两行，不铺满整屏；
+     inline-block 而非 -webkit-box，保持与 .msg-quote-imgs 同行排布 */
+  display:inline-block; vertical-align:top; max-width:100%;
+  max-height:2.8em; overflow:hidden;
 }
 
 /* 鎯呯华/蹇冩剰/鎰忓浘瀛楀崱锛氭墍鏈夊瓧鍗″寘鍦?.msg-moods 瀹瑰櫒鍐咃紝
@@ -925,7 +975,7 @@ body.cs-time-divider .msg-time-divider { display:flex; }
   white-space:nowrap;
 }
 .msg-mood span { font-weight:600; }
-.msg-intent { opacity:.6; }
+
 
 /* 鎯呯华/蹇冩剰/鎰忓浘瀛楀崱鏍囩 */
 .msg-mood .msg-mood-tag {
@@ -1064,9 +1114,15 @@ body.cs-time-divider .msg-time-divider { display:flex; }
   border:1px solid rgba(0,0,0,.15); background:rgba(0,0,0,.05);
   color:var(--ink); cursor:pointer;
   display:flex; align-items:center; justify-content:center;
+  transition:transform .12s ease, background .15s ease, border-color .15s ease, color .15s ease;
 }
 .msg-voice-play svg { width:13px; height:13px; }
 .msg-voice-play.playing { background:var(--ink); color:#fff; border-color:var(--ink); }
+/* 点按互动反馈：按下微缩；播放中三角换暂停双竖条（录制面板试听钮/群聊语音同款双图标） */
+.msg-voice-play:active { transform:scale(.85); }
+.msg-voice-play .voice-ico-pause { display:none; }
+.msg-voice-play.playing .voice-ico-play { display:none; }
+.msg-voice-play.playing .voice-ico-pause { display:block; }
 .msg-voice-wave {
   display:flex; align-items:flex-end; gap:2px; height:18px; flex:1;
 }
@@ -1152,7 +1208,7 @@ body.cs-time-divider .msg-time-divider { display:flex; }
 
 /* 閫氳瘽灏忔锛堟帴閫氬悗鏈€灏忓寲锛涚櫧鑹层€佸彲鎷栧姩锛涗綅浜庤緭鍏ユ爮涓婃柟锛?   v3.5.110锛歜ottom 鍔?safe-area锛屽叏闈㈠睆鍏ㄥ睆妯″紡涓嬩笌杈撳叆鏍忓悓姝ヤ笂绉伙紝涓嶉敊浣?*/
 .call-mini {
-  position:fixed; left:50%; bottom:calc(96px + env(safe-area-inset-bottom, 0px)); transform:translateX(-50%);
+  position:fixed; left:50%; bottom:calc(96px + var(--mochi-safe-bottom,env(safe-area-inset-bottom,0px))); transform:translateX(-50%);
   /* v3.5.127锛歾 90 鈫?95鈥斺€斾笌 modal-mask 鍚屽眰鏃朵細琚脊绐楃洊浣忥紙閫氳瘽涓墦寮€寮圭獥锛?     閫氳瘽灏忔/鎸傛柇鍏ュ彛涓嶅彲瑙侊級 */
   z-index:95;
   display:flex; align-items:center; gap:10px;
@@ -1359,38 +1415,53 @@ body.cs-time-divider .msg-time-divider { display:flex; }
 }
 .voice-preview {
   flex-shrink:0; display:flex; align-items:center; gap:10px;
-  padding:8px 14px; margin:10px 2px 0;
-  background:rgba(0,0,0,.04); border:1px solid rgba(0,0,0,.08); border-radius:16px;
+  padding:8px 14px; margin:10px 0 0;
+  background:rgba(0,0,0,.04); border:1px solid rgba(0,0,0,.08); border-radius:14px;
   align-self:flex-start;
 }
 /* display:flex 会压过 UA 的 [hidden]{display:none}（fish 时机条同款坑），必须显式补回 */
 .voice-preview[hidden] { display:none; }
 .voice-preview-txt { font-size:12px; font-weight:600; color:var(--muted); white-space:nowrap; }
-.voice-foot { flex-shrink:0; display:flex; gap:8px; padding-top:14px; }
-.voice-rec-btn {
-  flex-shrink:0; min-width:104px; padding:12px 16px; border-radius:24px; border:none;
-  background:var(--btn-bg,#111); color:var(--btn-ink,#fff); font-size:13px; font-weight:700;
-  cursor:pointer; font-family:inherit; -webkit-tap-highlight-color:transparent;
+.voice-foot { flex-shrink:0; display:flex; gap:10px; padding-top:14px; }
+/* v3.26.x 重设计：两按钮统一尺寸/圆角/字号——此前 rec 是 24px 圆角/13px 字/最小宽 104 的胶囊，
+   send 复用 .poke-big（14px 圆角/14px 字 + margin-top:12px），一高一低大小不一。
+   现在 rec=描边次按钮、send=主题色主按钮，同高 44px 同圆角，等宽对齐。 */
+.voice-rec-btn, .voice-send-big {
+  flex:1; min-width:0; height:44px; padding:0 12px; margin-top:0;
+  display:flex; align-items:center; justify-content:center;
+  border-radius:14px; font-size:14px; font-weight:700; font-family:inherit;
+  cursor:pointer; -webkit-tap-highlight-color:transparent;
+  transition:opacity .15s ease, background .15s ease, border-color .15s ease;
 }
-.voice-rec-btn:active { opacity:.85; }
+.voice-rec-btn {
+  border:1.5px solid rgba(0,0,0,.18); background:transparent; color:var(--ink);
+}
+.voice-rec-btn:active { opacity:.7; }
 .voice-rec-btn.rec {
-  background:#e5484d; color:#fff;
+  background:#e5484d; border-color:transparent; color:#fff;
   animation:voiceRecPulse 1.15s ease-in-out infinite;
 }
 @keyframes voiceRecPulse {
   0%,100% { box-shadow:0 0 0 0 rgba(229,72,77,.35); }
   50% { box-shadow:0 0 0 7px rgba(229,72,77,0); }
 }
+.voice-send-big {
+  /* border 同 rec 保持 1.5px（透明）：Chromium 对 basis 0% 的 flex 按钮，一方有 border
+     一方无 border 时宽度分配不等（实测差 2.67px），两边同 border 即等宽 */
+  border:1.5px solid transparent; background:var(--btn-bg,#111); color:var(--btn-ink,#fff);
+}
+.voice-send-big:active { opacity:.85; }
 .voice-send-big[disabled] { opacity:.4; pointer-events:none; }
 /* 我发出的语音气泡落在深色 out 气泡上：播放钮/波形原是浅底深色系（为 in 侧设计），黑底上不可见 */
 .msg-out .msg-voice-play { background:rgba(255,255,255,.16); border-color:rgba(255,255,255,.35); color:#fff; }
 .msg-out .msg-voice-play.playing { background:#fff; color:#111; border-color:#fff; }
 .msg-out .msg-voice-wave i { background:#fff; opacity:.55; }
 @media (prefers-reduced-motion: reduce) {
-  .voice-card .voice-wave i, .voice-rec-btn.rec { animation:none !important; transition:none !important; }
+  .voice-card .voice-wave i, .voice-rec-btn.rec, .msg-voice-play { animation:none !important; transition:none !important; }
 }
 /* ---- 深色模式兜底（dark.css 未覆盖本功能自定义元素时保持可读，fish/drift/room 同款惯例） ---- */
 [data-theme="dark"] .voice-preview { background:rgba(255,255,255,.07); border-color:rgba(255,255,255,.12); }
 [data-theme="dark"] .voice-wave i { opacity:.4; }
 [data-theme="dark"] .voice-card.recording .voice-wave i { opacity:.9; }
 [data-theme="dark"] .msg-voice-play.voice-play-btn { background:rgba(255,255,255,.1); border-color:rgba(255,255,255,.16); }
+[data-theme="dark"] .voice-rec-btn { border-color:rgba(255,255,255,.28); color:#fff; }

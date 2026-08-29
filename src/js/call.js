@@ -205,7 +205,9 @@
     miniPos = null;
   }
 
-  function partnerName() { return store.get('lbl-partner') || (window.taWord ? window.taWord() : 'TA'); }
+  // v3.26.x：通话昵称与聊天域解耦——优先读聊天专用键 cs-lbl-partner（聊天设置里设的联系人
+  // 昵称），未设置时默认 TA，不再回退桌面 lbl-partner（用户要求：聊天昵称不跟随桌面）
+  function partnerName() { return store.get('cs-lbl-partner') || (window.taWord ? window.taWord() : 'TA'); }
   // v3.12.x：通话头像跟随聊天域——优先读聊天专用键 cs-avatar-partner（头像互动半框/换头像写的就是它），
   // 未设置时回退桌面键 avatar-partner；此前只读桌面键，导致通话面板不跟随换头像
   function partnerAv() { return store.get('cs-avatar-partner') || store.get('avatar-partner') || ''; }
@@ -252,7 +254,8 @@
     let name = '';
     try {
       const s = (window.storeFor && window.storeFor(currentCall.cid)) || store;
-      name = s.get('lbl-partner') || '';
+      // v3.26.x：与 partnerName 同步解耦——先读聊天专用键，未设默认 TA，不再读桌面键
+      name = s.get('cs-lbl-partner') || (window.taWord ? window.taWord() : 'TA');
     } catch (e) { name = currentCall.name || partnerName(); }
     if (name === shownName) return;
     shownName = name;
@@ -515,14 +518,17 @@
     setTimeout(() => {
       // v3.6.x：必须是本次通话仍在呼叫中才执行（挂断后重拨不套用旧结果）
       if (currentCall !== callRef || callRef.status !== 'calling') return;
+      // v3.x.x：去电结果提示——原每次拨打只静默关面板、结果仅写聊天系统消息，
+      // 用户看不到接通/未接/忙线；改为各结果分别 toast 明确提示
       if (r < cc.busy) {
-        callRef.status = 'ended'; endCall('忙线中');
+        callRef.status = 'ended'; toast('对方忙线中'); endCall('忙线中');
       } else if (r < cc.busy + cc.reject) {
-        callRef.status = 'ended'; endCall('对方已拒绝');
+        callRef.status = 'ended'; toast('对方已拒绝'); endCall('对方已拒绝');
       } else if (r < cc.busy + cc.reject + cc.pickup) {
         callRef.status = 'connected';
         // 对方接通即恢复音乐播放（与来电接听一致）
         if (window.musicHoldForCall) window.musicHoldForCall(false);
+        toast('通话已接通');
         if (statusEl) statusEl.textContent = '正在通话...';
         startCallDuration();
         // v3.7.x：小框开关隐藏时接通后保持大面板常驻（不自动最小化）
@@ -535,7 +541,7 @@
           }
         }, 2000);
       } else {
-        callRef.status = 'ended'; endCall('未接通');
+        callRef.status = 'ended'; toast('对方未接通'); endCall('未接通');
       }
     }, 1800 + Math.random() * 1500);
   };
