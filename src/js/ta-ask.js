@@ -510,7 +510,16 @@
     // v3.5.146：提示语标记 ask-msg（渲染同 poke 但不算 notable）——否则提示语
     // 单独触发一条弹窗/通知，与下方卡片通知重复成 2 条
     window.chatAddSystem('TA想问你一个问题。', { special: 'ask-msg' });
-    const el = window.chatAddSystem(q.text, { special: 'ask-card', askQuestion: q.text, askOptions: isSingle ? q.options : null, askType: isSingle ? 'single' : 'text' });
+    // v3.26.x：askTs 作为提问记录的稳定关联键（透传进 chat-msgs 记录，回答时据此更新 history）
+    const askTs = Date.now();
+    const el = window.chatAddSystem(q.text, { special: 'ask-card', askQuestion: q.text, askOptions: isSingle ? q.options : null, askType: isSingle ? 'single' : 'text', askTs: askTs });
+    // v3.26.x：提问即进记录——发卡同步写一条 pending，回答后由 chatAskReply 包装层更新
+    // （此前只有回答才写 history，且单选题点选项直接调 chatAskReply 不经 openAskReply，history 永远空）
+    try {
+      const d = taAskLoad();
+      d.history.push({ q: q.text, a: '', reply: '', ts: askTs, status: 'pending' });
+      taAskSave(d);
+    } catch (e) {}
     const idx = el ? Number(el.dataset.idx) : -1;
     // v3.5.141：后台收到互动卡片 → 系统通知提示
     // v3.5.146：通知文本合并提示语 + 具体问题（一条通知显示完整内容，不再两条）
@@ -604,15 +613,43 @@
         // 池里随机一条作预设回应传入，chatAskReply 内部再做 90%预设/10%字卡库 混合
         const defs = ['收到你的回答。', '好呀，我知道了。', '你这么说，我记住了。', '好的，我记在心里了。'];
         const pool = window.getInteractPool ? window.getInteractPool('询问·回应', defs) : defs;
-        const askReply = window.chatAskReply(msgIdx, answer, pool[Math.floor(Math.random() * pool.length)]);
-        // 记入历史（保存全部，不截断），含 TA 的回复
-        const d = taAskLoad();
-        d.history.push({ q: question, a: answer, reply: askReply || '收到你的回答。', ts: Date.now() });
-        taAskSave(d);
+        // v3.26.x：history 由 chatAskReply 包装层统一写（覆盖文字题 + 单选题点选项两条路径）
+        window.chatAskReply(msgIdx, answer, pool[Math.floor(Math.random() * pool.length)]);
         toast('已回复TA的提问');
       }
     }, { staticText: 'TA 问你：' + question, textareaPlaceholder: '输入你的回答…' });
   };
+
+  // v3.26.x：包装 chatAskReply，把回答统一写进 ta-ask.history（关联键 askTs）。
+  // 覆盖两条回答路径：① 文字题 openAskReply 调 chatAskReply；② 单选题点选项 chat.js 直接调 chatAskReply。
+  // 此前单选题回答从不写 history，且未回答的提问也不进记录 → "提问记录"页空。
+  if (window.chatAskReply && !window.__taAskReplyWrapped) {
+    const _origChatAskReply = window.chatAskReply;
+    window.chatAskReply = function (msgIdx, answer, reply) {
+      const rec = getCardAt(msgIdx);
+      // deskCk 查岗卡也走 ask-card，但不属于"TA的询问"，不进提问记录
+      if (rec && rec.deskCk) return _origChatAskReply.call(this, msgIdx, answer, reply);
+      const askTs = rec && rec.askTs ? rec.askTs : null;
+      const question = rec ? (rec.askQuestion || rec.text || '') : '';
+      const result = _origChatAskReply.call(this, msgIdx, answer, reply);
+      if (result === undefined) return result;
+      try {
+        const d = taAskLoad();
+        let item = null;
+        if (askTs) {
+          for (let i = d.history.length - 1; i >= 0; i--) {
+            const h = d.history[i];
+            if (h && h.ts === askTs && h.status === 'pending') { item = h; break; }
+          }
+        }
+        if (item) { item.a = answer; item.reply = result; item.status = 'answered'; }
+        else { d.history.push({ q: question, a: answer, reply: result, ts: askTs || Date.now(), status: 'answered' }); }
+        taAskSave(d);
+      } catch (e) {}
+      return result;
+    };
+    window.__taAskReplyWrapped = true;
+  }
 
   // ---- 管理页 ----
   const page = document.getElementById('page-ta-ask');
@@ -1100,7 +1137,7 @@ const TC_DEFAULT = [
     { id: "cd6", cat: "daily", text: "我们谁先说晚安？", pref: 2, options: [
       { t: "我", reply: ["那你可得等我。","你先说？那我熬到你不困。","那你先说，我等着接。","那几点说？我守着。"], liked: false }, { t: "你", reply: ["好，我等你先说。","我先说？那我定个闹钟。","好，我先说，你接着。","那现在说？还是等会儿。"], liked: false }, { t: "一起说", reply: ["那很浪漫。","一起说？那数一二三。","一起说，浪漫，我配合。","那数到几说？三还是二？"], liked: true }] },
     { id: "cr4", cat: "rel", text: "万一吵架了，谁先低头？", pref: 3, options: [
-      { t: "我", reply: ["那我先低头也行。","你先低头？那台阶我备好。","你先低头我也心疼，别吵最好。","那上次谁先低的？我记着。"], liked: false }, { t: "你", reply: ["哼，这次你先。","我先？哼，那台阶你给。","那我先也行，只要你别走。","那台阶够不够？我下。"], liked: false }, { t: "看情况", reply: ["那就别吵太久。","看情况？那谁错谁先？","别吵太久，伤感情。","那什么情况你先什么我先？"], liked: false }, { t: "不吵架", reply: ["这个选项我喜欢。","不吵架？那我们太平天国。","不吵最好，这个答案我喜欢。","那真不吵过？我不信。"], liked: true }] },
+      { t: "我", reply: ["那我先低头也行。","你先低头？那台阶我备好。","你先低头我也心疼，别吵最好。","那上次谁先低的？我记着。"], liked: false }, { t: "你", reply: ["哼，这次你先。","我先？哼，那台阶你给。","那我先也行，只要你别走。","那台阶够不够？我下。"], liked: false }, { t: "看情况", reply: ["那就别吵太久。","看情况？那谁错谁先？","别吵太久，伤感情。","那什么情况你先什么我先？"], liked: false }, { t: "不吵架", reply: ["这个选项我喜欢。","不吵架？那拉钩，谁反悔是小狗。","不吵最好，这个答案我喜欢。","那真不吵过？我不信。"], liked: true }] },
     { id: "cd7", cat: "daily", text: "如果这个周末完完全全属于我们俩，你想怎么开始？", pref: 1, options: [
       { t: "睡到自然醒", reply: ["好，醒来第一眼就是我发的字卡。","睡到自然醒？那中午见。","醒来第一眼是我的字卡，我守着。","那几点算自然醒？我等着发。"], liked: false }, { t: "一睁眼就跟你说话", reply: ["那我得提前想好今天说什么。","一睁眼就说？那我有起床气你忍着。","那我提前想好，一睁眼就陪你聊。","那第一句说什么？我先想。"], liked: true }, { t: "出门吃顿好的", reply: ["行，想吃什么都依你。","出门吃好的？那选贵的。","想吃什么都依你，我请。","那吃什么？我订位。"], liked: false }, { t: "不用开始，一直都在", reply: ["……这句话我说不出，借你用了。","一直都在？那省了开场白。","这句话我借你用，一直都在。","那从什么时候算开始？"], liked: false }] },
     { id: "cd8", cat: "daily", text: "一起点奶茶的话，你会替我选什么口味？", pref: 0, options: [
@@ -3156,13 +3193,42 @@ window.openTCPanel = openTCPanel;
     const dd = new Date(ts);
     return ('0' + dd.getHours()).slice(-2) + ':' + ('0' + dd.getMinutes()).slice(-2) + ' ' + ((dd.getMonth() + 1) + '月' + dd.getDate() + '日');
   }
+  // v3.26.x：提问记录跨桌面汇总——提问与回答都写进「发生所在联系人桌面」的 ta-ask，
+  // 主页提问记录若只读当前桌面，用户在联系人桌面答过题、切回主页就「看不到记录」。
+  // 汇总 = 当前桌面在前 + 其余桌面（注册表 contacts + default）的 history 合并。
+  function allDeskHistories(key) {
+    const out = [];
+    const cur = window.__activeCid || 'default';
+    const cids = ['default'].concat((window.getContacts ? window.getContacts() : []).map(function (c) { return c && c.id; }).filter(Boolean));
+    const seen = {};
+    cids.sort(function (a, b) { if (a === cur) return -1; if (b === cur) return 1; return 0; });
+    cids.forEach(function (cid) {
+      if (!cid || seen[cid]) return;
+      seen[cid] = 1;
+      try {
+        let hist = [];
+        if (cid === cur) {
+          hist = taAskLoad().history || [];
+        } else {
+          const s = window.storeFor ? window.storeFor(cid) : null;
+          if (!s) return;
+          const raw = s.get(key);
+          if (!raw) return;
+          const d = JSON.parse(raw);
+          hist = (d && Array.isArray(d.history)) ? d.history : [];
+        }
+        out.push.apply(out, hist);
+      } catch (e) {}
+    });
+    return out;
+  }
   window.renderAskRecords = function () {
     // TA的询问
     const askEl = document.getElementById('ar-ask');
     if (askEl) {
-      const h = taAskLoad().history || [];
+      const h = allDeskHistories('ta-ask');
       askEl.innerHTML = h.length
-        ? h.slice().reverse().map(x => '<div class="tc-listitem"><div class="tc-li-q">问：' + x.q + '</div><div class="tc-li-line">你：' + x.a + '</div>' + (x.reply ? '<div class="tc-li-line">' + (window.taFit ? window.taFit('TA：') : 'TA：') + (window.taFit ? window.taFit(x.reply) : x.reply) + '</div>' : '') + '<div class="tc-li-time">' + fmtDT(x.ts) + '</div></div>').join('')
+        ? h.slice().reverse().map(x => '<div class="tc-listitem"><div class="tc-li-q">问：' + x.q + '</div>' + (x.status === 'pending' ? '<div class="tc-li-pending">待回答</div>' : '<div class="tc-li-line">你：' + x.a + '</div>' + (x.reply ? '<div class="tc-li-line">' + (window.taFit ? window.taFit('TA：') : 'TA：') + (window.taFit ? window.taFit(x.reply) : x.reply) + '</div>' : '')) + '<div class="tc-li-time">' + fmtDT(x.ts) + '</div></div>').join('')
         : '<div class="ta-empty">暂无询问记录</div>';
     }
     // TA的小问题

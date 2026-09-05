@@ -20,9 +20,28 @@
             db.createObjectStore(STORE);
           }
         };
+        // v3.26.x #135：版本升级被其他标签页/旧连接阻塞——原实现无 onblocked 处理：
+        // blocked 请求既不 onsuccess 也不 onerror，open() 永不落地，所有 open().then
+        // 挂死（含启动回填 idbRestore → 开屏永远「正在加载数据…」）。新版本 SW 换代后
+        // 新旧页面并存时高发（iPad 7 + Edge 实测卡开屏）。收到 blocked 主动失败本次
+        // open（下次调用重建）；旧连接方随后释放或关闭旧标签页后自然恢复。
+        req.onblocked = () => {
+          try { dbPromise = null; } catch (e1) {}
+          reject(new Error('idb open blocked'));
+        };
         req.onsuccess = () => resolve(req.result);
         req.onerror = () => reject(req.error);
       } catch (e) { reject(e); }
+      // v3.26.x #135：open() 兜底落地——iOS/Edge 内核存在「open 请求既不 success
+      // 也不 error 也不 blocked」的挂起形态（IDB 服务进程被杀瞬间发起的请求）。原实现
+      // 各事务超时计时器都注册在 open().then 里，open 不落地则计时器永不启动 →
+      // idbGet/idbGetMany/idbListKeys/idbRestore 全部永久挂起，开屏永远停在
+      // 「正在加载数据…」（iPad 7 + Edge 实测）。8s 未落地判失败：清 dbPromise 让
+      // 下次调用重建连接，调用方 catch 走 LS 兜底/慢保险丝，开屏永不卡死。
+      setTimeout(function () {
+        try { dbPromise = null; } catch (e2) {}
+        reject(new Error('idb open hang'));
+      }, 8000);
     });
     // v3.6.x 修复（open 失败永久不可用）：失败时清 dbPromise 允许下次重试——
     // 原实现缓存 rejected Promise，整个会话 IDB 永久不可用（隐私模式/配额耗尽/
@@ -40,11 +59,47 @@
   function connLost(e) {
     try {
       if (!e) return false;
-      if (e.name === 'InvalidStateError') return true;
+      // v3.26.x 修复（iPhone 16 Pro Safari「存储异常」弹窗每会话必现）：iOS 挂后台会
+      // 杀 IndexedDB 服务进程，回前台后旧连接上事务失败，错误名不固定——iOS 18 实测
+      // 多报 UnknownError/InternalError/TransactionInactiveError（而非只有
+      // InvalidStateError）。原只匹配 InvalidStateError → 连接永不重建 → 本会话后续
+      // 写入全部失败 → 连续 5 次弹「存储异常」且每会话必现。这里把 iOS 常见连接级
+      // 错误名一并判死（重试最多 3 次封顶，真实数据错误不会被无限掩盖）。
+      const n = e.name;
+      if (n === 'InvalidStateError' || n === 'UnknownError' || n === 'InternalError' || n === 'TransactionInactiveError') return true;
       const m = String((e && e.message) || e);
-      return /connection\s+(is\s+)?(closed|lost|closing)|server\s+lost|database\s+connection/i.test(m);
+      return /connection\s+(is\s+)?(closed|lost|closing)|server\s+lost|database\s+connection|indexed\s+database/i.test(m);
     } catch (err) { return false; }
   }
+  // v3.26.x 修复（iPhone 16 Pro Safari「存储异常」弹窗每会话必现）：仅靠错误触发
+  // 重建不可靠（iOS 错误名多变、有时事务只挂起不报错），回前台时主动作废旧连接
+  // 引用，下一次 open() 重建新连接——事务持有自己的 db 引用，不影响在途事务，
+  // 重建开销极小。同时预拉起新连接，回前台后的首次写入不再撞上服务未就绪。
+  // 仅 iOS 启用（桌面/安卓靠 connLost 兜底已够，避免切窗每次重建）。
+  function armFgIdbReset() {
+    try {
+      if (typeof document === 'undefined' || !document.addEventListener) return;
+      const ua = (window.navigator && window.navigator.userAgent) || '';
+      // v3.26.x #144：iPadOS 13+ UA 伪装成 Macintosh（桌面 Mac UA + 触摸屏）——
+      // iPad 杀后台同样会断 IDB 连接，伪装 UA 的 iPad 此前全部漏掉回前台重建。
+      // 真桌面 Mac maxTouchPoints=0 不会误判（同 device.js #144 isIOS 补分支信号）。
+      const touchMac = ((window.navigator && window.navigator.platform) === 'MacIntel' || /Macintosh/i.test(ua)) &&
+        (window.navigator && window.navigator.maxTouchPoints > 1) && ('ontouchstart' in window);
+      if (!/iPhone|iPad|iPod/i.test(ua) && !touchMac) return;
+      const resetNow = function () {
+        try {
+          if (!dbPromise) return;
+          dbPromise = null;
+          open().catch(function () {});
+        } catch (e) {}
+      };
+      document.addEventListener('visibilitychange', function () {
+        try { if (document.visibilityState === 'visible') resetNow(); } catch (e) {}
+      });
+      if (window.addEventListener) window.addEventListener('focus', resetNow);
+    } catch (e) {}
+  }
+  armFgIdbReset();
 
   // 写入（key: 完整键名，如 'xy-home-v2:cc-groups'）
   // v3.7.0：写入失败重试 2 次（间隔 100ms），累计失败超 5 次 openModal 告警。
@@ -86,9 +141,28 @@
     function tryOnce() {
       return open().then(db => new Promise((resolve) => {
         let done = false;
-        // v3.26.x：超时按值体积放大（大包误报修复，见 _idbFailNotify 上方说明）
+        // v3.26.x：超时按值体积放大（大包误报修复，见 _idbFailNotify 上方说明）。
+        // v3.26.x OOM：聊天记录改 IDB 直存数组（structured clone，免整包 JSON.stringify）——
+        // 数组也按估算体积放大超时，否则 150MB 级数组在慢设备上 >4s 被判挂起、误触发回退重写。
         let lim = 4000;
-        try { if (typeof value === 'string' && value.length > 262144) lim = 4000 + Math.min(26000, Math.ceil(value.length / 262144) * 2000); } catch (e) {}
+        try {
+          let est = 0;
+          if (typeof value === 'string') est = value.length;
+          else if (Array.isArray(value)) {
+            for (let i = 0; i < value.length; i++) {
+              const m = value[i];
+              if (typeof m === 'string') { est += m.length; continue; }
+              if (!m || typeof m !== 'object') { est += 32; continue; }
+              const t = m.text; if (typeof t === 'string') est += t.length;
+              const im = m.img; if (typeof im === 'string') est += im.length;
+              const vc = m.voice; if (typeof vc === 'string') est += vc.length;
+              const ps = m.parts;
+              if (Array.isArray(ps)) { for (let j = 0; j < ps.length; j++) { const p = ps[j]; if (p && typeof p.v === 'string') est += p.v.length; } }
+              est += 64;
+            }
+          }
+          if (est > 262144) lim = 4000 + Math.min(26000, Math.ceil(est / 262144) * 2000);
+        } catch (e) {}
         const t = setTimeout(function () {
           if (done) return; done = true;
           dbPromise = null; // 连接疑似挂起，下次 open 重建
@@ -99,6 +173,7 @@
           tx.objectStore(STORE).put(value, key);
           tx.oncomplete = () => { if (done) return; done = true; clearTimeout(t); resolve(true); };
           tx.onerror = () => { if (done) return; done = true; clearTimeout(t); _idbFailLastErr = (tx.error && tx.error.name) || 'error'; if (connLost(tx.error)) dbPromise = null; resolve(false); };
+          tx.onabort = () => { if (done) return; done = true; clearTimeout(t); _idbFailLastErr = (tx.error && tx.error.name) || 'abort'; if (connLost(tx.error)) dbPromise = null; resolve(false); };
         } catch (e) { if (done) return; done = true; clearTimeout(t); _idbFailLastErr = (e && e.name) || 'error'; if (connLost(e)) dbPromise = null; resolve(false); }
       })).catch(() => false);
     }
@@ -121,8 +196,8 @@
         const os = tx.objectStore(STORE);
         pairs.forEach(p => { os.put(p.v, p.k); });
         tx.oncomplete = () => resolve(true);
-        tx.onerror = () => resolve(false);
-        tx.onabort = () => resolve(false);
+        tx.onerror = () => { if (connLost(tx.error)) dbPromise = null; resolve(false); };
+        tx.onabort = () => { if (connLost(tx.error)) dbPromise = null; resolve(false); };
       } catch (e) { resolve(false); }
     })).catch(() => false);
   };
@@ -216,54 +291,102 @@
     })).catch(() => ({}));
   };
 
-  // 列出所有键
-  // v3.26.x：超时保护（与 idbGet/idbGetMany 同款 4s+4s）——部分安卓内核事务挂起
-  //（既不 onsuccess 也不 onerror），无超时则设备诊断"IndexedDB 大键明细"永远停在
-  // "读取中…"。4s 未返回先重建连接重试一次（挂起多因连接已死，重开后通常当场返回），
-  // 再 4s 放弃返回空数组。
-  window.idbGetAllKeys = function () {
+  // 只读探测通用骨架（4s 未返回 → 重建连接重试一次 → 再 8s 判失败）
+  // 部分安卓内核（真我/荣耀/小米 Edge 等）事务可能挂起：既不 onsuccess 也不 onerror，
+  // 没有超时兜底，调用方的 Promise 就永不落地（诊断里「IndexedDB 大键明细」停在「读取中…」）。
+  // run(db, finish) 内用 finish(结果) 落地；失败/超时一律 resolve(IDB_LIST_FAILED)。
+  // v3.26.x #90：IDB_LIST_FAILED 是这条链的关键——旧实现超时后 resolve 空数组，与
+  // 「库里真的没有」不可区分，上层（chat.js 判定「这台桌面没有聊天记录」）就把一次
+  // 读取失败当成真的没历史，接着把新消息整包写回 → 全部历史被覆盖且不可逆。
+  const IDB_LIST_FAILED = null;
+  function idbProbe(run) {
     return open().then(db => new Promise((resolve) => {
       let done = false;
       let timer = null;
-      function finish(val) { if (done) return; done = true; if (timer) clearTimeout(timer); resolve(val); }
-      function run() {
-        try {
-          const tx = db.transaction(STORE, 'readonly');
-          const req = tx.objectStore(STORE).getAllKeys();
-          req.onsuccess = () => finish(req.result || []);
-          req.onerror = () => { if (connLost(req.error)) dbPromise = null; finish([]); };
-        } catch (e) { if (connLost(e)) dbPromise = null; finish([]); }
-      }
       let retried = false;
+      function finish(val) { if (done) return; done = true; if (timer) clearTimeout(timer); resolve(val); }
+      function attempt(conn) {
+        try { run(conn, finish); } catch (e) { if (connLost(e)) dbPromise = null; finish(IDB_LIST_FAILED); }
+      }
       timer = setTimeout(function () {
         if (done) return;
         if (!retried) {
           retried = true;
+          // 挂起多因连接已死（iOS 挂后台杀 IDB 服务 / Edge 回收后台进程），重开通常当场恢复
           dbPromise = null;
           open().then(function (db2) {
-            db = db2;
-            run();
-            timer = setTimeout(function () { dbPromise = null; finish([]); }, 4000);
-          }).catch(function () { finish([]); });
+            timer = setTimeout(function () { dbPromise = null; finish(IDB_LIST_FAILED); }, 8000);
+            attempt(db2);
+          }).catch(function () { finish(IDB_LIST_FAILED); });
           return;
         }
         dbPromise = null;
-        finish([]);
+        finish(IDB_LIST_FAILED);
       }, 4000);
-      run();
-    })).catch(() => []);
+      attempt(db);
+    })).catch(() => IDB_LIST_FAILED);
+  }
+
+  // 列出所有键（严格版）：数组 = 权威清单（空数组 = 确认空库，可信）；null = 这次没读到。
+  // 凡是要用「清单里没有」推出「键不存在」的判定，都必须走它（或 idbHasKey），
+  // 拿到 null 只能当「未知」——安排重试，绝不落盘覆盖。
+  window.idbListKeys = function () {
+    return idbProbe(function (db, finish) {
+      const tx = db.transaction(STORE, 'readonly');
+      const req = tx.objectStore(STORE).getAllKeys();
+      req.onsuccess = () => finish(req.result || []);
+      req.onerror = () => { if (connLost(req.error)) dbPromise = null; finish(IDB_LIST_FAILED); };
+      tx.onabort = () => { if (connLost(tx.error)) dbPromise = null; finish(IDB_LIST_FAILED); };
+    });
+  };
+
+  // 单个键是否存在：count(键) 只数一条，比全量清单轻得多（MB 级大键写入排队时也挤得进去）
+  // true = 确认存在 / false = 确认不存在 / null = 这次没读到（不可据此判空）
+  window.idbHasKey = function (key) {
+    if (!key) return Promise.resolve(IDB_LIST_FAILED);
+    return idbProbe(function (db, finish) {
+      const tx = db.transaction(STORE, 'readonly');
+      const req = tx.objectStore(STORE).count(key);
+      req.onsuccess = () => finish((req.result || 0) > 0);
+      req.onerror = () => { if (connLost(req.error)) dbPromise = null; finish(IDB_LIST_FAILED); };
+      tx.onabort = () => { if (connLost(tx.error)) dbPromise = null; finish(IDB_LIST_FAILED); };
+    });
+  };
+
+  // 兼容旧调用方（扫描/清理类：读不到时「什么都不做」是安全方向）：失败仍折叠成空数组
+  window.idbGetAllKeys = function () {
+    return window.idbListKeys().then(function (keys) { return keys || []; });
   };
 
   // 删除
+  // v3.26.x：删除挂起超时——与 idbSet/idbGet 同款。原实现裸奔：事务挂起（既不
+  // oncomplete 也不 onerror）时 Promise 永不 resolve，data-backup.js 的快照清理
+  // 复核链卡死，几百 MB 遗留副本历经多次启动仍在。现 4s 未完成即判挂起 → 重建
+  // 连接重试（最多 3 次），让 purgeLegacySnapshot 的复核能落地。
   window.idbDelete = function (key) {
-    return open().then(db => new Promise((resolve) => {
-      try {
-        const tx = db.transaction(STORE, 'readwrite');
-        tx.objectStore(STORE).delete(key);
-        tx.oncomplete = () => resolve(true);
-        tx.onerror = () => resolve(false);
-      } catch (e) { resolve(false); }
-    })).catch(() => false);
+    function tryOnce() {
+      return open().then(db => new Promise((resolve) => {
+        let done = false;
+        const t = setTimeout(function () {
+          if (done) return; done = true;
+          dbPromise = null;
+          resolve(false);
+        }, 4000);
+        try {
+          const tx = db.transaction(STORE, 'readwrite');
+          tx.objectStore(STORE).delete(key);
+          tx.oncomplete = () => { if (done) return; done = true; clearTimeout(t); resolve(true); };
+          tx.onerror = () => { if (done) return; done = true; clearTimeout(t); if (connLost(tx.error)) dbPromise = null; resolve(false); };
+          tx.onabort = () => { if (done) return; done = true; clearTimeout(t); if (connLost(tx.error)) dbPromise = null; resolve(false); };
+        } catch (e) { if (done) return; done = true; clearTimeout(t); if (connLost(e)) dbPromise = null; resolve(false); }
+      })).catch(() => false);
+    }
+    return (async () => {
+      let ok = await tryOnce();
+      if (!ok) { await new Promise(r => setTimeout(r, 100)); ok = await tryOnce(); }
+      if (!ok) { await new Promise(r => setTimeout(r, 100)); ok = await tryOnce(); }
+      return ok;
+    })();
   };
 
   // 清空全部键（"清除所有数据"用）：不删库，避免连接占用导致 blocked
@@ -273,8 +396,8 @@
         const tx = db.transaction(STORE, 'readwrite');
         tx.objectStore(STORE).clear();
         tx.oncomplete = () => resolve(true);
-        tx.onerror = () => resolve(false);
-        tx.onabort = () => resolve(false);
+        tx.onerror = () => { if (connLost(tx.error)) dbPromise = null; resolve(false); };
+        tx.onabort = () => { if (connLost(tx.error)) dbPromise = null; resolve(false); };
       } catch (e) { resolve(false); }
     })).catch(() => false);
   };
@@ -302,8 +425,8 @@
           try { tx.abort(); } catch (e2) {}
         }
         tx.oncomplete = () => resolve(!bad);
-        tx.onerror = () => resolve(false);
-        tx.onabort = () => resolve(false);
+        tx.onerror = () => { if (connLost(tx.error)) dbPromise = null; resolve(false); };
+        tx.onabort = () => { if (connLost(tx.error)) dbPromise = null; resolve(false); };
       } catch (e) { resolve(false); }
     })).catch(() => false);
   };
@@ -416,6 +539,14 @@
     };
   };
 
+  // v3.26.x：导出兜底——IDB 读取失败/超时时，本会话 memoryCache 可能有最新值
+  //（idbRestore 回填的大键、或本会话 xyStore.set 写入的值），供 data-backup.js 导出兜底，
+  // 避免 IDB-only 大键（朋友圈/字卡等）在 IDB 事务挂起时彻底丢失。
+  window.idbGetCached = function (key) {
+    if (memoryCache && Object.prototype.hasOwnProperty.call(memoryCache, key)) return memoryCache[key];
+    return undefined;
+  };
+
   // v3.6.x：聊天记录键判定——旧顶层键 xy-home-v2:chat-msgs + 各联系人命名空间键
   // xy-home-v2:default:chat-msgs / xy-home-v2:cxxx:chat-msgs。聊天记录有独立的 LS
   // 兜底快照机制（chat.js writeLsSnapshot ≤2MB，专属 chat.js 管理），idbRestore
@@ -455,14 +586,20 @@
       sendReady();
     };
     // v3.5.122：整体保险——极端情况（IndexedDB 事务挂起/设备存储异常）下
-    //   12 秒后强制置就绪。否则 open() 或任一事务永不完成时，开屏永远
+    //   12 秒后通知开屏「加载较慢」。否则 open() 或任一事务永不完成时，开屏永远
     //   「正在加载数据…」没有进入按钮（低端安卓机曾现卡死数分钟）。
     // v3.6.x：保险丝超时只放行开屏、不再截断恢复——低端机大量图片键分批恢复
     //   可能真的超过 12 秒，原逻辑会把剩余键丢弃（本会话数据缺失，只能刷新重试）；
-    //   现在超时后开屏可进入，恢复循环继续后台把剩余键补齐
+    //   现在超时后恢复循环继续后台把剩余键补齐
+    // v3.26.x：保险丝不再静默设 __mochiDataReady（原 sendReady 会让开屏「点击进入」
+    //   可点，但后台回填未完成 → 用户进入后数据不全，正是"没加载完就进入"的 bug）。
+    //   改为派发 mochi-restore-slow + 设 __mochiDataSlow，开屏据此显示「仍要进入」
+    //   小链接让用户主动选（进入时提示数据可能不全），按钮默认仍置灰等到真就绪。
+    //   不置 finished：processBatch 继续恢复，真完成时 finish() 才设 __mochiDataReady。
     const safety = setTimeout(function () {
       if (finished) return;
-      sendReady(); // 放行开屏，不阻塞用户
+      try { window.__mochiDataSlow = true; } catch (e) {}
+      try { document.dispatchEvent(new Event('mochi-restore-slow')); } catch (e) {}
       // 不置 finished：processBatch 继续恢复剩余键
     }, 12000);
     // v3.16.x：先恢复「LS 写失败脏键」集合（持久化在 IDB，跨浏览器重启仍有效）——
@@ -482,6 +619,10 @@
         k.indexOf(uidPrefix) === 0 &&
         k !== LS_DIRTY_KEY && // 脏键索引自身不回填
         k.indexOf(uidPrefix + 'music-file:') !== 0 &&
+        // #142：媒体池键（xy-home-v2:media:<hash>）不回填——几百个图片键回填进
+        // memoryCache/LS 等于把去重省下的内存又加倍吃回去；媒体层（media-pool.js）
+        // 按哈希按需 idbGet 解析令牌，池键只存 IDB
+        k.indexOf(uidPrefix + 'media:') !== 0 &&
         // v3.6.x：聊天记录不回填 localStorage——chat.js 已改为只写 IndexedDB，
         // 恢复到这里会重新占满 5MB 配额（几千条带图记录是几十 MB），且读取
         // 路径已不依赖 LS 快照（loadMsgs 直接 IDB 权威读）。
@@ -703,16 +844,43 @@
   function wrjPersist() {
     try { localStorage.setItem(WRJ_KEY, JSON.stringify(_wrj || [])); } catch (e) {}
   }
+  // v3.26.x 存储优化：标记合并落库——原实现每个小键 set 各发一个 IDB 事务写时间戳标记，
+  // 值事务之外白翻倍事务数；现积攒 150ms 用 idbSetAll 单事务批量写。语义不变：值事务在
+  // xyStore.set 里同步先发出，flush 时早已入队（值先于标记提交）；150ms 内立刻退出浏览器的
+  // 极端窗口由下方 pagehide/visibilitychange 即时冲刷兜住，且主防线本就是同步写的 LS 日志。
+  // idbSetAll 无重试骨架，返回 false 时退回逐键 idbSet（自带 3 次重试）。
+  const WRJ_MARK_FLUSH_MS = 150;
+  let _wrjMarkBuf = new Map(); // 完整标记键 -> t
+  let _wrjMarkT = null;
+  function wrjMarkFlush() {
+    if (_wrjMarkT) { clearTimeout(_wrjMarkT); _wrjMarkT = null; }
+    if (!_wrjMarkBuf.size) return;
+    const pairs = [];
+    _wrjMarkBuf.forEach(function (t, k) { pairs.push({ k: k, v: t }); });
+    _wrjMarkBuf.clear();
+    try {
+      if (window.idbSetAll) {
+        window.idbSetAll(pairs).then(function (ok) {
+          if (ok) return;
+          pairs.forEach(function (p) { try { if (window.idbSet) window.idbSet(p.k, p.v); } catch (e2) {} });
+        }).catch(function () {});
+        return;
+      }
+    } catch (e) {}
+    pairs.forEach(function (p) { try { if (window.idbSet) window.idbSet(p.k, p.v); } catch (e2) {} });
+  }
   function wrjMark(key, t) {
-    try { if (window.idbSet) window.idbSet(WRJ_MARK + key, t); } catch (e) {}
+    _wrjMarkBuf.set(WRJ_MARK + key, t);
+    if (!_wrjMarkT) _wrjMarkT = setTimeout(wrjMarkFlush, WRJ_MARK_FLUSH_MS);
   }
   function wrjUnmark(key) {
+    _wrjMarkBuf.delete(WRJ_MARK + key); // 还没落库的标记直接撤销，省一个删除事务
     try { if (window.idbDelete) window.idbDelete(WRJ_MARK + key); } catch (e) {}
   }
   function wrjRecord(key, v) {
     if (typeof v !== 'string' || v.length > WRJ_VAL_LIMIT) return;
     if (!key || key === WRJ_KEY || key.indexOf('__') >= 0) return;
-    if (isChatMsgsKey(key) || key.indexOf('music-file:') >= 0) return;
+    if (isChatMsgsKey(key) || /:chat-meta$/.test(key) || key.indexOf('music-file:') >= 0) return;
     if (!_wrj) _wrj = wrjLoad(wrjLsRaw());
     const t = Date.now();
     _wrj = _wrj.filter(function (e) { return e.k !== key; });
@@ -735,6 +903,13 @@
     if (_wrj.length !== before) wrjPersist();
     wrjUnmark(key);
   }
+  // 离页即时冲刷待写标记，压缩「写完立刻退出」丢标记的窗口
+  try {
+    document.addEventListener('visibilitychange', function () {
+      try { if (document.visibilityState === 'hidden') wrjMarkFlush(); } catch (e) {}
+    });
+  } catch (e) {}
+  try { if (window.addEventListener) window.addEventListener('pagehide', wrjMarkFlush); } catch (e) {}
   // 回放：把日志里的「最近一次写入」补进 内存+LS+IDB。时间戳守卫保证只应用比
   // 已知写入更新的条目（不会覆盖本会话新写入的值）。
   function wrjReplay(entries) {
@@ -816,6 +991,11 @@
         // 连唯一备份都没了（vivo S16 Edge 实测：收藏/音乐/字卡/信/朋友圈都在
         //（LS+IDB 双写），唯独聊天记录整体消失——聊天是唯一只写 IDB 的数据）
         if (isChatMsgsKey(k)) continue;
+        // v3.29.x：已下线的自动备份副本键绝不参与迁移——它以 LS 形态存在时（远古版本或
+        // 手工改过的备份包）必然远超 LS_BIG_LIMIT，一旦被收进 bigKeys，下面的循环会整包读进
+        // 内存 + 写回 IDB + 常驻 memoryCache（idb.js:930），等于把 data-backup.js 刚清理掉的
+        // 副本又复活一份，还白钉住几百 MB 堆。副本是纯冗余遗留物，不需要迁移，交给 purge。
+        if (k === 'xy-home-v2:__auto-backup-snapshot') continue;
         const v = localStorage.getItem(k);
         if (v && v.length > LS_BIG_LIMIT) bigKeys.push(k);
       }
@@ -835,6 +1015,22 @@
               memoryCache[k] = v;
               try { localStorage.removeItem(k); } catch (e) {}
               moved++;
+            } else {
+              // v3.26.x：idbSet 失败可能是 IDB 连接刚启动未就绪/事务瞬时挂起，
+              // 延迟 5s 重试一次（连接恢复后能成功，下次启动即可删 LS 拖留）。
+              // 仍失败则 LS 保留（不丢数据，下次启动迁移块会再试）。
+              setTimeout(async function () {
+                try {
+                  const v2 = localStorage.getItem(k);
+                  if (!v2) return;
+                  const ok2 = await window.idbSet(k, v2);
+                  if (ok2) {
+                    if (!memoryCache) memoryCache = {};
+                    memoryCache[k] = v2;
+                    try { localStorage.removeItem(k); } catch (e) {}
+                  }
+                } catch (e) {}
+              }, 5000);
             }
           } catch (e) {}
         }
@@ -842,6 +1038,74 @@
       })();
     }
   } catch (e) {}
+
+  window.idbBigSize = function (key) {
+    // v3.26.x #139：大键尺寸只读访问（__big-idx 索引在 set/回填时记录 >200KB 值的长度）。
+    // 供字卡库去重等模块免读大值做「是否有变化」预检，避免每次会话把 100MB+ 键拉进堆。
+    try { const s = _bigIdx[key]; return typeof s === 'number' ? s : null; } catch (e) { return null; }
+  };
+
+  // ===== v3.26.x #139：LS 大键残留清扫（恢复设置保存配额） =====
+  // 现象（#139 诊断）：LS 整域 10MB 满、写探针 QuotaExceededError，设置/桌面保存失败。
+  // xyStore.set 对 >LS_BIG_LIMIT 的值会清 LS 副本，但「全量备份导入直写 LS」且发生在
+  // 上方 v3.5.92 迁移（sessionStorage 门，每浏览器会话只跑一次）之后时，存量残留直到
+  // 下次重启都没人清（fav-msgs 207KB 等 LS+IDB 双份计费）。补一个事件驱动的幂等清扫：
+  // restore 完成 / 备份导入（都会派发 mochi-restore-done）后延迟执行——
+  //   · IDB 值与 LS 值完全一致 → 纯去重，直接删 LS 副本（零数据风险）；
+  //   · IDB 缺失/落后 → 先按 retainValue 同规则以 LS 追平 IDB，写成功且 LS 未被业务
+  //     再写才删 LS（写失败本轮跳过下轮收敛；绝不先删后写）。
+  //   · IDB 值是非字符串（结构化存储）→ 不动（不是本清扫的目标形态）。
+  let _lsSweepDone = false;
+  function lsResidueSweep() {
+    if (_lsSweepDone) return;
+    _lsSweepDone = true;
+    if (!window.idbGet || !window.idbSet) return;
+    let names = [];
+    try { names = Object.keys(localStorage); } catch (e) { return; }
+    const cands = names.filter(function (k) {
+      if (typeof k !== 'string' || k.indexOf('xy-home-v2:') !== 0) return false;
+      if (isChatMsgsKey(k)) return false;                  // 聊天 LS 快照是唯一备份，绝不动
+      if (k.indexOf('music-file:') >= 0) return false;     // 音频有专属迁移路径
+      if (k === BIG_IDX_KEY || k === LS_DIRTY_KEY || k === WRJ_KEY || k.indexOf('__wr-j:') === 0) return false;
+      if (k === 'xy-home-v2:__auto-backup-snapshot') return false;
+      let v = null;
+      try { v = localStorage.getItem(k); } catch (e) { return false; }
+      return typeof v === 'string' && v.length > LS_BIG_LIMIT;
+    });
+    let i = 0;
+    (function step() {
+      if (i >= cands.length) return;
+      const k = cands[i++];
+      let lsVal = null;
+      try { lsVal = localStorage.getItem(k); } catch (e) {}
+      if (typeof lsVal !== 'string' || lsVal.length <= LS_BIG_LIMIT) { setTimeout(step, 0); return; }
+      window.idbGet(k).then(function (idbVal) {
+        const next = function () { setTimeout(step, 0); };
+        if (idbVal && typeof idbVal !== 'string') { next(); return; }
+        if (typeof idbVal === 'string' && idbVal === lsVal) {
+          // 纯去重：IDB 已有同值，LS 副本是双倍计费残留；删前复读防业务刚写入新值
+          try { if (localStorage.getItem(k) === lsVal) localStorage.removeItem(k); } catch (e) {}
+          next(); return;
+        }
+        // IDB 缺失/落后 → 以 LS 为最新追平 IDB，写成功且 LS 未变才删（绝不先删后写）
+        window.idbSet(k, lsVal).then(function (ok) {
+          if (ok) {
+            let cur = null;
+            try { cur = localStorage.getItem(k); } catch (e) {}
+            if (cur === lsVal) {
+              if (!memoryCache) memoryCache = {};
+              if (!(k in memoryCache)) memoryCache[k] = lsVal;
+              try { localStorage.removeItem(k); } catch (e) {}
+            }
+          }
+          next();
+        }).catch(next);
+      }).catch(function () { setTimeout(step, 0); });
+    })();
+  }
+  document.addEventListener('mochi-restore-done', function () { setTimeout(lsResidueSweep, 20000); });
+  setTimeout(lsResidueSweep, 45000); // restore 挂起/事件丢失兜底（_lsSweepDone 防重入）
+  window.idbLsResidueSweep = lsResidueSweep;
 
   // v3.16.x：跨上下文同步——get 改 memoryCache 优先后，另一上下文（PWA + 浏览器标签双开、
   // 多窗口）写入 localStorage 的新值会被本侧 memoryCache 旧值遮蔽。storage 事件（仅跨上下文

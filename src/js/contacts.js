@@ -16,7 +16,13 @@
     // desk-checkin-en（桌面查岗全局开关）与 desk-call-en（跨桌面来电全局开关）都存
     // 根命名空间、全桌面通，绝不随联系人隔离，防 migrateLegacy 每次刷新搬进 default
     // 桌面（同 bg-*/feed-* 既有处理）。
-    'incoming-requests', 'desk-checkin-en', 'desk-call-en',
+    // v3.27.x：desk-freq-mode（跨桌面查岗/来电频率档位）同为全局根键——此前漏排除，
+    // 被 migrateLegacy 当旧顶层业务键迁进 default 并删根键，用户选的「标准」静默回退
+    // 「安静」（1%/3h），跨桌面查岗/来电几乎不触发。
+    // #160：call-hold（后台来电响铃挂起，call.js 写根命名空间、值含归属 cid）——
+    // 同 bg-* 道理是全局根键，绝不随联系人隔离，防 migrateLegacy 搬进 default 并删根键
+    // （挂起键丢了=用户回来接不到重响的来电）。
+    'incoming-requests', 'desk-checkin-en', 'desk-call-en', 'desk-freq-mode', 'call-hold',
     // v3.12.x：group-chat-msgs（群聊消息，v3.8 起全局存储于根命名空间）——同 bg-* 道理，
     // 不是旧顶层业务键。此前漏排除导致每次刷新 migrateLegacy 把群聊记录搬进 default:
     // 并删根键，群聊页读根键为空 → 历史看似清空（数据滞留 default: 副本）+ 迁移循环空转。
@@ -42,8 +48,9 @@
     'period-records', 'period-cfg', 'period-daily', 'period-notify', 'period-migrated',
     // v3.11.x：字卡库公用字卡改全局共享——xy-home-v2:cc-groups-public 存所有桌面联系人
     // 共用的自定义字卡（chatcard.js），cc-scope-migrated 为存量归属迁移幂等标记。
+    // v3.30.x：cc-groups-public-off 为公用字卡「分组停用开关」全局根键，同列排除。
     // 都是根命名空间键，绝不能被 migrateLegacy 迁进 default 桌面（否则公用字卡"消失"）
-    'cc-groups-public', 'cc-scope-migrated',
+    'cc-groups-public', 'cc-groups-public-off', 'cc-scope-migrated',
     // v3.11.x：字卡库公用/专属变动一次性提醒的已读标记（chatcard.js 弹窗），同为全局根键
     'cc-scope-notice-done',
     // v3.12.x：我的表情包改全局共享（chat.js）——键 xy-home-v2:my-emoji-groups 走根命名
@@ -51,10 +58,14 @@
     // 都是全局根键，绝不能被 migrateLegacy 当旧顶层业务键迁进 default 桌面
     // （否则全局键被搬走/删除：表情包"消失"+ 迁移标记丢失每次重跑）
     'my-emoji-groups', 'mye-global-migrated',
-    // v3.11.x：存钱罐改全局共享（两人共同金库，p2-features.js）——键 xy-home-v2:piggy-*
-    // 走根命名空间，绝不能被 migrateLegacy 迁进 default 桌面（否则非 default 桌面余额读空）
+    // v3.11.x：存钱罐改全局共享（两人共同金库，p2-features.js）——键 xy-home-v2:piggy-* 与
+    // v3.26.x 心意币存钱独立账本 piggy-coin-* 都走根命名空间，绝不能被 migrateLegacy 迁进
+    // default 桌面（否则非 default 桌面余额读空）
     'piggy-log', 'piggy-goal-name', 'piggy-goal-amt', 'piggy-cards', 'piggy-last-visit',
-    'piggy-goals', 'piggy-goal-cur',
+    'piggy-goals', 'piggy-goal-cur', 'piggy-coin-log', 'piggy-coin-goals', 'piggy-coin-goal-cur', 'piggy-coin-last-visit',
+    // v3.26.x：存钱罐概率设置（存/取/申请）是全局根键（p2-features.js 读写、chat.js 申请读取），
+    // 绝不能随联系人隔离，否则非 default 桌面读到空回退默认值
+    'piggy-coin-prob',
     // v3.10.x：心意市集自定义商品改全局共享（所有桌面互通一份商品库，gift-shop.js）——
     // 键 xy-home-v2:market-custom 走根命名空间，绝不能被 migrateLegacy 迁进 default 桌面
     // （否则非 default 桌面读不到全局商品库，自定义商品"消失"）。market-migrated 为迁移幂等标记
@@ -100,7 +111,11 @@
     // chat-beauty-schemes）、隐藏TA表情包开关（chat-settings.js hide-ta-sticker，聊天/朋友圈
     // 共用）都是全局根键。此前漏排除，被 migrateLegacy 迁进 default 桌面并删 LS 根键 →
     // IDB 不可用场景下方案列表/开关刷新后消失。
-    'beauty-schemes', 'chat-beauty-schemes', 'hide-ta-sticker'];
+    'beauty-schemes', 'chat-beauty-schemes', 'hide-ta-sticker',
+    // v3.26.x #121：通话进行中标记（call.js）——全局根键，call.js 每次启动 recoverCall
+    // 读它恢复中断通话。绝不能被 migrateLegacy 当旧顶层业务键迁进 default 桌面并删根键
+    // （否则 localStorage 兜底副本每次启动被搬走，关浏览器重开后恢复读不到标记）
+    'call-active'];
   function isExcluded(k) {
     const r = k.slice(G.length + 1);
     if (EXCLUDE.indexOf(r) >= 0) return true;
@@ -133,7 +148,13 @@
 
   // ---- 当前激活联系人 ----
   let _cid = 'default';
-  try { const a = localStorage.getItem(G + ':active-contact'); if (a) _cid = a; } catch (e) {}
+  // v3.26.x #88：改走 xyStore（内存缓存优先）——idb.js 里 #40 的小键写日志在模块初始化
+  // 前已同步回放进内存缓存，LS 失效设备靠这条路就能当场拿回上次的桌面；裸 localStorage
+  // 读作兜底。仅这一步不够（日志只留最近 40 条），真正的兜底见下方 correctCidFromIdb。
+  try {
+    const a = window.xyStore ? window.xyStore(G).get('active-contact') : localStorage.getItem(G + ':active-contact');
+    if (a) _cid = a;
+  } catch (e) {}
   window.__activeCid = _cid;
 
   // 当前激活命名空间前缀（动态读取，切换后新调用即生效）
@@ -200,6 +221,16 @@
     return 'TA';
   };
   window.taWord = function () { return window.taWordFor(window.__activeCid || 'default'); };
+  // v3.26.x：联系人名片名查询（按 cid 读注册表，供通话等模块回退显示）——
+  // 聊天顶栏昵称回退链是 cs-lbl-partner → 联系人名片名 → TA（chat.js updateChatPartnerName），
+  // 通话大面板/小框此前只回退 TA/他/她，用户只改了联系人名片（联系人管理改名）时
+  // 顶栏有名字、通话小框却显示 TA/他/她，观感像「改名没生效」。补齐同一回退链。
+  window.contactNameFor = function (cid) {
+    try {
+      const c = getContacts().find(x => x.id === (cid || 'default'));
+      return (c && c.name) || '';
+    } catch (e) { return ''; }
+  };
   // 人称替换：TA/他/ta → 性别称呼。保护「其他」（非人称）、base64 段（dataURL 不能动，
   // 大写 TA 可能出现在 base64 字符里）与 <svg>…</svg> 图标段（系统消息带图标前缀）；
   // 不用正则 lookbehind（旧版 iOS Safari 不支持）。
@@ -299,15 +330,29 @@
     return true;
   };
 
+  // v3.26.x #88：启动校正与用户手动切换的互斥状态（必须在 setActiveContact 之前声明）
+  let autoFixingCid = false;   // true=正在执行自动校正，不算用户手动切换
+  let cidUserSwitched = false; // 本会话用户手动切过桌面 → 校正不再干预
   // 切换联系人：更新状态 + 刷新 UI + 回桌面 + 广播事件
   window.setActiveContact = function (id) {
     if (id === (window.__activeCid || 'default')) return;
+    if (!autoFixingCid) cidUserSwitched = true;
     // v3.6.x：切换前把当前桌面的未保存聊天立即写盘（防抖定时器可能尚未触发，
     // 若等它回写会用旧命名空间把 A 桌面的消息存到 B 桌面）
     try { if (window.chatFlushSave) window.chatFlushSave(); } catch (e) {}
+    // v3.29.x：字卡库同款——切桌面先落盘当前桌面未保存的字卡变更。必须在本行
+    // __activeCid 变更前调用（ccFlushSave 内 curStore 动态读 activePrefix），否则
+    // pending 的 120ms 防抖定时器会在切走后把 A 桌面数据写进 B 桌面键，A 桌面
+    // 刚上传的表情包/图片「消失」（华为 P50E Edge 反馈场景之一）
+    try { if (window.ccFlushSave) window.ccFlushSave(); } catch (e) {}
     window.__activeCid = id;
-    try { localStorage.setItem(G + ':active-contact', id); } catch (e) {}
-    try { if (window.idbSet) window.idbSet(G + ':active-contact', id); } catch (e) {}
+    // v3.26.x #88：改走 regStore——裸 localStorage 写会漏内存缓存，LS 失效设备（本机
+    // 0 键 + 写入 QuotaExceededError）上还会造成「IDB 有真值、内存/LS 没有」的错位，
+    // 让下面的启动校正读到陈旧值。xyStore.set 一次写齐 内存 + LS + IDB + 写日志。
+    try { regStore().set('active-contact', id); } catch (e) {
+      try { localStorage.setItem(G + ':active-contact', id); } catch (e2) {}
+      try { if (window.idbSet) window.idbSet(G + ':active-contact', id); } catch (e3) {}
+    }
     if (window.refreshActiveContactUI) window.refreshActiveContactUI();
     try { document.dispatchEvent(new Event('contact-switched')); } catch (e) {}
     try {
@@ -316,6 +361,91 @@
     } catch (e) {}
   };
   window.switchContact = window.setActiveContact;
+
+  // ===== v3.26.x 修复 #88：LS 失效设备的「当前桌面」启动校正 =====
+  // 症状：小米 14U Edge 反馈「聊天记录几小时就自己消失不显示」。诊断实证该设备
+  // localStorage 已彻底不可用（xy-home-v2 键数 0 + 写探针 QuotaExceededError，而 IndexedDB
+  // 184MB 完好、storage.persisted=true、配额仅用 855MB/11GB——与 #82 同一台机器同一状态）。
+  // 根因：旧实现启动时只在 contacts.js 顶部同步读一次 localStorage 的 active-contact，
+  // 拿不到就定死在 default 桌面，而该键的权威值一直好好存在 IndexedDB 里没人回读。
+  // 于是每次冷启动都掉回 default 桌面：用户真实记录在 <cid>:chat-msgs（该设备 563KB）里，
+  // default:chat-msgs 只剩 6.7KB → 看起来就是「记录消失了」，同桌面的美化/开关（per-cid 键）
+  // 也一并显示成 default 的值 →「设置自己变回去了」。
+  // 方案：IndexedDB 回填完成后再读一次权威值，与当前生效桌面不一致且目标仍在名册里就切回
+  //（复用 setActiveContact，链路含 chatFlushSave/contact-switched/回桌面，与手动切换同语义）。
+  // 边界：本会话用户手动切过桌面 → 完全不干预；最多尝试 3 次（回填完成 / 写日志合并 /
+  // 16 秒兜底各一次），真正切回后立即停止；回填迟迟不来由定时兜底救；时机不安全
+  //（用户已进到聊天/设置等页面）则本次放弃、不记尝试数，留给下次冷启动。
+  let cidAutoFixTries = 0;   // 已尝试次数（回填挂起时首次可能读不到值，不能一次定死）
+  // setActiveContact 会强制回到手机主页（page-phone）——用户正在聊天/设置里时被打断
+  // 比「这次没校正」更糟。所以只在开屏还没消失、或当前就停在主页时才自动切，
+  // 其余时机直接放弃（权威值不动，下次冷启动自然会校正，不占用尝试次数）。
+  function autoFixMomentSafe() {
+    try {
+      const sp = document.getElementById('splash');
+      if (sp && !sp.classList.contains('hide')) return true;
+      const home = document.getElementById('page-phone');
+      if (!home || home.hidden) return false;
+      const pages = document.querySelectorAll('.page');
+      for (let i = 0; i < pages.length; i++) {
+        if (pages[i] !== home && !pages[i].hidden) return false;
+      }
+      return true;
+    } catch (e) { return false; }
+  }
+  function applyCidCorrection(saved) {
+    if (!saved || saved === (window.__activeCid || 'default')) return;
+    // 目标必须在联系人名册内（回填后名册同样来自 IDB，这时才读得到），否则不切——
+    // 防切到已删除/不存在的桌面造成空命名空间
+    if (saved !== 'default') {
+      let known = false;
+      try { known = getContacts().some(c => c && c.id === saved); } catch (e) {}
+      if (!known) return;
+    }
+    cidAutoFixTries = 99; // 已生效 → 本会话不再校正
+    autoFixingCid = true;
+    try { window.setActiveContact(saved); } catch (e) {}
+    autoFixingCid = false;
+    try { console.info('[mochi] 启动校正：localStorage 无 active-contact，已按 IndexedDB 权威值切回桌面 ' + saved); } catch (e) {}
+  }
+  function correctCidFromIdb() {
+    if (cidUserSwitched || cidAutoFixTries >= 3) return;
+    if (!window.xyStore || !autoFixMomentSafe()) return;
+    let saved = null;
+    try { saved = window.xyStore(G).get('active-contact'); } catch (e) { return; }
+    saved = (saved == null ? '' : String(saved)).trim();
+    // v3.26.x #90：xyStore 只覆盖「内存 + LS」，其成立前提是 IDB 回填已把这个键送进
+    // 内存缓存。回填迟到（本次报障机型启动耗时 24 秒，idbRestore 有 12 秒慢保险丝）或
+    // 被跳过时，原逻辑读空就直接 return——用户看到的仍然是「聊天记录消失」。这里补一次
+    // 直读 IndexedDB 权威值：异步回来先重新校验「用户没手动切过」与「时机安全」再应用。
+    if (!saved && window.idbGet) {
+      try {
+        window.idbGet(G + ':active-contact').then(function (v) {
+          cidAutoFixTries++;
+          const s = (v == null ? '' : String(v)).trim();
+          if (!s || cidUserSwitched || cidAutoFixTries > 3) return;
+          if (!autoFixMomentSafe()) return;
+          applyCidCorrection(s);
+        }).catch(function () { cidAutoFixTries++; });
+      } catch (e) {}
+      return;
+    }
+    cidAutoFixTries++;
+    applyCidCorrection(saved);
+  }
+  try {
+    if (window.__mochiDataReady) setTimeout(correctCidFromIdb, 0);
+    else {
+      document.addEventListener('mochi-restore-done', function h() {
+        document.removeEventListener('mochi-restore-done', h);
+        correctCidFromIdb();
+      });
+    }
+    // #40 的小键写日志合并晚于回填，可能比回填更权威（最近一次写入）→ 再校正一次机会
+    document.addEventListener('mochi-wrj-heal', function () { correctCidFromIdb(); });
+    // 回填整体挂起（IDB 事务挂起设备）时的兜底：那时部分键可能已进内存缓存
+    setTimeout(correctCidFromIdb, 16000);
+  } catch (e) {}
 
   // 切换后刷新首页头像/昵称（deco-avatar 在 template.html 中）
   // v3.6.x：头像实际渲染在 .ring 内的 <img> 标签（applyAvatar），仅设 backgroundImage 清不掉——
@@ -379,9 +509,10 @@
     // 迁进 default 桌面并删 LS 根键。检测 default 副本：根键空则写回根，并一律删 default
     // 副本（幂等：根键已有值不覆盖，只删副本）。memo-app-* 不在此列——memo-app.js 自带
     // 误迁自愈与按 id 合并，避免两处同写冲突。
+    // v3.27.x：desk-freq-mode 同列并入——把误迁进 default 的副本写回根键（存量一次性找回）。
     ['pomo-cfg', 'pomo-today', 'pomo-total', 'pomo-msgs', 'pomo-send-chat', 'pomo-bell',
       'pomo-companion', 'pomo-companion-log', 'pomo-cmp-usecards',
-      'beauty-schemes', 'chat-beauty-schemes', 'hide-ta-sticker'].forEach(function (k) {
+      'beauty-schemes', 'chat-beauty-schemes', 'hide-ta-sticker', 'desk-freq-mode'].forEach(function (k) {
       const v = def.get(k);
       if (v !== null && v !== undefined && v !== '') {
         try { if (root.get(k) === null || root.get(k) === undefined) root.set(k, v); } catch (e) {}
@@ -409,11 +540,39 @@
       try {
         if (!regStore().get('contacts')) {
           let name = '默认';
-          try { const n = localStorage.getItem(G + ':default:lbl-partner'); if (n) name = n; } catch (e) {}
+          // v3.26.x #90：改走 default 命名空间存储（内存优先，回填/写日志都到得了这里），
+          // 裸 localStorage 在 LS 整库失效的设备上恒空 → 联系人名字莫名退回「默认」
+          try { const n = window.xyStore(G + ':default').get('lbl-partner'); if (n) name = n; } catch (e) {
+            try { const n = localStorage.getItem(G + ':default:lbl-partner'); if (n) name = n; } catch (e2) {}
+          }
           regStore().set('contacts', JSON.stringify([{ id: 'default', name: name }]));
         }
         // v3.6.x：active-contact 仅在未设置时写 default——迁移不应覆盖用户已选的联系人
-        if (!localStorage.getItem(G + ':active-contact')) regStore().set('active-contact', 'default');
+        // v3.26.x #88 收口：判空必须走 regStore（内存缓存里就是刚回填好的权威值）。
+        // 原来读裸 localStorage：LS 整库失效的设备（实测本项目 0 键 + 写探针
+        // QuotaExceededError）上这个条件恒真 → 每次启动都把 IDB 里真正的 active-contact
+        // 改回 'default' 并顺带写进内存缓存/写日志，把上方的启动校正（correctCidFromIdb）
+        // 整个抵消掉——用户看到的仍然是「聊天记录消失」。migrateLegacy 只在
+        // __mochiDataReady 之后运行（见本文件末尾），此刻回填已完成，读得到真值。
+        if (!regStore().get('active-contact')) {
+          // v3.26.x #90：判空走 regStore 仍不够——回填/写日志都没把值送到内存时，直接写
+          // default 会把 IDB 里用户真正的桌面覆盖掉（连内存缓存 + LS + #40 写日志一起改），
+          // 而 correctCidFromIdb 之后读到的就是我们刚写的 default，校正被自己抹掉。
+          // 现在写 default 前先向 IndexedDB 严格确认（idbHasKey 三态）：
+          //   false＝库里确实没有 → 写 default（原行为）
+          //   true ＝库里有值只是没送到内存 → 保持「未设置」，交给启动校正按权威值切
+          //   null ＝探测本身失败（存储繁忙）→ 同样保持「未设置」，绝不猜测
+          const acWrite = function () {
+            try { if (!regStore().get('active-contact')) regStore().set('active-contact', 'default'); } catch (e) {}
+          };
+          if (window.idbHasKey) {
+            try {
+              window.idbHasKey(G + ':active-contact').then(function (has) {
+                if (has === false) acWrite();
+              }).catch(acWrite);
+            } catch (e) { acWrite(); }
+          } else acWrite();
+        }
         localStorage.setItem(G + ':migrated-v1', '1');
       } catch (e) {}
       window.__contactsMigrated = true;

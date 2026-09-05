@@ -353,11 +353,12 @@ try {
       if ('placeholder' in opts) { try { input.placeholder = opts.placeholder || ''; } catch (e) {} }
       // v3.13.x：opts.inputmode——金额等数字弹窗弹数字键盘；ghost 与已生成的
       // ce-box 都要写（转换器只在转换瞬间复制一次该属性）
-      if ('inputmode' in opts) {
-        var _im = opts.inputmode || '';
-        try { if (_im) input.setAttribute('inputmode', _im); else input.removeAttribute('inputmode'); } catch (e) {}
-        try { const _b = ceBoxOf(input); if (_b) { if (_im) _b.setAttribute('inputmode', _im); else _b.removeAttribute('inputmode'); } } catch (e) {}
-      }
+      // v3.26.x：必须无条件归一化——#modal-input 是全站共用的同一个元素，某次金额弹窗
+      // 设了 inputmode=decimal 后，下一次普通文字弹窗（梦角档案/我的档案等）若不重置，
+      // 残留的 decimal 会让手机（含安卓 ce-box）弹数字键盘。传了按传的写、没传一律清除。
+      var _im = ('inputmode' in opts) ? (opts.inputmode || '') : '';
+      try { if (_im) input.setAttribute('inputmode', _im); else input.removeAttribute('inputmode'); } catch (e) {}
+      try { const _b = ceBoxOf(input); if (_b) { if (_im) _b.setAttribute('inputmode', _im); else _b.removeAttribute('inputmode'); } } catch (e) {}
       if (textarea) {
         textarea.hidden = !opts.textarea;
         if (opts.textarea) {
@@ -714,13 +715,56 @@ try {
       }
     } catch (e) {}
   };
+  // v3.27.x：壁纸定位/缩放可调（phone-bg-pos-x/y/size），默认 cover+center，旧数据无键时完全兼容
+  const bgPosOf = () => ({ x: store.get('phone-bg-pos-x') || '50', y: store.get('phone-bg-pos-y') || '50', s: store.get('phone-bg-size') || 'cover' });
+  // ===== v3.26.x #147：壁纸常驻图层（修 iPhone16 Pro「退聊天回桌面巨卡」）=====
+  // 此前壁纸直写 .phone，applyBgVisibility 在每次进出桌面时清空/重设 backgroundImage：
+  // 2MB 级 dataURL 壁纸在 iOS 上每次重设都要主线程重新解码整张大图；且 chat-back 直挂
+  // 监听 + page-phone MutationObserver 双触发 = 一次返回解码两次 → 用户实测「退出聊天
+  // 回桌面巨卡、之后每次切换页面都卡」。改为：壁纸只赋给 .phone 内常驻图层（值变才重
+  // 赋，同值写 style 也会触发样式失效），页面切换只切图层 opacity——透明度 0 的图层纹
+  // 理在合成器中保持存活，不再反复解码。图层 z-index:1 低于 .page/.tabbar/.statusbar 的
+  // z-index:2，桌面透明页透出壁纸、其他页面遮挡，与原「清空/重设」视觉语义一致。
+  let bgLayer = null;
+  const ensureBgLayer = () => {
+    if (bgLayer || !phoneEl) return bgLayer;
+    bgLayer = document.createElement('div');
+    bgLayer.id = 'phone-bg-layer';
+    bgLayer.style.cssText = 'position:absolute;inset:0;z-index:1;pointer-events:none;opacity:0;';
+    phoneEl.insertBefore(bgLayer, phoneEl.firstChild);
+    return bgLayer;
+  };
+  const setBgLayerImage = (data) => {
+    const l = ensureBgLayer(); if (!l) return;
+    const want = data ? 'url("' + data + '")' : '';
+    // FIX 2026-09-04 #151 backgroundImage 仍「值变才写」（#147 防 iOS 重复解码语义不变），
+    // 但 backgroundSize/Position 必须每次刷新（各自值变才写、不盲写）：原实现把尺寸/定位
+    // 也锁进「图变才写」守卫——壁纸定位/缩放（phone-bg-pos-*）改键后图层不重应用（滑杆
+    // 实时预览失效）、两桌面同图不同 pos 时互相串用 → 「背景图片没有按正常比例铺满」。
+    if (l.style.backgroundImage !== want) l.style.backgroundImage = want;
+    if (!data) return;
+    const pos = bgPosOf();
+    const szWanted = (pos.s === 'cover' || !pos.s) ? 'cover' : (pos.s + '%');
+    const psWanted = pos.x + '% ' + pos.y + '%';
+    if (l.style.backgroundSize !== szWanted) l.style.backgroundSize = szWanted;
+    if (l.style.backgroundPosition !== psWanted) l.style.backgroundPosition = psWanted;
+  };
+  const setBgLayerPreset = (css) => {
+    const l = ensureBgLayer(); if (!l) return;
+    if (l.style.backgroundImage !== css) {
+      l.style.backgroundImage = css;
+      l.style.backgroundSize = 'cover';
+      l.style.backgroundPosition = 'center';
+    }
+  };
+  const setBgLayerVisible = (on) => {
+    const l = ensureBgLayer(); if (!l) return;
+    const v = on ? '1' : '0';
+    if (l.style.opacity !== v) l.style.opacity = v;
+  };
   const applyPhoneBg = (data) => {
     if (!phoneEl) return;
-    // 壁纸铺满整个手机屏幕（含状态栏/导航条区域），且只在桌面显示
-    phoneEl.style.backgroundImage = 'url("' + data + '")';
-    phoneEl.style.backgroundSize = 'cover';
-    phoneEl.style.backgroundPosition = 'center';
-    phoneEl.style.backgroundAttachment = 'scroll';
+    setBgLayerImage(data);
     applyBodyBg(data);
     if (bgHome) {
       bgHome.classList.add('has-bg');
@@ -733,7 +777,9 @@ try {
     if (bgRemove) bgRemove.hidden = !has;
   };
   const clearPhoneBg = () => {
-    if (phoneEl) phoneEl.style.backgroundImage = '';
+    setBgLayerImage(null);
+    setBgLayerVisible(false);
+    if (phoneEl) phoneEl.style.backgroundImage = ''; // 旧会话残留清理
     applyBodyBg(null);
     if (bgHome) {
       bgHome.classList.remove('has-bg');
@@ -741,6 +787,10 @@ try {
     }
     store.remove('phone-bg');
     store.remove('phone-bg-preset');
+    store.remove('phone-bg-solid');
+    store.remove('phone-bg-pos-x');
+    store.remove('phone-bg-pos-y');
+    store.remove('phone-bg-size');
     syncBgUI();
     const pv = document.getElementById('bg-preset-val'); if (pv) pv.textContent = '默认';
   };
@@ -759,9 +809,8 @@ try {
   const bgPresetVal = document.getElementById('bg-preset-val');
   const applyPhoneBgPreset = (css) => {
     if (!phoneEl) return;
-    phoneEl.style.backgroundImage = css;
-    phoneEl.style.backgroundSize = 'cover';
-    phoneEl.style.backgroundPosition = 'center';
+    // v3.26.x #147：改写常驻图层（原直写 .phone，进出桌面反复清设致 iOS 重复解码）
+    setBgLayerPreset(css);
     // v3.10.x：body 仅桌面窄框需要（铺两侧底色）；手机端 .phone 已全屏，body 版被遮挡，
     // 跳过避免 iOS 冗余解码/存留
     if (isDesktopFrame()) {
@@ -774,23 +823,52 @@ try {
   const getBgPresetName = () => store.get('phone-bg-preset') || '';
   const syncBgPresetUI = () => { if (bgPresetVal) bgPresetVal.textContent = getBgPresetName() || '默认'; };
   { const savedPreset = getBgPresetName(); if (savedPreset) { const p = BG_PRESETS.find(b => b.name === savedPreset); if (p) applyPhoneBgPreset(p.css); } syncBgPresetUI(); }
-  if (bgPresetRow) {
-    bgPresetRow.addEventListener('click', () => {
-      if (!window.openModal) return;
-      const pills = [{ label: '清除预设', value: '__clear__' }].concat(
-        BG_PRESETS.map(p => ({ label: p.name, value: p.name }))
-      );
-      window.openModal('内置壁纸预设', '', (v) => {
-        if (v === '__clear__') { clearPhoneBg(); return; }
-        const p = BG_PRESETS.find(b => b.name === v);
-        if (!p) return;
-        clearPhoneBg();
-        store.set('phone-bg-preset', p.name);
-        applyPhoneBgPreset(p.css);
-        syncBgPresetUI();
-        toast('已切换为「' + p.name + '」壁纸');
-      }, { noInput: true, pills: pills });
+  // v3.27.x：壁纸选择面板（项3）——缩略图色卡网格 + 纯色 + 取色器，真实 UI 非文字 pill
+  const openBgPanel = () => {
+    let m = document.getElementById('bg-preset-panel');
+    if (!m) { m = document.createElement('div'); m.id = 'bg-preset-panel'; m.style.cssText = 'position:fixed;inset:0;z-index:90;align-items:center;justify-content:center;background:rgba(0,0,0,.4);display:none'; document.body.appendChild(m); m.addEventListener('click', (e) => { if (e.target === m) m.style.display = 'none'; }); }
+    const wrap = document.createElement('div');
+    wrap.style.cssText = 'width:min(88vw,380px);max-height:84vh;overflow-y:auto;background:var(--card-bg,#fff);color:var(--ink,#111);border-radius:16px;padding:16px;box-shadow:0 14px 40px rgba(0,0,0,.25)';
+    const hd = document.createElement('div'); hd.style.cssText = 'font-size:15px;font-weight:700;margin-bottom:12px'; hd.textContent = '壁纸选择'; wrap.appendChild(hd);
+    const curPreset = getBgPresetName();
+    const curSolid = store.get('phone-bg-solid') || '';
+    const sec1 = document.createElement('div'); sec1.style.cssText = 'font-size:12px;color:var(--muted,#888);margin-bottom:6px'; sec1.textContent = '渐变预设'; wrap.appendChild(sec1);
+    const grid1 = document.createElement('div'); grid1.style.cssText = 'display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:14px';
+    BG_PRESETS.forEach((p) => {
+      const card = document.createElement('button');
+      card.style.cssText = 'height:54px;border-radius:10px;border:2px solid ' + (curPreset === p.name ? 'var(--ink,#111)' : 'rgba(0,0,0,.08)') + ';background:' + p.css + ';background-size:cover;cursor:pointer;padding:0;position:relative;overflow:hidden';
+      const lb = document.createElement('span'); lb.style.cssText = 'position:absolute;bottom:3px;left:0;right:0;font-size:10px;color:#fff;text-shadow:0 1px 3px rgba(0,0,0,.7);text-align:center'; lb.textContent = p.name; card.appendChild(lb);
+      card.addEventListener('click', () => { clearPhoneBg(); store.set('phone-bg-preset', p.name); applyPhoneBgPreset(p.css); syncBgPresetUI(); toast('已切换为「' + p.name + '」壁纸'); m.style.display = 'none'; });
+      grid1.appendChild(card);
     });
+    wrap.appendChild(grid1);
+    const sec2 = document.createElement('div'); sec2.style.cssText = 'font-size:12px;color:var(--muted,#888);margin-bottom:6px'; sec2.textContent = '纯色壁纸'; wrap.appendChild(sec2);
+    const solidColors = ['#ffffff','#f5f5f5','#e8e8e8','#1c1c1e','#111111','#e05555','#3a7bd5','#4a9d5e'];
+    const grid2 = document.createElement('div'); grid2.style.cssText = 'display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:10px';
+    solidColors.forEach((c) => {
+      const card = document.createElement('button');
+      card.style.cssText = 'height:40px;border-radius:10px;border:2px solid ' + (curSolid === c ? 'var(--ink,#111)' : 'rgba(0,0,0,.08)') + ';background:' + c + ';cursor:pointer;padding:0';
+      card.addEventListener('click', () => { clearPhoneBg(); store.set('phone-bg-solid', c); applyPhoneBgPreset(c); syncBgPresetUI(); toast('已切换为纯色壁纸'); m.style.display = 'none'; });
+      grid2.appendChild(card);
+    });
+    wrap.appendChild(grid2);
+    const pickerRow = document.createElement('div'); pickerRow.style.cssText = 'display:flex;align-items:center;gap:8px;margin-bottom:14px';
+    const pickerLabel = document.createElement('span'); pickerLabel.style.cssText = 'font-size:12px;color:var(--muted,#888)'; pickerLabel.textContent = '自定义纯色：'; pickerRow.appendChild(pickerLabel);
+    const picker = document.createElement('input'); picker.type = 'color'; picker.value = curSolid || '#ffffff'; picker.style.cssText = 'width:40px;height:32px;border:1px solid var(--card-border,#ddd);border-radius:8px;cursor:pointer;background:none';
+    picker.addEventListener('input', () => { clearPhoneBg(); store.set('phone-bg-solid', picker.value); applyPhoneBgPreset(picker.value); syncBgPresetUI(); });
+
+    pickerRow.appendChild(picker);
+    const pickerOk = document.createElement('button'); pickerOk.textContent = '应用'; pickerOk.style.cssText = 'font-size:12px;padding:5px 12px;border:none;border-radius:8px;background:var(--ink,#111);color:#fff';
+    pickerOk.addEventListener('click', () => { toast('已应用自定义纯色'); m.style.display = 'none'; });
+    pickerRow.appendChild(pickerOk);
+    wrap.appendChild(pickerRow);
+    const clearBtn = document.createElement('button'); clearBtn.textContent = '清除壁纸'; clearBtn.style.cssText = 'width:100%;padding:10px;border:1px solid rgba(163,45,45,.35);border-radius:10px;background:var(--danger-soft,#fff5f5);color:var(--danger-ink,#a32d2d);font-size:13px';
+    clearBtn.addEventListener('click', () => { clearPhoneBg(); m.style.display = 'none'; toast('已清除壁纸'); });
+    wrap.appendChild(clearBtn);
+    m.innerHTML = ''; m.appendChild(wrap); m.style.display = 'flex';
+  };
+  if (bgPresetRow) {
+    bgPresetRow.addEventListener('click', openBgPanel);
   }
   if (bgRow) {
     const savedBg = sanitizeBg('phone-bg', BG_SAFE_LIMIT);
@@ -827,6 +905,41 @@ try {
   if (bgRemove) {
     bgRemove.addEventListener('click', () => clearPhoneBg());
   }
+  // v3.27.x：壁纸定位/缩放调整（仅对自定义图生效）——三滑块实时预览
+  const bgAdjustRow = document.getElementById('row-bg-adjust');
+  if (bgAdjustRow) {
+    bgAdjustRow.addEventListener('click', () => {
+      if (!store.get('phone-bg')) { toast('请先上传背景图片'); return; }
+      let m = document.getElementById('bg-adjust-panel');
+      if (!m) { m = document.createElement('div'); m.id = 'bg-adjust-panel'; m.style.cssText = 'position:fixed;inset:0;z-index:90;align-items:center;justify-content:center;background:rgba(0,0,0,.4);display:none'; document.body.appendChild(m); m.addEventListener('click', (e) => { if (e.target === m) { m.style.display = 'none'; } }); }
+      const pos = bgPosOf();
+      const sx = parseInt(pos.x, 10), sy = parseInt(pos.y, 10), ss = pos.s === 'cover' ? 100 : parseInt(pos.s, 10);
+      const wrap = document.createElement('div');
+      wrap.style.cssText = 'width:min(86vw,360px);background:var(--card-bg,#fff);color:var(--ink,#111);border-radius:16px;padding:16px;box-shadow:0 14px 40px rgba(0,0,0,.25)';
+      const hd = document.createElement('div'); hd.style.cssText = 'font-size:15px;font-weight:700;margin-bottom:12px'; hd.textContent = '壁纸定位与缩放'; wrap.appendChild(hd);
+      const mkSlider = (label, val, min, max, on) => {
+        const r = document.createElement('div'); r.style.cssText = 'margin-bottom:12px';
+        const lb = document.createElement('div'); lb.style.cssText = 'font-size:12px;color:var(--muted,#888);margin-bottom:4px'; lb.textContent = label; r.appendChild(lb);
+        const inp = document.createElement('input'); inp.type = 'range'; inp.min = min; inp.max = max; inp.value = val; inp.style.cssText = 'width:100%';
+        const vv = document.createElement('span'); vv.style.cssText = 'font-size:11px;color:var(--muted,#999);margin-left:6px'; vv.textContent = val + (label.indexOf('缩放') >= 0 ? '%' : '%');
+        inp.addEventListener('input', () => { vv.textContent = inp.value + '%'; on(parseInt(inp.value, 10)); });
+        const row = document.createElement('div'); row.style.cssText = 'display:flex;align-items:center'; row.appendChild(inp); row.appendChild(vv);
+        r.appendChild(row); return r;
+      };
+      const applyBgPos = (x, y, sz) => { store.set('phone-bg-pos-x', String(x)); store.set('phone-bg-pos-y', String(y)); store.set('phone-bg-size', sz === 100 ? 'cover' : String(sz)); const d = bgData(); if (d) applyPhoneBg(d); };
+      let cx = sx, cy = sy, cs = ss;
+      wrap.appendChild(mkSlider('水平位置', sx, 0, 100, (v) => { cx = v; applyBgPos(cx, cy, cs); }));
+      wrap.appendChild(mkSlider('垂直位置', sy, 0, 100, (v) => { cy = v; applyBgPos(cx, cy, cs); }));
+      wrap.appendChild(mkSlider('缩放', ss, 100, 300, (v) => { cs = v; applyBgPos(cx, cy, cs); }));
+      const act = document.createElement('div'); act.style.cssText = 'display:flex;gap:8px;margin-top:8px';
+      const reset = document.createElement('button'); reset.textContent = '重置'; reset.style.cssText = 'flex:1;padding:9px;border:1px solid var(--card-border,#eee);border-radius:9px;background:var(--btn-cancel-bg,#fafafa);color:var(--ink,#111)';
+      reset.addEventListener('click', () => { store.remove('phone-bg-pos-x'); store.remove('phone-bg-pos-y'); store.remove('phone-bg-size'); const d = bgData(); if (d) applyPhoneBg(d); m.style.display = 'none'; toast('已重置为居中铺满'); });
+      const ok = document.createElement('button'); ok.textContent = '完成'; ok.style.cssText = 'flex:1;padding:9px;border:none;border-radius:9px;background:var(--ink,#111);color:#fff';
+      ok.addEventListener('click', () => { m.style.display = 'none'; toast('已应用'); });
+      act.appendChild(reset); act.appendChild(ok); wrap.appendChild(act);
+      m.innerHTML = ''; m.appendChild(wrap); m.style.display = 'flex';
+    });
+  }
 
   // 壁纸只在桌面显示：桌面时铺满全屏，切到字卡库/设置/聊天时隐藏（数据保留）
   const bgData = () => sanitizeBg('phone-bg', BG_SAFE_LIMIT);
@@ -840,8 +953,11 @@ try {
     if (!phoneEl) return;
     const home = document.getElementById('page-phone');
     const show = home && !home.hidden;
+    // v3.26.x #147：页面切换只切图层 opacity（原实现清空/重设 .phone backgroundImage，
+    // 2MB 壁纸在 iOS 上每次切换都主线程重新解码，用户实测退聊天回桌面巨卡）。
+    // 退出桌面不清图，回桌面时命中「值变才写」短路，零解码开销。
     if (!show) {
-      phoneEl.style.backgroundImage = '';
+      setBgLayerVisible(false);
       applyBodyBg(null);
       return;
     }
@@ -850,13 +966,14 @@ try {
     // tab 切换触发 applyBgVisibility 都会因 bgData() 为空把预设壁纸清掉。
     // 现在自定义图优先、其次内置预设，都没有才清空。
     const customBg = bgData();
+    const solidCss = store.get('phone-bg-solid') || '';
     const presetCss = bgPresetCss();
     if (customBg) applyPhoneBg(customBg);
+    else if (solidCss && /^#[0-9a-fA-F]{6}$/.test(solidCss)) applyPhoneBgPreset(solidCss);
     else if (presetCss) applyPhoneBgPreset(presetCss);
-    else {
-      phoneEl.style.backgroundImage = '';
-      applyBodyBg(null);
-    }
+    else setBgLayerImage(null);
+    setBgLayerVisible(!!(customBg || (solidCss && /^#[0-9a-fA-F]{6}$/.test(solidCss)) || presetCss));
+    if (!customBg && !(solidCss && /^#[0-9a-fA-F]{6}$/.test(solidCss)) && !presetCss) applyBodyBg(null);
   };
   // 页面切换时同步壁纸显示
   document.querySelectorAll('.tab').forEach(t => t.addEventListener('click', applyBgVisibility));
@@ -890,6 +1007,14 @@ try {
   document.querySelectorAll('.app .app-ico').forEach(ico => {
     if (!ico.dataset.orig) ico.dataset.orig = ico.innerHTML;
   });
+  // v3.27.x：自定义图标图片透明度——仅对上传的 <img> 生效（默认 SVG 图标不受影响），
+  // 与小组件透明度同款 0~100 百分比，存 app-icon-opacity-<key>（per-cid），100 不存
+  const applyAppIconOpacity = (app, pct) => {
+    const img = app.querySelector('.app-ico img');
+    if (!img) return;
+    const op = Math.max(0, Math.min(100, pct)) / 100;
+    img.style.opacity = String(op);
+  };
   const restoreAppIcons = () => {
     document.querySelectorAll('.app').forEach(app => {
       let saved = store.get('app-icon-' + app.dataset.app);
@@ -908,6 +1033,9 @@ try {
           img.src = saved;
           img.alt = '';
           ico.appendChild(img);
+          // v3.27.x：恢复自定义图标透明度
+          const op = store.get('app-icon-opacity-' + app.dataset.app);
+          if (op) applyAppIconOpacity(app, parseInt(op, 10));
         }
       } else if (ico && ico.dataset.orig) {
         ico.innerHTML = ico.dataset.orig;
@@ -1011,6 +1139,9 @@ try {
                 ico.appendChild(img);
               }
               store.set('app-icon-' + key, data);
+              // v3.27.x：换图保持已设透明度
+              const opSaved = store.get('app-icon-opacity-' + key);
+              if (opSaved) applyAppIconOpacity(app, parseInt(opSaved, 10));
               toast('图标已更新');
             });
           }, 80);
@@ -1033,6 +1164,7 @@ try {
     const pills = [];
     pills.push({ label: hasCustom ? '更换图片' : '上传图片', value: '1' });
     if (hasCustom) pills.push({ label: '清除图片', value: '2' });
+    if (hasCustom) pills.push({ label: '图标透明度', value: 'opacity' });
     if (grid) { pills.push({ label: '上移', value: 'up' }); pills.push({ label: '下移', value: 'down' }); }
     pills.push({ label: '隐藏图标', value: 'hide' });
     if (window.openModal) {
@@ -1042,6 +1174,29 @@ try {
           store.remove('app-icon-' + key);
           if (ico && ico.dataset.orig) ico.innerHTML = ico.dataset.orig;
           toast('已恢复默认图标');
+        } else if (v === 'opacity' && hasCustom) {
+          // v3.27.x：自定义图标图片透明度——slider 实时预览 + 预设 pills
+          const curOp = parseInt(store.get('app-icon-opacity-' + key) || '100', 10);
+          window.openModal('图标透明度', '', (vv) => {
+            const pct = parseInt(vv, 10);
+            if (isNaN(pct) || pct < 0 || pct > 100) { toast('请输入 0-100 的数字'); return; }
+            if (pct === 100) store.remove('app-icon-opacity-' + key);
+            else store.set('app-icon-opacity-' + key, String(pct));
+            applyAppIconOpacity(app, pct);
+          }, {
+            noInput: true,
+            slider: {
+              min: 0, max: 100, step: 1, value: curOp, label: '拖动调整图标透明度', unit: '%',
+              onChange: (val) => { applyAppIconOpacity(app, val); },
+            },
+            pills: [
+              { label: '100%', value: '100' },
+              { label: '80%', value: '80' },
+              { label: '60%', value: '60' },
+              { label: '40%', value: '40' },
+              { label: '20%', value: '20' },
+            ],
+          });
         } else if (v === 'up') moveApp('up');
         else if (v === 'down') moveApp('down');
         else if (v === 'hide') {
@@ -1104,6 +1259,115 @@ try {
   if (iconRow) {
     iconRow.addEventListener('click', enterDecor);
   }
+  // v3.27.x：快捷面板（项5）——美化页常用项直达，避免进多层菜单
+  (function bindQuickPanel() {
+    const bind = (id, targetId) => { const b = document.getElementById(id); const t = document.getElementById(targetId); if (b && t) b.addEventListener('click', () => t.click()); };
+    bind('dq-accent', 'row-accent-color');
+    bind('dq-theme', 'row-theme-mode');
+    bind('dq-bg', 'row-bg-preset');
+    bind('dq-radius', 'row-desk-card-radius');
+    // v3.27.x #146：dq-random（随机美化快捷入口）已随「一键随机美化」功能一并删除
+  })();
+  // v3.27.x：边看边调抽屉（项6）——切到桌面页 + 右侧浮层实时改 CSS 变量，桌面可见
+  const openBeautyDrawer = () => {
+    document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+    const phoneTab = document.querySelector('.tab[data-page="page-phone"]');
+    if (phoneTab) phoneTab.classList.add('active');
+    document.querySelectorAll('.page').forEach(pg => pg.hidden = true);
+    const phonePage = document.getElementById('page-phone');
+    if (phonePage) phonePage.hidden = false;
+    let d = document.getElementById('beauty-drawer');
+    if (!d) { d = document.createElement('div'); d.id = 'beauty-drawer'; d.style.cssText = 'position:fixed;top:0;right:0;bottom:0;width:min(70vw,300px);z-index:95;background:var(--card-bg,#fff);color:var(--ink,#111);box-shadow:-4px 0 20px rgba(0,0,0,.15);overflow-y:auto;padding:14px;box-sizing:border-box;display:none;flex-direction:column;gap:14px'; document.body.appendChild(d); }
+    d.innerHTML = '';
+    const hd = document.createElement('div'); hd.style.cssText = 'font-size:14px;font-weight:700;display:flex;justify-content:space-between;align-items:center';
+    const hdTxt = document.createElement('span'); hdTxt.textContent = '边看边调（改色实时生效）'; hd.appendChild(hdTxt);
+    const closeBtn = document.createElement('button'); closeBtn.textContent = '\u2715'; closeBtn.style.cssText = 'border:none;background:none;font-size:18px;color:var(--ink,#111);cursor:pointer;padding:4px 8px'; closeBtn.addEventListener('click', () => { d.style.display = 'none'; });
+    hd.appendChild(closeBtn); d.appendChild(hd);
+    const mkColorRow = (label, key, varName, isGlobal) => {
+      const r = document.createElement('div'); r.style.cssText = 'display:flex;flex-direction:column;gap:4px';
+      const lb = document.createElement('div'); lb.style.cssText = 'font-size:12px;color:var(--muted,#888)'; lb.textContent = label; r.appendChild(lb);
+      const inp = document.createElement('input'); inp.type = 'color';
+      try { inp.value = isGlobal ? (localStorage.getItem(key) || '#111111') : (store.get(key) || '#111111'); } catch (e) { inp.value = '#111111'; }
+      inp.style.cssText = 'width:100%;height:36px;border:1px solid var(--card-border,#ddd);border-radius:8px;cursor:pointer';
+      inp.addEventListener('input', () => {
+        document.documentElement.style.setProperty(varName, inp.value);
+        if (isGlobal) { try { localStorage.setItem(key, inp.value); } catch (e) {} } else { store.set(key, inp.value); }
+      });
+      r.appendChild(inp); return r;
+    };
+    d.appendChild(mkColorRow('主题色', 'xy-home-v2:accent-color', '--btn-bg', true));
+    d.appendChild(mkColorRow('组件背景色', 'widget-bg-color', '--widget-bg', false));
+    d.appendChild(mkColorRow('边框色', 'widget-border-color', '--widget-border', false));
+    const mkSliderRow = (label, key, varName, min, max, unit) => {
+      const r = document.createElement('div'); r.style.cssText = 'display:flex;flex-direction:column;gap:4px';
+      const lb = document.createElement('div'); lb.style.cssText = 'font-size:12px;color:var(--muted,#888)'; lb.textContent = label; r.appendChild(lb);
+      const inp = document.createElement('input'); inp.type = 'range'; inp.min = min; inp.max = max;
+      const cur = store.get(key); inp.value = cur || String(Math.round((min + max) / 2));
+      inp.style.cssText = 'width:100%';
+      const vv = document.createElement('span'); vv.style.cssText = 'font-size:11px;color:var(--muted,#999)'; vv.textContent = inp.value + unit;
+      inp.addEventListener('input', () => { vv.textContent = inp.value + unit; document.documentElement.style.setProperty(varName, inp.value + unit); store.set(key, inp.value); });
+      const row = document.createElement('div'); row.style.cssText = 'display:flex;align-items:center;gap:6px'; row.appendChild(inp); row.appendChild(vv);
+      r.appendChild(row); return r;
+    };
+    d.appendChild(mkSliderRow('组件圆角', 'desk-card-radius', '--desk-card-radius', 0, 30, 'px'));
+    const opRow = document.createElement('div'); opRow.style.cssText = 'display:flex;flex-direction:column;gap:4px';
+    const opLb = document.createElement('div'); opLb.style.cssText = 'font-size:12px;color:var(--muted,#888)'; opLb.textContent = '组件透明度'; opRow.appendChild(opLb);
+    const opInp = document.createElement('input'); opInp.type = 'range'; opInp.min = 40; opInp.max = 100; opInp.step = 5;
+    // FIX 2026-09-04 #151：统一 opacityRawToPct 解析 + 拖动存百分比整数——原实现初始化
+    // parseFloat(cur)*100（存量 "90" 被算成 9000）、拖动存小数（"0.85"，#146 同族脏值再入key）
+    const opCur = store.get('widget-opacity'); opInp.value = opCur ? String(opacityRawToPct(opCur)) : '100';
+    opInp.style.cssText = 'width:100%';
+    opInp.addEventListener('input', () => { const v = parseInt(opInp.value, 10) / 100; document.documentElement.style.setProperty('--widget-opacity', String(v)); store.set('widget-opacity', String(Math.round(v * 100))); });
+    opRow.appendChild(opInp); d.appendChild(opRow);
+    const hint = document.createElement('div'); hint.style.cssText = 'font-size:11px;color:var(--muted,#999);margin-top:4px'; hint.textContent = '左侧桌面实时预览，关闭后回美化页保存。'; d.appendChild(hint);
+    d.style.display = 'flex';
+  };
+  const dqDrawer = document.getElementById('dq-drawer');
+  if (dqDrawer) dqDrawer.addEventListener('click', openBeautyDrawer);
+  // v3.27.x：长按桌面空白处进装修模式（项5）——长按 .app-grid 空白（非图标），500ms 触发
+  // 仅长按空白区域，避开图标长按误触（原长按图标入口已移除，此处恢复便利性且不冲突）
+  (function bindLongPressDecor() {
+    let timer = null;
+    const clear = () => { if (timer) { clearTimeout(timer); timer = null; } };
+    grids.forEach(g => {
+      const start = (e) => {
+        const phone = document.getElementById('page-phone');
+        if (!phone || phone.hidden) return;
+        if (e.target.closest('.app')) return;
+        clear();
+        timer = setTimeout(() => { timer = null; try { enterDecor(); } catch (er) {} }, 500);
+      };
+      g.addEventListener('touchstart', start, { passive: true });
+      g.addEventListener('mousedown', start);
+      g.addEventListener('touchend', clear);
+      g.addEventListener('touchmove', clear, { passive: true });
+      g.addEventListener('mouseup', clear);
+      g.addEventListener('mouseleave', clear);
+    });
+  })();
+  // v3.27.x：美化项搜索（F）——输入过滤 .set-row，跨标签显示匹配项
+  (function bindThemeSearch() {
+    const inp = document.getElementById('theme-search-input');
+    const page = document.getElementById('page-theme');
+    if (!inp || !page) return;
+    inp.addEventListener('input', () => {
+      const q = inp.value.trim().toLowerCase();
+      const secs = page.querySelectorAll('.them-sec');
+      const rows = page.querySelectorAll('.set-row');
+      if (!q) {
+        rows.forEach(r => r.style.display = '');
+        const activeTab = page.querySelector('.them-tab.active');
+        if (activeTab) activeTab.click();
+        return;
+      }
+      secs.forEach(sec => sec.hidden = false);
+      rows.forEach(r => {
+        const txtEl = r.querySelector('.txt');
+        const txt = (txtEl ? txtEl.textContent : '').toLowerCase();
+        r.style.display = txt.indexOf(q) >= 0 ? '' : 'none';
+      });
+    });
+  })();
   // v3.6.x：装修模式设置卡片背景入口的绑定在 CARD_BG_TYPES 定义之后（见卡片背景段末尾）——
   // 该入口引用了 CARD_BG_TYPES 统计已设置数量，需等其声明后再绑定。
 
@@ -1348,6 +1612,90 @@ try {
     });
   }
 
+  // 图标文字颜色：注入 style 覆盖 .app .app-name 的 color（home.css 默认 var(--ink)）
+  // per-cid store，键 app-name-color；恢复默认移除 style 回到 var(--ink) 跟随主题/深色模式
+  const appNameColorRow = document.getElementById('row-app-name-color');
+  const appNameColorVal = document.getElementById('app-name-color-val');
+  const APP_NAME_COLOR_KEY = 'app-name-color';
+  const appNameColorValOf = () => { try { return store.get(APP_NAME_COLOR_KEY) || ''; } catch (e) { return ''; } };
+  function applyAppNameColor() {
+    const old = document.getElementById('app-name-color-style');
+    if (old) old.remove();
+    const c = appNameColorValOf();
+    if (appNameColorVal) appNameColorVal.textContent = c === 'auto' ? '自动' : (c ? c.toUpperCase() : '默认');
+    document.documentElement.style.setProperty('--app-name-color', c && /^#[0-9a-fA-F]{6}$/.test(c) ? c : '');
+    if (!c) return;
+    const st = document.createElement('style');
+    st.id = 'app-name-color-style';
+    if (c === 'auto') {
+      // v3.27.x：自动档——纯 CSS 跟随深色模式（light 黑 / dark 白），零 JS 重算
+      st.textContent = '.app .app-name{color:#111111 !important;}[data-theme="dark"] .app .app-name{color:#ffffff !important;}';
+    } else if (/^#[0-9a-fA-F]{6}$/.test(c)) {
+      st.textContent = '.app .app-name{color:' + c + ' !important;}';
+    } else return;
+    document.head.appendChild(st);
+  }
+  applyAppNameColor();
+  if (appNameColorRow) {
+    const appNameSwatches = [
+      { color: '#111111', label: '默认黑' },
+      { color: '#333333', label: '深灰' },
+      { color: '#555555', label: '中灰' },
+      { color: '#777777', label: '浅中灰' },
+      { color: '#999999', label: '中浅灰' },
+      { color: '#bbbbbb', label: '浅灰' },
+      { color: '#ffffff', label: '纯白' },
+      { color: '#e05555', label: '樱花粉' },
+      { color: '#cc5555', label: '珊瑚红' },
+      { color: '#e8753a', label: '暖橘' },
+      { color: '#f0a020', label: '琥珀金' },
+      { color: '#2e8b57', label: '薄荷绿' },
+      { color: '#4a9d5e', label: '森绿' },
+      { color: '#3a7bd5', label: '天蓝' },
+      { color: '#7b5fd6', label: '紫罗兰' },
+      { color: '#d6459d', label: '玫红' },
+    ];
+    appNameColorRow.addEventListener('click', () => {
+      if (!window.openModal) return;
+      const current = appNameColorValOf();
+      window.openModal('图标文字颜色', '', (v) => {
+        if (v === '__reset__') { store.remove(APP_NAME_COLOR_KEY); applyAppNameColor(); return; }
+        if (v === 'auto') { store.set(APP_NAME_COLOR_KEY, 'auto'); applyAppNameColor(); return; }
+        const color = (typeof v === 'number' && appNameSwatches[v]) ? appNameSwatches[v].color : v;
+        if (!color || !/^#[0-9a-fA-F]{6}$/.test(color)) return;
+        store.set(APP_NAME_COLOR_KEY, color);
+        applyAppNameColor();
+      }, {
+        colorPicker: true,
+        noInput: true,
+        color: current,
+        swatches: appNameSwatches,
+        pills: [{ label: '自动跟随深色', value: 'auto' }, { label: '恢复默认', value: '__reset__' }],
+      });
+    });
+  }
+  document.addEventListener('contact-switched', applyAppNameColor);
+
+  // 颜色分区预览面板样式（一次性注入；各部位用 CSS 变量着色，用户改色时变量实时变 → 预览自动更新，零额外 JS 开销）
+  if (!document.getElementById('desk-cp-style')) {
+    const cpStyle = document.createElement('style');
+    cpStyle.id = 'desk-cp-style';
+    cpStyle.textContent = '.desk-cp{margin:0 0 14px;padding:12px;border-radius:14px;background:var(--card-bg);border:1px solid var(--card-border);}' +
+      '.desk-cp-phone{display:flex;flex-direction:column;gap:10px;padding:10px;border-radius:12px;background:linear-gradient(180deg,var(--phone-bg-a),var(--phone-bg-b));}' +
+      '.desk-cp-apps{display:flex;gap:18px;justify-content:center;}' +
+      '.desk-cp-app{display:flex;flex-direction:column;align-items:center;gap:4px;}' +
+      '.desk-cp-ico{width:30px;height:30px;border-radius:9px;background:var(--ink);opacity:.85;}' +
+      '.desk-cp-name{font-size:10px;color:var(--app-name-color,var(--ink));letter-spacing:.5px;}' +
+      '.desk-cp-card{padding:8px 10px;border-radius:10px;background:var(--widget-bg,var(--card-bg));border:1.5px solid var(--widget-border,var(--card-border));opacity:var(--widget-opacity,1);display:flex;align-items:center;gap:8px;flex-wrap:wrap;}' +
+      '.desk-cp-card-title{font-size:11px;color:var(--ink);font-weight:600;}' +
+      '.desk-cp-btn{padding:4px 10px;border-radius:8px;border:none;background:var(--widget-btn,var(--btn-bg));color:var(--widget-btn-text,var(--btn-ink));font-size:10px;font-weight:600;}' +
+      '.desk-cp-heart{color:var(--widget-heart,#e05555);font-size:15px;line-height:1;}' +
+      '.desk-cp-theme{padding:4px 12px;border-radius:8px;border:none;background:var(--btn-bg);color:var(--btn-ink);font-size:10px;font-weight:600;align-self:flex-start;cursor:default;}' +
+      '.desk-cp-legend{margin-top:10px;font-size:10.5px;color:var(--muted);line-height:1.6;}' +
+      '.desk-cp-legend b{color:var(--ink);font-weight:600;}';
+    document.head.appendChild(cpStyle);
+  }
+
   // 爱心外框颜色：CSS 变量 --widget-heart 实时生效（打卡横幅「和 TA 一起摸鱼」的爱心圆底）
   const widgetHeartRow = document.getElementById('row-widget-heart');
   const widgetHeartVal = document.getElementById('widget-heart-val');
@@ -1407,6 +1755,9 @@ try {
   }
 
   // 小组件透明度：CSS 变量 --widget-opacity（0~1），输入 0~100 百分比
+  // #146 修复：widget-opacity 历史上被「随机美化」写成小数（如 "0.9"/"1"），而读取点用 parseInt 按百分比解析
+  // → parseInt("0.9")=0 → 小组件全透明。统一 opacityRawToPct：≤1 的数值按比例 ×100 换算，≥2 视为已是百分比。
+  const opacityRawToPct = (raw) => { const f = parseFloat(raw); if (isNaN(f)) return NaN; if (f <= 1) return Math.round(f * 100); return Math.round(f); };
   const widgetOpacityRow = document.getElementById('row-widget-opacity');
   const widgetOpacityVal = document.getElementById('widget-opacity-val');
   const applyWidgetOpacity = (pct) => {
@@ -1415,7 +1766,13 @@ try {
     if (widgetOpacityVal) widgetOpacityVal.textContent = (pct === 100 ? '不透明' : pct + '%');
   };
   const savedWidgetOpacity = store.get('widget-opacity');
-  if (savedWidgetOpacity) applyWidgetOpacity(parseInt(savedWidgetOpacity, 10));
+  if (savedWidgetOpacity) {
+    const opPct0 = opacityRawToPct(savedWidgetOpacity);
+    if (!isNaN(opPct0)) {
+      try { if (String(opPct0) !== String(savedWidgetOpacity)) store.set('widget-opacity', String(opPct0)); } catch (e) {} // #146：历史小数脏值改写为百分比存储
+      applyWidgetOpacity(opPct0);
+    }
+  }
   if (widgetOpacityRow) {
     const syncWidgetOpacityUI = () => {
       const v = store.get('widget-opacity');
@@ -1606,6 +1963,12 @@ try {
     BEAUTY_KEYS.push('card-bg-' + t, 'card-bg-mask-' + t);
   });
   for (var _i = 0; _i < 5; _i++) BEAUTY_KEYS.push('page-bg-' + _i);
+  // v3.26.x：文字部位颜色（widget-text-<type>-<key>）随美化方案导入导出
+  ['deco','quote','fish','checkin','music','memo','mood','week','weekend','desk-clock','desk-calendar','desk-timer','desk-anniv'].forEach(function(t) {
+    ['lbl','days','date','title','body','heart','txt','btn','tag','song','artist','times','sub','val','time','disp','mode','label','name'].forEach(function(k) {
+      BEAUTY_KEYS.push('widget-text-' + t + '-' + k);
+    });
+  });
   const collectBeauty = () => {
     const data = {};
     BEAUTY_KEYS.forEach(k => { const v = store.get(k); if (v !== null && v !== undefined) data[k] = v; });
@@ -1615,6 +1978,10 @@ try {
         const k = 'app-icon-' + app.dataset.app;
         const v = store.get(k);
         if (v) data[k] = v;
+        // v3.27.x：图标透明度随方案导出
+        const ok = 'app-icon-opacity-' + app.dataset.app;
+        const ov = store.get(ok);
+        if (ov) data[ok] = ov;
       });
       document.querySelectorAll('.app-grid').forEach(grid => {
         const k = 'app-icon-order-' + grid.dataset.app;
@@ -1632,9 +1999,11 @@ try {
     } catch (e) {}
     return data;
   };
-  // v3.27.x：导出/导入只保留「文件」方式——「复制文字」已移除（含图片的方案 JSON
-  // 巨大，剪贴板/聊天工具复制发送会被截断或失败，对方也无法粘贴导入）。
-  // v3.26.x：导出前先选「当前设置 / 某个已保存方案」，选定后直接下载 .json 文件。
+  // v3.27.x：导出保留「文件」为主通道；v3.26.x #172：文件导出接统一三级降级保存链
+  //（window.mochiExportFile：系统分享面板→系统保存框→确认后下载）——f4158f6 收敛为
+  // 仅 a[download] 后，iPhone 主屏安装（standalone 无下载管理器）与夸克等壳浏览器点导出
+  // 静默无反应=方案无法导出；同时补回「复制文字」通道（>3MB 拒绝，防剪贴板截断）。
+  // v3.26.x：导出前先选「当前设置 / 某个已保存方案」，再选导出方式。
   // 全局主题延续右侧方案保存逻辑（collectBeautyFull），方案的 data 里已含 accent/theme。
   const downloadBeautyFile = (json) => {
     try {
@@ -1649,10 +2018,36 @@ try {
       toast('已导出美化方案文件');
     } catch (e) { toast('导出文件失败'); }
   };
+  const beautyFileLocalDate = () => {
+    const d = new Date(); const p = (n) => (n < 10 ? '0' : '') + n;
+    return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate());
+  };
   const startBeautyExport = (data) => {
     const json = JSON.stringify(data);
     if (json.length > 64 * 1024 * 1024) { toast('方案过大，导出失败'); return; }
-    downloadBeautyFile(json);
+    const fname = 'mochi美化方案-' + beautyFileLocalDate() + '.json';
+    const doExportFile = () => {
+      if (window.mochiExportFile) { window.mochiExportFile(json, fname, 'mochi美化方案'); return; }
+      downloadBeautyFile(json);
+    };
+    const doCopy = () => {
+      if (json.length > 3 * 1024 * 1024) { toast('方案过大（含图片），复制可能被截断，请用「导出文件」'); return; }
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(json).then(() => toast('已复制到剪贴板，发给对方粘贴导入')).catch(() => toast('复制失败，请改用导出文件'));
+      } else { toast('剪贴板不可用，请改用导出文件'); }
+    };
+    if (!window.openModal) { doExportFile(); return; }
+    window.openModal('导出美化方案', '', (v) => {
+      if (v === 'copy') { doCopy(); return; }
+      doExportFile();
+    }, {
+      noInput: true,
+      staticText: '选择导出方式：\n· 导出文件：自动弹分享/保存框（iPhone 主屏安装到桌面时用这个），不支持时确认后下载\n· 复制文字：方案较小时可发给对方粘贴导入',
+      pills: [
+        { label: '导出文件', value: 'file' },
+        { label: '复制文字', value: 'copy' },
+      ],
+    });
   };
   const beautyExportRow = document.getElementById('row-beauty-export');
   if (beautyExportRow) {
@@ -1682,28 +2077,37 @@ try {
     });
   }
   // v3.17.x：美化数据写入当前桌面（导入 / 应用方案共用），含动态键与全局主题
-  const applyBeautyData = (data) => {
-    BEAUTY_KEYS.forEach(k => { if (data[k] !== undefined) store.set(k, data[k]); });
-    // 动态键导入：自定义图标 / 图标顺序 / 图片组件本体
+  // v3.27.x：方案部分应用（C）——scope='color'|'bg'|'layout'|'all'，默认 all 完全兼容现有
+  const SCOPE_COLOR_KEYS = ['widget-bg-color','widget-border-color','widget-btn-color','widget-btn-text-color','widget-heart-color','app-name-color','widget-opacity','desk-card-radius','ico-radius','ico-shape','desk-font-size','desk-card-scale'];
+  const SCOPE_BG_KEYS = ['phone-bg','phone-bg-preset','phone-bg-solid','phone-bg-pos-x','phone-bg-pos-y','phone-bg-size','bg-blur','bg-mask-op'];
+  const SCOPE_LAYOUT_KEYS = ['desk-layout','desk-page-count','desk-images','desk-texts','desk-countdowns'];
+  const applyBeautyData = (data, scope) => {
+    scope = scope || 'all';
+    const allow = (k) => {
+      if (scope === 'all') return true;
+      if (scope === 'color') return SCOPE_COLOR_KEYS.indexOf(k) >= 0 || k === '__accent__' || k === '__theme__';
+      if (scope === 'bg') return SCOPE_BG_KEYS.indexOf(k) >= 0 || /^page-bg-/.test(k);
+      if (scope === 'layout') return SCOPE_LAYOUT_KEYS.indexOf(k) >= 0 || k.indexOf('app-icon-') === 0 || k.indexOf('desk-image-src-') === 0 || k === 'hidden-icons';
+      return true;
+    };
+    BEAUTY_KEYS.forEach(k => { if (data[k] !== undefined && allow(k)) store.set(k, data[k]); });
     Object.keys(data).forEach(k => {
-      if ((k.indexOf('app-icon-') === 0 || k.indexOf('desk-image-src-') === 0) && data[k] !== undefined) {
+      if ((k.indexOf('app-icon-') === 0 || k.indexOf('desk-image-src-') === 0) && data[k] !== undefined && allow(k)) {
         store.set(k, data[k]);
       }
     });
-    if (data['__accent__']) { try { localStorage.setItem('xy-home-v2:accent-color', data['__accent__']); } catch (e) {} }
-    if (data['__theme__']) { try { localStorage.setItem('xy-home-v2:theme-mode', data['__theme__']); } catch (e) {} }
+    if (data['__accent__'] && allow('__accent__')) { try { localStorage.setItem('xy-home-v2:accent-color', data['__accent__']); } catch (e) {} }
+    if (data['__theme__'] && allow('__theme__')) { try { localStorage.setItem('xy-home-v2:theme-mode', data['__theme__']); } catch (e) {} }
   };
   const beautyImportRow = document.getElementById('row-beauty-import');
   if (beautyImportRow) {
     beautyImportRow.addEventListener('click', () => {
       if (!window.openModal) return;
-      // v3.27.x：导入只保留「从文件导入」——去掉粘贴文本（含图片的方案 JSON 巨大，
-      // 粘贴导入不现实；只点确定未选文件时提示）。
+      // v3.26.x #172：补回「粘贴文本导入」通道（与文件导入并存，同聊天美化导入）——
+      // f4158f6 收敛为仅文件选择后，iPhone 主屏安装（standalone 文件选择器常不弹）等
+      // 环境导入全断；粘贴通道不依赖文件选择能力。txtImportAuto 仍保留：选完文件自动应用。
       window.openModal('导入美化方案', '', (v) => {
-        if (!v || !v.trim() || v === 'ok') {
-          if (v === 'ok') toast('请点击「从文件导入」选择 .json 文件');
-          return;
-        }
+        if (!v || !v.trim()) { toast('请先粘贴方案文本，或点「从文件导入」选择 .json 文件'); return; }
         try {
           const data = JSON.parse(v.trim());
           if (typeof data !== 'object' || Array.isArray(data)) { toast('格式错误'); return; }
@@ -1721,11 +2125,12 @@ try {
               toast('已自动保存原美化 → 方案「' + name + '」');
             }
           } catch (e) {}
+          try { pushBeautyUndo(); } catch (e) {}
           applyBeautyData(data);
           toast('已导入，刷新生效');
           setTimeout(() => location.reload(), 800);
-        } catch (e) { toast('解析失败，请检查文件内容'); }
-      }, { noInput: true, staticText: '导入前会自动把当前美化保存为「导入前备份」方案；只支持从文件导入 .json（点下方「从文件导入」选择文件后自动应用）', txtImport: true, txtImportAuto: true });
+        } catch (e) { toast('解析失败，请检查文本内容'); }
+      }, { textarea: true, textareaPlaceholder: '粘贴美化方案文本（JSON），或点下方「从文件导入」选择 .json 文件', txtImport: true, txtImportAuto: true, staticText: '导入前会自动把当前美化保存为「导入前备份」方案；支持粘贴文本或从文件导入（选完文件自动应用）' });
     });
   }
 
@@ -1737,6 +2142,15 @@ try {
     try { const a = JSON.parse(gStore.get(SCHEMES_KEY) || '[]'); return Array.isArray(a) ? a : []; } catch (e) { return []; }
   };
   const saveSchemesList = (arr) => { try { gStore.set(SCHEMES_KEY, JSON.stringify(arr)); } catch (e) {} };
+  // v3.27.x：内置美化方案库（只读，绝不写用户 beauty-schemes）——开箱即用，降低首次上手成本
+  // 应用走 applyBeautyData（与用户方案同链路），用户主动点才覆盖当前桌面；不污染用户已保存方案
+  const BUILTIN_SCHEMES = [
+    { name: '情侣粉', builtin: true, data: { '__accent__': '#e05555', '__theme__': 'light', 'widget-bg-color': '#fff0f0', 'widget-border-color': '#ffd0d0', 'widget-btn-color': '#e05555', 'widget-btn-text-color': '#ffffff', 'widget-heart-color': '#e05555', 'phone-bg-preset': '樱花' } },
+    { name: '极简黑白', builtin: true, data: { '__accent__': '#111111', '__theme__': 'light', 'widget-bg-color': '#ffffff', 'widget-border-color': 'rgba(0,0,0,.1)', 'widget-btn-color': '#111111', 'widget-btn-text-color': '#ffffff', 'widget-heart-color': '#111111' } },
+    { name: '森系', builtin: true, data: { '__accent__': '#4a9d5e', '__theme__': 'light', 'widget-bg-color': '#f0fff0', 'widget-border-color': '#c8e6c9', 'widget-btn-color': '#4a9d5e', 'widget-btn-text-color': '#ffffff', 'widget-heart-color': '#4a9d5e', 'phone-bg-preset': '森林' } },
+    { name: '海洋', builtin: true, data: { '__accent__': '#3a7bd5', '__theme__': 'light', 'widget-bg-color': '#f0f4ff', 'widget-border-color': '#b8d4e8', 'widget-btn-color': '#3a7bd5', 'widget-btn-text-color': '#ffffff', 'widget-heart-color': '#3a7bd5', 'phone-bg-preset': '海洋' } },
+    { name: '暮色', builtin: true, data: { '__accent__': '#d6459d', '__theme__': 'dark', 'widget-bg-color': '#1c1c1e', 'widget-border-color': 'rgba(255,255,255,.12)', 'widget-btn-color': '#d6459d', 'widget-btn-text-color': '#ffffff', 'widget-heart-color': '#d6459d', 'phone-bg-preset': '星空' } },
+  ];
   const collectBeautyFull = () => {
     const data = collectBeauty();
     try { const ac = localStorage.getItem('xy-home-v2:accent-color'); if (ac) data['__accent__'] = ac; } catch (e) {}
@@ -1854,16 +2268,24 @@ try {
   function applyScheme(idx, m) {
     const s = getSchemes()[idx];
     if (!s || !window.openModal) return;
-    // v3.26.x：预选中唯一「应用」pill——noInput 弹窗只点底部「确定」时 fire() 传
-    // pillVal=null → v!=='ok' 静默不应用（与「恢复默认桌面/删除方案」同因同修）
-    const ctl = window.openModal('应用方案「' + s.name + '」？', '', (v) => {
-      if (v !== 'ok') return;
-      applyBeautyData(s.data || {});
-      hideSchemeModal(m); // 与聊天方案 applyChatScheme 一致：应用成功先关管理弹层，避免残留到刷新
-      toast('已应用「' + s.name + '」，刷新生效');
+    // v3.27.x：部分应用（C）——先选范围再应用，默认全部
+    const scopePills = [
+      { label: '应用全部', value: 'all' },
+      { label: '仅配色', value: 'color' },
+      { label: '仅壁纸', value: 'bg' },
+      { label: '仅布局', value: 'layout' },
+    ];
+    const scopeLabel = { all: '全部', color: '配色', bg: '壁纸', layout: '布局' };
+    const ctl = window.openModal('应用方案「' + s.name + '」', '', (v) => {
+      const scope = (!v || v === 'ok') ? 'all' : v;
+      if (!scopePills.some(p => p.value === scope)) return;
+      try { pushBeautyUndo(); } catch (e) {}
+      applyBeautyData(s.data || {}, scope);
+      hideSchemeModal(m);
+      toast('已应用「' + s.name + '」(' + (scopeLabel[scope] || scope) + ')，刷新生效');
       setTimeout(() => location.reload(), 800);
-    }, { noInput: true, pillSubmit: true, staticText: '将覆盖当前桌面的美化设置，刷新生效', pills: [{ label: '应用', value: 'ok' }] });
-    if (ctl && ctl.pills) ctl.pills([{ label: '应用', value: 'ok' }], 'ok');
+    }, { noInput: true, pillSubmit: true, staticText: '选择应用范围：点 pill 直接应用该范围，或点确定应用全部', pills: scopePills });
+    if (ctl && ctl.pills) ctl.pills(scopePills, 'all');
   }
   function deleteScheme(idx, m) {
     const s = getSchemes()[idx];
@@ -1890,6 +2312,28 @@ try {
     const list = document.createElement('div'); list.className = 'cm-list';
     list.style.cssText = 'display:flex;flex-direction:column;gap:8px;margin-bottom:12px;overflow-y:auto;overflow-x:hidden;-webkit-overflow-scrolling:touch;flex:1;min-height:0';
     const schemes = getSchemes();
+    // v3.27.x：内置方案置顶（只读，不可改名/删除）——开箱即用，应用走 applyBeautyData
+    BUILTIN_SCHEMES.forEach((s) => {
+      const row = document.createElement('div');
+      row.style.cssText = 'display:flex;flex-direction:column;gap:8px;padding:10px;border:1px solid var(--card-border,#eee);border-radius:10px;background:var(--card-soft,rgba(0,0,0,.02))';
+      const th = document.createElement('div');
+      th.innerHTML = desktopSchemeThumb(s.data || {});
+      row.appendChild(th);
+      const nm = document.createElement('div');
+      nm.innerHTML = '<div style="display:flex;align-items:center;gap:6px"><span style="font-size:14px;font-weight:600">' + s.name + '</span><span style="font-size:10px;color:#fff;background:var(--ink,#111);padding:1px 6px;border-radius:999px">内置</span></div>';
+      row.appendChild(nm);
+      const btns = document.createElement('div');
+      btns.style.cssText = 'display:flex;align-items:center;gap:7px;flex-wrap:wrap';
+      btns.appendChild(mkBtn('预览', 'font-size:12px;padding:4px 10px;border:1px solid var(--card-border,#ddd);border-radius:8px;background:var(--btn-cancel-bg,#fafafa);color:var(--ink,#111)', () => desktopStartPreview(s, m)));
+      btns.appendChild(mkBtn('套用', 'font-size:12px;padding:4px 10px;border:none;border-radius:8px;background:var(--ink,#111);color:var(--bg-b,#fff)', () => {
+        const applyBuiltin = () => { applyBeautyData(s.data || {}); hideSchemeModal(m); toast('已应用「' + s.name + '」，刷新生效'); setTimeout(() => location.reload(), 800); };
+        if (!window.openModal) { applyBuiltin(); return; }
+        const ctl = window.openModal('应用内置方案「' + s.name + '」？', '', (v) => { if (v !== 'ok') return; applyBuiltin(); }, { noInput: true, pillSubmit: true, staticText: '将覆盖当前桌面的美化设置，刷新生效', pills: [{ label: '应用', value: 'ok' }] });
+        if (ctl && ctl.pills) ctl.pills([{ label: '应用', value: 'ok' }], 'ok');
+      }));
+      row.appendChild(btns);
+      list.appendChild(row);
+    });
     if (!schemes.length) {
       const empty = document.createElement('div');
       empty.innerHTML = '<div style="font-size:13px;color:var(--muted,#999);text-align:center;padding:20px 0">还没有保存的方案<br>先点下方「保存当前为方案」</div>';
@@ -1933,6 +2377,137 @@ try {
   if (beautySaveRow) beautySaveRow.addEventListener('click', () => window.saveBeautyScheme());
   const beautySchemesRow = document.getElementById('row-beauty-schemes');
   if (beautySchemesRow) beautySchemesRow.addEventListener('click', () => window.openBeautySchemes());
+  // v3.27.x：撤销栈（A）——批量操作前压栈（最近 10 次），撤销恢复。纯本地，不动现有数据
+  const UNDO_KEY = 'beauty-undo-stack';
+  const getUndoStack = () => { try { const a = JSON.parse(gStore.get(UNDO_KEY) || '[]'); return Array.isArray(a) ? a : []; } catch (e) { return []; } };
+  const pushBeautyUndo = () => { try { const st = getUndoStack(); st.push({ time: Date.now(), data: collectBeautyFull() }); while (st.length > 10) st.shift(); gStore.set(UNDO_KEY, JSON.stringify(st)); } catch (e) {} };
+  const popBeautyUndo = () => { const st = getUndoStack(); if (!st.length) { toast('没有可撤销的改动了'); return null; } const it = st.pop(); try { gStore.set(UNDO_KEY, JSON.stringify(st)); } catch (e) {} return it; };
+  const beautyUndoRow = document.getElementById('row-beauty-undo');
+  if (beautyUndoRow) {
+    beautyUndoRow.addEventListener('click', () => {
+      const it = popBeautyUndo();
+      if (!it) return;
+      applyBeautyData(it.data || {}, 'all');
+      toast('已撤销最近一次改动，刷新生效');
+      setTimeout(() => location.reload(), 800);
+    });
+  }
+  // v3.27.x：一键重置全部美化（项4）——遍历 BEAUTY_KEYS + 全局键清空，二次确认。已保存方案不受影响
+  const resetAllBeautyRow = document.getElementById('row-beauty-reset-all');
+  if (resetAllBeautyRow) {
+    resetAllBeautyRow.addEventListener('click', () => {
+      const ctl = window.openModal('恢复全部默认美化', '将清空所有美化设置（颜色/壁纸/字号/圆角/布局/图标自定义等），恢复为系统默认。已保存的美化方案不受影响。确定继续？', (v) => {
+        if (v !== '1') return;
+        try { pushBeautyUndo(); } catch (e) {}
+        try {
+          BEAUTY_KEYS.forEach(k => store.remove(k));
+          ['app-name-color','phone-bg-solid','phone-bg-pos-x','phone-bg-pos-y','phone-bg-size'].forEach(k => store.remove(k));
+          document.querySelectorAll('.app').forEach(app => { if (app.dataset.app) store.remove('app-icon-' + app.dataset.app); });
+          document.querySelectorAll('.app-grid').forEach(g => { if (g.dataset.app) store.remove('app-icon-order-' + g.dataset.app); });
+          try { localStorage.removeItem('xy-home-v2:accent-color'); } catch (e) {}
+          try { localStorage.removeItem('xy-home-v2:theme-mode'); } catch (e) {}
+        } catch (e) {}
+        toast('已恢复全部默认美化，刷新生效');
+        setTimeout(() => location.reload(), 800);
+      }, { noInput: true, pillSubmit: true, pills: [{ label: '确定恢复全部默认', value: '1' }] });
+      if (ctl && ctl.pills) ctl.pills([{ label: '确定恢复全部默认', value: '1' }], '1');
+    });
+  }
+  // v3.27.x #146：「一键随机美化」（row-beauty-random 处理块）已删除——
+  // 其写入的 widget-opacity 为小数（如 "0.9"/"1"），而各读取点用 parseInt 按百分比解析
+  // → parseInt("0.9")=0 → 小组件全透明；且该键属美化键，「恢复默认布局」只清 desk-layout 不清它，用户无从恢复。
+  // 功能整体下线；历史脏值由下方 opacityRawToPct 启动自愈修正（见 #146 修复）。
+  // v3.27.x：方案分享 URL（D）——当前美化 JSON → base64 → hash，对方打开自动弹导入。纯本地无服务器
+  const shareBeautyLink = () => {
+    try {
+      const data = collectBeautyFull();
+      const json = JSON.stringify(data);
+      const b64 = btoa(unescape(encodeURIComponent(json)));
+      const url = location.origin + location.pathname + '#beauty=' + b64;
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(url).then(() => toast('分享链接已复制，发给对方打开即可导入')).catch(() => { if (window.openModal) window.openModal('分享链接', url, () => {}, { staticText: '请手动复制下方链接发给对方', noInput: true }); });
+      } else if (window.openModal) { window.openModal('分享链接', url, () => {}, { staticText: '请手动复制下方链接发给对方，对方打开会自动弹导入提示', noInput: true }); }
+      else { toast('已生成链接（见控制台）'); try { console.log(url); } catch (e) {} }
+    } catch (e) { toast('生成链接失败'); }
+  };
+  const beautyShareRow = document.getElementById('row-beauty-share');
+  if (beautyShareRow) beautyShareRow.addEventListener('click', shareBeautyLink);
+  // 启动读 hash 自动弹导入分享方案
+  try {
+    if (location.hash && location.hash.indexOf('#beauty=') === 0) {
+      const b64 = location.hash.slice(7);
+      const json = decodeURIComponent(escape(atob(b64)));
+      const data = JSON.parse(json);
+      if (window.openModal && typeof data === 'object' && data) {
+        const ctl = window.openModal('导入分享的美化方案？', '', (v) => {
+          if (v !== 'ok') return;
+          try { pushBeautyUndo(); } catch (e) {}
+          applyBeautyData(data, 'all');
+          try { history.replaceState(null, '', location.pathname + location.search); } catch (e) {}
+          toast('已导入，刷新生效');
+          setTimeout(() => location.reload(), 800);
+        }, { noInput: true, pillSubmit: true, staticText: '从分享链接导入美化方案，将覆盖当前桌面美化', pills: [{ label: '导入', value: 'ok' }] });
+        if (ctl && ctl.pills) ctl.pills([{ label: '导入', value: 'ok' }], 'ok');
+      }
+    }
+  } catch (e) {}
+  // v3.27.x：完整外观方案（项9）——桌面+聊天美化合并保存/应用，跨域用 window.collectChatBeauty/applyChatBeautyData
+  const FULL_SCHEMES_KEY = 'full-beauty-schemes';
+  const getFullSchemes = () => { try { const a = JSON.parse(gStore.get(FULL_SCHEMES_KEY) || '[]'); return Array.isArray(a) ? a : []; } catch (e) { return []; } };
+  const saveFullSchemesList = (arr) => { try { gStore.set(FULL_SCHEMES_KEY, JSON.stringify(arr)); } catch (e) {} };
+  const collectFullBeauty = () => { const data = { desk: collectBeautyFull() }; try { if (window.collectChatBeauty) data.chat = window.collectChatBeauty(); } catch (e) {} return data; };
+  const applyFullBeautyData = (data) => { try { applyBeautyData(data.desk || {}, 'all'); } catch (e) {} try { if (window.applyChatBeautyData && data.chat) window.applyChatBeautyData(data.chat); } catch (e) {} };
+  const openFullBeautySchemes = () => {
+    let m = document.getElementById('full-beauty-scheme-manager');
+    if (!m) { m = document.createElement('div'); m.id = 'full-beauty-scheme-manager'; m.hidden = true; m.style.cssText = 'position:fixed;inset:0;z-index:89;align-items:center;justify-content:center;background:rgba(0,0,0,.4);display:none'; document.body.appendChild(m); m.addEventListener('click', (e) => { if (e.target === m) { m.style.display = 'none'; m.hidden = true; } }); }
+    m.innerHTML = ''; m.hidden = false; m.style.display = 'flex';
+    const box = document.createElement('div');
+    box.style.cssText = 'width:min(92vw,420px);max-height:80vh;display:flex;flex-direction:column;background:var(--card-bg,#fff);color:var(--ink,#111);border-radius:16px;padding:18px;box-shadow:0 8px 30px rgba(0,0,0,.2)';
+    const head = document.createElement('div');
+    head.innerHTML = '<div style="font-size:16px;font-weight:600;margin-bottom:4px">完整外观方案</div><div style="font-size:12px;color:var(--muted,#888);margin-bottom:12px">桌面+聊天美化合并保存，一键切换完整外观</div>';
+    box.appendChild(head);
+    const list = document.createElement('div'); list.style.cssText = 'display:flex;flex-direction:column;gap:8px;margin-bottom:12px;overflow-y:auto;flex:1;min-height:0';
+    const schemes = getFullSchemes();
+    if (!schemes.length) { const empty = document.createElement('div'); empty.innerHTML = '<div style="font-size:13px;color:var(--muted,#999);text-align:center;padding:20px 0">还没有保存的完整方案<br>先点下方「保存当前为完整方案」</div>'; list.appendChild(empty); }
+    schemes.forEach((s, i) => {
+      const row = document.createElement('div'); row.style.cssText = 'display:flex;flex-direction:column;gap:6px;padding:10px;border:1px solid var(--card-border,#eee);border-radius:10px';
+      const t = new Date(s.time || Date.now()); const ds = (t.getMonth()+1) + '-' + t.getDate();
+      row.innerHTML = '<div style="font-size:14px;font-weight:600">' + s.name + '</div><div style="font-size:11px;color:var(--muted,#999)">保存于 ' + ds + '</div>';
+      const btns = document.createElement('div'); btns.style.cssText = 'display:flex;gap:7px;flex-wrap:wrap';
+      const apply = document.createElement('button'); apply.textContent = '应用'; apply.style.cssText = 'font-size:12px;padding:4px 10px;border:none;border-radius:8px;background:var(--ink,#111);color:#fff';
+      apply.addEventListener('click', () => {
+        const ctl = window.openModal('应用完整方案「' + s.name + '」？', '', (v) => {
+          if (v !== 'ok') return;
+          try { pushBeautyUndo(); } catch (e) {}
+          applyFullBeautyData(s.data || {});
+          m.style.display = 'none'; m.hidden = true;
+          toast('已应用「' + s.name + '」，刷新生效');
+          setTimeout(() => location.reload(), 800);
+        }, { noInput: true, pillSubmit: true, staticText: '将覆盖当前桌面+聊天美化，刷新生效', pills: [{ label: '应用', value: 'ok' }] });
+        if (ctl && ctl.pills) ctl.pills([{ label: '应用', value: 'ok' }], 'ok');
+      });
+      const del = document.createElement('button'); del.textContent = '删除'; del.style.cssText = 'font-size:12px;padding:4px 10px;border:1px solid rgba(163,45,45,.35);border-radius:8px;background:var(--danger-soft,#fff5f5);color:var(--danger-ink,#a32d2d)';
+      del.addEventListener('click', () => { const l2 = getFullSchemes(); l2.splice(i, 1); saveFullSchemesList(l2); toast('已删除'); openFullBeautySchemes(); });
+      btns.appendChild(apply); btns.appendChild(del); row.appendChild(btns); list.appendChild(row);
+    });
+    box.appendChild(list);
+    const save = document.createElement('button'); save.textContent = '+ 保存当前为完整方案'; save.style.cssText = 'width:100%;padding:12px;border:none;border-radius:10px;background:var(--ink,#111);color:#fff;font-size:14px;font-weight:600';
+    save.addEventListener('click', () => {
+      if (!window.openModal) return;
+      const ctl = window.openModal('保存完整方案', '', (name) => {
+        name = (name || '').trim(); if (!name) { ctl.hint('名称不能为空'); ctl.stay(); return; }
+        const l2 = getFullSchemes(); l2.push({ name, time: Date.now(), data: collectFullBeauty() }); saveFullSchemesList(l2);
+        toast('已保存完整方案「' + name + '」'); openFullBeautySchemes();
+      }, { maxlength: 20, placeholder: '例如：情侣粉全套' });
+    });
+    box.appendChild(save);
+    const close = document.createElement('button'); close.textContent = '关闭'; close.style.cssText = 'width:100%;margin-top:8px;padding:10px;border:1px solid var(--card-border,#eee);border-radius:10px;background:var(--btn-cancel-bg,#fafafa);color:var(--btn-cancel-ink,#555)';
+    close.addEventListener('click', () => { m.style.display = 'none'; m.hidden = true; });
+    box.appendChild(close);
+    m.appendChild(box);
+  };
+  const fullBeautySchemesRow = document.getElementById('row-full-beauty-schemes');
+  if (fullBeautySchemesRow) fullBeautySchemesRow.addEventListener('click', openFullBeautySchemes);
 
   // ---- v3.25.x：桌面方案 预览 / 重命名（预览跨 reload 保持，可还原） ----
   const PREVIEW_BACKUP_KEY = 'beauty-preview-backup';
@@ -2012,31 +2587,49 @@ try {
     show(tabs[0] ? tabs[0].dataset.tab : 'color');
   })();
 
-  // ===== v3.6.x：深色模式（两档手动开关：浅色/深色，不跟随系统） =====
-  // 全局设置（不按联系人隔离），存储键 xy-home-v2:theme-mode
+  // ===== v3.6.x：深色模式 · v3.27.x：三档（浅色/深色/跟随系统） =====
+  // 全局设置（不按联系人隔离），存储键 xy-home-v2:theme-mode，取值 light/dark/auto
   // 切换时在 <html> 上设 data-theme 属性，base.css [data-theme=dark] + dark.css 覆盖
+  // auto 档读 prefers-color-scheme 并监听变化；旧值 light/dark 完全兼容
   const THEME_KEY = 'xy-home-v2:theme-mode';
   const themeModeRow = document.getElementById('row-theme-mode');
   const themeModeVal = document.getElementById('theme-mode-val');
-  const getThemeMode = () => { try { return localStorage.getItem(THEME_KEY) === 'dark' ? 'dark' : 'light'; } catch (e) { return 'light'; } };
+  const getThemeMode = () => { try { const v = localStorage.getItem(THEME_KEY); return (v === 'dark' || v === 'auto') ? v : 'light'; } catch (e) { return 'light'; } };
+  const sysPrefersDark = () => !!(window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches);
   const applyThemeMode = (mode) => {
-    if (mode === 'dark') {
-      document.documentElement.setAttribute('data-theme', 'dark');
-      if (themeModeVal) themeModeVal.textContent = '已开启';
-    } else {
-      document.documentElement.removeAttribute('data-theme');
-      if (themeModeVal) themeModeVal.textContent = '关闭';
-    }
+    const eff = (mode === 'auto') ? (sysPrefersDark() ? 'dark' : 'light') : mode;
+    if (eff === 'dark') document.documentElement.setAttribute('data-theme', 'dark');
+    else document.documentElement.removeAttribute('data-theme');
+    if (themeModeVal) themeModeVal.textContent = mode === 'auto' ? '跟随系统' : (mode === 'dark' ? '已开启' : '关闭');
   };
   applyThemeMode(getThemeMode());
+  // v3.27.x：auto 档跟随系统——系统主题变化时仅当用户选 auto 才重算，避免覆盖手动选择
+  try {
+    const mql = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)');
+    if (mql && typeof mql.addEventListener === 'function') mql.addEventListener('change', () => { if (getThemeMode() === 'auto') applyThemeMode('auto'); });
+    else if (mql && typeof mql.addListener === 'function') mql.addListener(() => { if (getThemeMode() === 'auto') applyThemeMode('auto'); });
+  } catch (e) {}
   if (themeModeRow) {
     themeModeRow.addEventListener('click', () => {
-      // 方向按当前实际生效的主题取反，不回读存储：存储不可用/写失败（iOS 隐私模式、
-      // 配额满等）时回读恒为非 dark → 每次点击都算出 next=dark 再刷一遍深色，
-      // 表现为「点得开、永远关不掉」。存储写入保持尽力而为，只影响下次启动的初始值。
-      const next = document.documentElement.getAttribute('data-theme') === 'dark' ? 'light' : 'dark';
-      try { localStorage.setItem(THEME_KEY, next); } catch (e) {}
-      applyThemeMode(next);
+      if (!window.openModal) {
+        // 兜底：openModal 不可用时回退原两档快速切换
+        const next = document.documentElement.getAttribute('data-theme') === 'dark' ? 'light' : 'dark';
+        try { localStorage.setItem(THEME_KEY, next); } catch (e) {}
+        applyThemeMode(next);
+        return;
+      }
+      const cur = getThemeMode();
+      const threePills = [
+        { label: '跟随系统', value: 'auto' },
+        { label: '浅色', value: 'light' },
+        { label: '深色', value: 'dark' },
+      ];
+      const ctl = window.openModal('深色模式', '', (v) => {
+        if (v !== 'auto' && v !== 'light' && v !== 'dark') return;
+        try { localStorage.setItem(THEME_KEY, v); } catch (e) {}
+        applyThemeMode(v);
+      }, { noInput: true, pillSubmit: true, pill: cur, pills: threePills, staticText: '选择主题模式：跟随系统会按设备深色设置自动切换' });
+      if (ctl && ctl.pills) ctl.pills(threePills, cur);
     });
   }
 
@@ -2090,6 +2683,112 @@ try {
       });
     });
   }
+
+  // ===== v3.27.x：全局字体（桌面美化快捷入口，与聊天设置「全局字体」互通同一功能） =====
+  // 复用 chat-settings.js 的存储键 'cs-font' + 同款 applyFont 逻辑（@font-face 注入 / body+html font-family），
+  // 两边任一改动写同一键、应用同一全局 DOM，天然互通。applyDeskCsFont 与 chat-settings 的 applyFont 都
+  // 先 remove id="cs-font-style" 再注入，幂等可重复调用。store = activeStore() 与 chat-settings 同款 per-cid。
+  const deskCsFontRow = document.getElementById('row-desk-cs-font');
+  const deskCsFontVal = document.getElementById('desk-cs-font-val');
+  const CS_FONT_KEY = 'cs-font';
+  const deskCsFontValOf = () => { try { return store.get(CS_FONT_KEY) || ''; } catch (e) { return ''; } };
+  function applyDeskCsFont() {
+    const old = document.getElementById('cs-font-style');
+    if (old) old.remove();
+    const v = deskCsFontValOf();
+    if (deskCsFontVal) deskCsFontVal.textContent = v ? (v.indexOf('data:') === 0 ? '已上传' : v) : '默认';
+    if (!v) {
+      document.body.style.fontFamily = '';
+      document.documentElement.style.fontFamily = '';
+      return;
+    }
+    if (v.indexOf('data:') === 0) {
+      const st = document.createElement('style');
+      st.id = 'cs-font-style';
+      st.textContent = '@font-face{font-family:"cs-custom-font";src:url("' + v + '");font-display:swap;}' +
+        'body,html{font-family:"cs-custom-font",sans-serif !important;}';
+      document.head.appendChild(st);
+      document.body.style.fontFamily = '';
+      document.documentElement.style.fontFamily = '';
+      return;
+    }
+    document.body.style.fontFamily = '"' + v + '",sans-serif';
+    document.documentElement.style.fontFamily = '"' + v + '",sans-serif';
+  }
+  applyDeskCsFont();
+  if (deskCsFontRow) {
+    deskCsFontRow.addEventListener('click', () => {
+      if (!window.openTCPanel) return;
+      const cur = deskCsFontValOf();
+      window.openTCPanel('全局字体', '' +
+        '<div class="sm-fld"><label>上传本地字体（ttf / otf / woff / woff2），应用后全局生效</label>' +
+        '<input class="tc-input" id="cs-font-name" placeholder="也可直接输入字体名或链接，如 Microsoft YaHei"' + (cur && cur.indexOf('data:') !== 0 && cur.indexOf('http') !== 0 ? ' value="' + String(cur).replace(/"/g, '&quot;').replace(/</g, '&lt;') + '"' : '') + '></div>' +
+        '<div class="mail-actions"><button class="cc-tool" id="cs-font-upload">上传字体</button><button class="cc-tool" id="cs-font-clear">恢复默认</button><button class="cc-tool" id="cs-font-ok">应用</button></div>');
+      document.getElementById('cs-font-upload').addEventListener('click', () => {
+        const inp = document.createElement('input');
+        inp.type = 'file';
+        inp.accept = '.ttf,.otf,.woff,.woff2';
+        inp.onchange = () => {
+          const f = inp.files && inp.files[0];
+          if (!f) return;
+          toast('正在读取字体文件…');
+          const reader = new FileReader();
+          reader.onload = () => {
+            store.set(CS_FONT_KEY, reader.result);
+            document.getElementById('tc-mask').hidden = true;
+            applyDeskCsFont();
+            toast('字体已应用成功');
+          };
+          reader.onerror = () => { toast('字体文件读取失败，请重试'); };
+          reader.readAsDataURL(f);
+        };
+        inp.click();
+      });
+      document.getElementById('cs-font-clear').addEventListener('click', () => {
+        store.remove(CS_FONT_KEY);
+        document.getElementById('tc-mask').hidden = true;
+        applyDeskCsFont();
+        toast('已恢复默认字体');
+      });
+      document.getElementById('cs-font-ok').addEventListener('click', () => {
+        const name = (document.getElementById('cs-font-name').value || '').trim();
+        if (!name) { toast('请输入字体名或链接'); return; }
+        if (/^https?:\/\/.+\.(ttf|otf|woff|woff2)$/i.test(name)) {
+          toast('正在下载字体，请稍候…');
+          fetch(name, { mode: 'cors' }).then(r => {
+            if (!r.ok) throw new Error('HTTP ' + r.status);
+            return r.blob();
+          }).then(blob => {
+            const rd = new FileReader();
+            rd.onload = () => {
+              store.set(CS_FONT_KEY, rd.result);
+              document.getElementById('tc-mask').hidden = true;
+              applyDeskCsFont();
+              toast('字体下载并应用成功');
+            };
+            rd.onerror = () => {
+              store.set(CS_FONT_KEY, name);
+              document.getElementById('tc-mask').hidden = true;
+              applyDeskCsFont();
+              toast('字体读取失败，已按字体名应用');
+            };
+            rd.readAsDataURL(blob);
+          }).catch(() => {
+            store.set(CS_FONT_KEY, name);
+            document.getElementById('tc-mask').hidden = true;
+            applyDeskCsFont();
+            toast('链接下载失败，已按字体名应用');
+          });
+          return;
+        }
+        store.set(CS_FONT_KEY, name);
+        document.getElementById('tc-mask').hidden = true;
+        applyDeskCsFont();
+        toast('字体已应用成功');
+      });
+    });
+  }
+  document.addEventListener('contact-switched', applyDeskCsFont);
 
   // ===== v3.6.x：桌面字号（滑块 85~120%，默认 100%） =====
   const deskFontRow = document.getElementById('row-desk-font-size');
@@ -2176,6 +2875,105 @@ try {
     const def = CARD_BG_TYPES.find(c => c.type === type);
     return def ? def.sel : '';
   };
+  // ===== v3.26.x：装修模式可调文字部位颜色 =====
+  // 每个卡片类型下可单独调色的文字部位：key=存储后缀，label=菜单显示名，sel=目标元素选择器。
+  // 存储键 widget-text-<type>-<key>（per-cid 随桌面独立，走 store）；应用方式为内联 color，
+  // 直接覆盖该部位文字的 CSS 变量色（var(--ink)/var(--muted)）。
+  const WIDGET_TEXT_PARTS = {
+    'deco': [
+      { key: 'lbl', label: '昵称', sel: '[data-card-bg="deco"] .lbl' },
+      { key: 'days', label: '纪念天数', sel: '#love-days' },
+      { key: 'date', label: '纪念日期', sel: '#love-date' },
+    ],
+    'quote': [
+      { key: 'title', label: '标题', sel: '[data-card-bg="quote"] .mc-top' },
+      { key: 'body', label: '今日情话内容', sel: '#love-quote' },
+    ],
+    'fish': [
+      { key: 'title', label: '标题', sel: '[data-card-bg="fish"] .mc-top' },
+      { key: 'body', label: '摸鱼天数', sel: '[data-card-bg="fish"] .mc-b' },
+    ],
+    'checkin': [
+      { key: 'heart', label: '爱心', sel: '[data-card-bg="checkin"] .ck-heart' },
+      { key: 'txt', label: '打卡文案', sel: '[data-card-bg="checkin"] .ck-txt' },
+      { key: 'btn', label: '打卡按钮', sel: '[data-card-bg="checkin"] .ck-btn' },
+    ],
+    'music': [
+      { key: 'tag', label: '正在播放标签', sel: '[data-card-bg="music"] .mw-tag' },
+      { key: 'song', label: '歌名', sel: '#mw-song' },
+      { key: 'artist', label: '歌手', sel: '#mw-artist' },
+      { key: 'times', label: '播放时间', sel: '[data-card-bg="music"] .mw-times' },
+    ],
+    'memo': [
+      { key: 'title', label: '标题', sel: '[data-card-bg="memo"] .mc-top' },
+      { key: 'body', label: '备忘内容', sel: '#memo-text' },
+    ],
+    'mood': [
+      { key: 'title', label: '标题', sel: '[data-card-bg="mood"] .mc-top' },
+      { key: 'body', label: '心情内容', sel: '#today-mood-text' },
+    ],
+    'week': [
+      { key: 'title', label: '标题', sel: '[data-card-bg="week"] .mc-top' },
+      { key: 'days', label: '日期格', sel: '[data-card-bg="week"] .week-day:not(.today), [data-card-bg="week"] .week-day:not(.today) b' },
+    ],
+    'weekend': [
+      { key: 'days', label: '标题', sel: '#weekend-days' },
+      { key: 'sub', label: '副标题', sel: '[data-card-bg="weekend"] .we-sub' },
+      { key: 'val', label: '摸鱼/工作值', sel: '[data-card-bg="weekend"] .we-ta, [data-card-bg="weekend"] .we-ta b' },
+      { key: 'btn', label: '摸鱼按钮', sel: '#weekend-fish' },
+    ],
+    'desk-clock': [
+      { key: 'time', label: '时间', sel: '#dc-time' },
+      { key: 'date', label: '日期', sel: '#dc-date' },
+    ],
+    'desk-calendar': [
+      { key: 'title', label: '月份标题', sel: '#dcal-title' },
+    ],
+    'desk-timer': [
+      { key: 'disp', label: '计时显示', sel: '#dt-disp' },
+      { key: 'mode', label: '模式标签', sel: '#dt-mode-label' },
+      { key: 'btn', label: '按钮文字', sel: '.desk-timer .dt-btn' },
+    ],
+    'desk-anniv': [
+      { key: 'label', label: '标签', sel: '[data-card-bg="desk-anniv"] .da-label' },
+      { key: 'days', label: '天数', sel: '#da-days' },
+      { key: 'name', label: '纪念日名', sel: '#da-name' },
+    ],
+  };
+  const textColorSwatches = [
+    { color: '#111111', label: '默认黑' },
+    { color: '#333333', label: '深灰' },
+    { color: '#555555', label: '中灰' },
+    { color: '#777777', label: '灰' },
+    { color: '#999999', label: '浅灰' },
+    { color: '#bbbbbb', label: '中浅灰' },
+    { color: '#dddddd', label: '浅白' },
+    { color: '#ffffff', label: '纯白' },
+    { color: '#e05555', label: '樱花粉' },
+    { color: '#d65c7a', label: '玫瑰' },
+    { color: '#5555cc', label: '雾霭蓝' },
+    { color: '#2e8b57', label: '薄荷绿' },
+    { color: '#d4a017', label: '暖橘黄' },
+    { color: '#8e44ad', label: '淡紫' },
+    { color: '#cc6622', label: '暖橘' },
+    { color: '#b8d4e8', label: '天蓝' },
+  ];
+  const widgetTextKey = (type, key) => 'widget-text-' + type + '-' + key;
+  const applyWidgetText = (type, part, color) => {
+    try {
+      const els = document.querySelectorAll(part.sel);
+      els.forEach(el => { if (el) el.style.color = color || ''; });
+    } catch (e) {}
+  };
+  // 应用某卡片所有已保存的文字颜色（启动 / 切桌面 / 恢复方案后调用）
+  const applyAllWidgetTexts = () => {
+    Object.keys(WIDGET_TEXT_PARTS).forEach(type => {
+      WIDGET_TEXT_PARTS[type].forEach(part => {
+        const c = store.get(widgetTextKey(type, part.key));
+        if (c) applyWidgetText(type, part, c);
+      });
+    });
+  };
   // 应用单个卡片的背景：遮罩用多层背景（白色半透明叠加在图片上）
   // v3.6.x：遮罩浓度滑块 0~85（百分比），存数字字符串；旧值 'off'/'light'/'mid'/'strong'/'on' 迁移
   const MASK_ALPHA_LEGACY = { off: 0, light: 30, mid: 50, strong: 72, on: 50 };
@@ -2242,13 +3040,16 @@ try {
   function refreshDeskVisuals() {
     try { window.applyAvatars(); } catch (e) {}
     try { applyAllCardBgs(); } catch (e) {}
+    try { applyAllWidgetTexts(); } catch (e) {}
     try { applyPageBgs(); } catch (e) {}
     try { renderDeskImages(); } catch (e) {}
     try { syncBgUI(); } catch (e) {}
   }
   // 初始化 + 多桌面切换后重应用
   applyAllCardBgs();
+  applyAllWidgetTexts();
   document.addEventListener('contact-switched', applyAllCardBgs);
+  document.addEventListener('contact-switched', applyAllWidgetTexts);
   // 卡片背景设置公共逻辑（设置页行点击 / 装修模式点卡片共用）：
   // 上传 / 清除 / 遮罩开关。type 为卡片类型，name 为显示名。
   // v3.6.x：装修模式点卡片时额外传入 anchorEl（点击的卡片元素）→ 菜单追加
@@ -2305,6 +3106,7 @@ try {
     if (img) pills.push({ label: '遮罩浓度', value: 'mask' });
     if (img) pills.push({ label: maskPctOf(type) === 0 ? '原图直出 ✓' : '原图直出', value: 'origin' });
     pills.push({ label: '组件透明度', value: 'opacity' });
+    if (WIDGET_TEXT_PARTS[type]) pills.push({ label: '文字颜色', value: 'text' });
     if (widgetEl) {
       pills.push({ label: '上移', value: 'up' });
       pills.push({ label: '下移', value: 'down' });
@@ -2356,7 +3158,7 @@ try {
         syncCardBgUIs();
         toast('已切换为原图直出');
       } else if (v === 'opacity') {
-        const n = parseInt(store.get('widget-opacity'), 10);
+        const n = opacityRawToPct(store.get('widget-opacity')); // #146：兼容历史小数脏值
         const curOp = !isNaN(n) ? Math.max(0, Math.min(100, n)) : 100;
         openCardMenuNext('组件透明度', '', (sv) => {
           if (sv === '__reset__') { store.remove('widget-opacity'); applyWidgetOpacity(100); toast('已恢复不透明'); return; }
@@ -2372,6 +3174,39 @@ try {
             onChange: (val) => { document.documentElement.style.setProperty('--widget-opacity', String(val / 100)); },
           },
           pills: [{ label: '恢复默认', value: '__reset__' }],
+        });
+      } else if (v === 'text') {
+        // v3.26.x：文字部位颜色——先选部位（已设色的标「· 已设色」），再开色板
+        const parts = WIDGET_TEXT_PARTS[type] || [];
+        if (!parts.length) return;
+        openCardMenuNext('文字颜色', '', (sv) => {
+          const part = parts.find(p => p.key === sv);
+          if (!part) return;
+          const storeKey = widgetTextKey(type, part.key);
+          const current = store.get(storeKey) || '#111111';
+          window.openModal(part.label + '颜色', '', (cv) => {
+            const color = (typeof cv === 'number' && textColorSwatches[cv]) ? textColorSwatches[cv].color : cv;
+            if (!color) return;
+            if (color === '__reset__') {
+              store.remove(storeKey);
+              applyWidgetText(type, part, '');
+              toast(part.label + '已恢复默认颜色');
+              return;
+            }
+            store.set(storeKey, color);
+            applyWidgetText(type, part, color);
+            toast(part.label + '颜色已设置');
+          }, {
+            colorPicker: true,
+            noInput: true,
+            color: current,
+            swatches: textColorSwatches,
+            pills: [{ label: '恢复默认', value: '__reset__' }],
+          });
+        }, {
+          noInput: true,
+          staticText: '选择要改颜色的文字部位，再选择颜色',
+          pills: parts.map(p => ({ label: p.label + (store.get(widgetTextKey(type, p.key)) ? ' · 已设色' : ''), value: p.key })),
         });
       } else if (v === 'up') moveWidget('up');
       else if (v === 'down') moveWidget('down');
@@ -2430,6 +3265,42 @@ try {
   // ===== v3.6.x：桌面页面管理（新增空白主页 / 删除 / 每页独立背景图） =====
   // 页数存储：desk-page-count（默认 2，上限 5）；每页背景图：page-bg-<idx>（dataURL）
   const pagesBox = document.getElementById('desktop-pages');
+  // FIX 2026-09-04 #151 模板默认排布快照（脚本加载期、buildDeskPages/applyDeskLayout
+  // 尚未改动 DOM 前捕获；只记每页顶层组件与模板池内组件）。用于切回「未装修（无
+  // desk-layout）」桌面时还原默认排布——此前 applyDeskLayout 对无布局直接 return：
+  // 上个桌面（有布局）切走时把本桌组件按其布局扫进隐藏池，切回来池里的组件永不
+  // 归还（「小组件会隐藏」），桌面还停留在他人桌面的排布上（「不同桌面显示不一样」）。
+  const TEMPLATE_DESK_ARR = (() => {
+    const arr = [];
+    try {
+      pagesBox.querySelectorAll('.page-slide').forEach((s, pi) => {
+        Array.prototype.forEach.call(s.children, (n) => {
+          if (n.hasAttribute && n.hasAttribute('data-desk-widget')) arr.push({ wid: n.getAttribute('data-desk-widget'), page: pi });
+        });
+      });
+      document.querySelectorAll('#desk-widget-pool [data-desk-widget]').forEach((n) => {
+        arr.push({ wid: n.getAttribute('data-desk-widget'), pool: true });
+      });
+    } catch (e) {}
+    return arr;
+  })();
+  // 按快照还原默认排布（幂等：已在位的节点不动；页数不足的页其组件保持池语义，
+  // 与冷启动 buildDeskPages 收缩页数的行为一致）。动态注入图标（同频/伸手/喝水等）
+  // 在图标组网格内随组归位，不单独记录。
+  const restoreTemplateDesk = () => {
+    if (!pagesBox) return;
+    const slides = pagesBox.querySelectorAll('.page-slide');
+    const pool = ensureWidgetPool();
+    TEMPLATE_DESK_ARR.forEach((it) => {
+      const node = document.querySelector('[data-desk-widget="' + it.wid + '"]');
+      if (!node) return;
+      if (it.pool) { if (node.parentNode !== pool) pool.appendChild(node); return; }
+      const slide = slides[it.page];
+      if (!slide || node.parentNode === slide) return;
+      const addBtn = slide.querySelector('.desk-page-add');
+      if (addBtn) slide.insertBefore(node, addBtn); else slide.appendChild(node);
+    });
+  };
   const pagesVal = document.getElementById('desk-pages-val');
   const delPageRow = document.getElementById('row-desk-del-page');
   const pageBgsBox = document.getElementById('desk-page-bgs');
@@ -2492,7 +3363,11 @@ try {
         // v3.7.x 修复：删页后收缩已存布局——此前 desk-layout 仍保留被删页条目，
         // 之后新增页并刷新会把旧页组件插回新页（组件"复活"）。只在已有自定义布局时
         // 收缩；默认布局（desk-layout 为空）不写，保持原「保持 DOM 原状」语义。
-        try { if (deskLayout()) saveDeskLayout(); } catch (e) {}
+        // FIX 2026-09-04 #151：切桌面触发的收缩不落盘——此时 DOM 还是上一桌面的
+        // 排布，store 已切到新桌面，saveDeskLayout 会把他人排布写成新桌面的
+        // desk-layout（页数不同的两桌面来回切即互相污染、组件被吞进隐藏池）。
+        // 用户手动删页（delPageRow）路径不走 contact-switched 监听，deskSwitchBuild=false 照旧保存。
+        try { if (deskLayout() && !deskSwitchBuild) saveDeskLayout(); } catch (e) {}
       }
     }
     for (let i = slides.length; i < target; i++) {
@@ -2664,8 +3539,11 @@ try {
       if (ctl && ctl.pills) ctl.pills([{ label: '确定恢复默认', value: '1' }], '1');
     });
   }
+  // FIX 2026-09-04 #151：切桌面期间的 buildDeskPages 标记——删页收缩不把当前 DOM
+  //（上一桌面的排布）落盘成新桌面的 desk-layout（见删页分支注释）
+  let deskSwitchBuild = false;
   buildDeskPages();
-  document.addEventListener('contact-switched', buildDeskPages);
+  document.addEventListener('contact-switched', () => { deskSwitchBuild = true; try { buildDeskPages(); } finally { deskSwitchBuild = false; } });
   // v3.6.x 修复（刷新后桌面页数消失）：IndexedDB 回填完成前，desk-page-count 若只存于
   // IDB（localStorage 缺失，如旧数据迁移后/个别浏览器配额清理），首次 buildDeskPages
   // 会按默认 2 页构建，恢复完成后页数/新增页不会自动重建 → 刷新后「新增的页消失」。
@@ -2705,7 +3583,7 @@ try {
   // 组件 id 列表（对应 template.html 中 [data-desk-widget]）；组件节点唯一，
   // 「添加」= 把节点移动到目标页（节点移动不重建，内部事件绑定保留）
   const WIDGET_IDS = ['deco', 'quote-row', 'checkin', 'apps', 'music', 'p2apps', 'memo-row', 'week', 'weekend', 'desk-clock', 'desk-calendar', 'desk-timer', 'desk-anniv', 'desk-period',
-    'app-chat', 'app-group-chat', 'app-home', 'app-mail', 'app-feed', 'app-calendar', 'app-memory', 'app-divination', 'app-note', 'app-music', 'app-stats', 'app-interact', 'app-checkin', 'p3apps', 'app-period', 'app-accounting', 'app-garden',     'app-tongpin', 'app-shenshou', 'app-water', 'app-eat', 'app-pomo'];
+    'app-chat', 'app-group-chat', 'app-home', 'app-mail', 'app-feed', 'app-calendar', 'app-memory', 'app-divination', 'app-note', 'app-music', 'app-stats', 'app-interact', 'app-checkin', 'p3apps', 'app-period', 'app-accounting', 'app-garden',     'app-tongpin', 'app-shenshou', 'app-water', 'app-eat', 'app-pomo', 'app-cjian', 'app-memo-arc', 'app-my-arc', 'app-room', 'app-piggy'];
   const WIDGET_NAMES = {
     deco: '纪念日卡', 'quote-row': '今日情话 / 已摸鱼', checkin: '打卡横幅', apps: '功能图标(整组)',
     music: '音乐播放器', p2apps: '第二页功能图标(整组)', 'memo-row': '今日备忘 / 心情', week: '本周日常', weekend: '周末倒计时',
@@ -2714,6 +3592,7 @@ try {
     'app-calendar': '日历图标', 'app-memory': '纪念图标', 'app-divination': '占卜图标', 'app-note': '收藏图标',
     'app-music': '音乐图标', 'app-stats': '聊天统计图标', 'app-interact': '提问记录图标', 'app-checkin': '寻踪图标',
     'p3apps': '第三页功能图标(整组)', 'app-period': '经期记录图标', 'app-accounting': '记账图标', 'app-garden': '花园图标',     'app-tongpin': '同频图标', 'app-shenshou': '伸手图标', 'app-water': '喝水图标', 'app-eat': '吃什么图标', 'app-pomo': '番茄钟图标',
+    'app-cjian': '此间图标', 'app-memo-arc': '梦角档案图标', 'app-my-arc': '我的档案图标', 'app-room': '房间图标', 'app-piggy': '存钱罐图标',
   };
   // v3.7.x：装修模式组件库静态预览缩略图（glass 质感 + 真实 SVG 图标，不依赖真实数据/事件）
   const PREV_BOX = 'display:flex;align-items:center;justify-content:center;width:78px;height:58px;border-radius:10px;background:linear-gradient(135deg,#fff,#f6f6f6);border:1px solid rgba(0,0,0,.07);box-shadow:0 1px 3px rgba(0,0,0,.06);flex-shrink:0;overflow:hidden;padding:4px;box-sizing:border-box';
@@ -2751,6 +3630,7 @@ try {
     'app-calendar': _appIcoPrev('日历'), 'app-memory': _appIcoPrev('纪念'), 'app-divination': _appIcoPrev('占卜'), 'app-note': _appIcoPrev('收藏'),
     'app-music': _appIcoPrev('音乐'), 'app-stats': _appIcoPrev('统计'), 'app-interact': _appIcoPrev('提问'), 'app-checkin': _appIcoPrev('寻踪'),
     'app-period': _appIcoPrev('经期'), 'app-accounting': _appIcoPrev('记账'), 'app-garden': _appIcoPrev('花园'),     'app-tongpin': _appIcoPrev('同频'), 'app-shenshou': _appIcoPrev('伸手'), 'app-water': _appIcoPrev('喝水'), 'app-eat': _appIcoPrev('吃什么'), 'app-pomo': _appIcoPrev('番茄钟'), 'p3apps': _appIcoPrev('经期'),
+    'app-cjian': _appIcoPrev('此间'), 'app-memo-arc': _appIcoPrev('梦角档案'), 'app-my-arc': _appIcoPrev('我的档案'), 'app-room': _appIcoPrev('房间'), 'app-piggy': _appIcoPrev('存钱罐'),
   };
   // 隐藏池：被移除的组件暂存（display:none），可从组件库重新添加
   function ensureWidgetPool() {
@@ -2764,17 +3644,43 @@ try {
     return pool;
   }
   // 读布局：desk-layout = JSON 数组（每页一个 widget id 数组）；无 → null（保持 DOM 原状）
+  // v3.27.x（#140 Huawei Pura70Pro+/Chrome 122 等安卓同族）：布局完整性校验——
+  // 高 IO/配额压力下持久化值可能损坏/空壳（[[],[]…] / 页数超限 / 重复组件 id），
+  // applyDeskLayout 会把布局外全部小组件卡整批扫进隐藏池，只剩图标网格（「卡片大部分
+  // 不显示」）；坏键落在 IDB 每次启动回填复发（同 #87/#134/#136 存量数据+慢 IO 家族）。
+  // 校验不过 → 按无布局处理（保持 template 默认 DOM）并当场清坏键，防回填复活。
   const deskLayout = () => {
+    let a = null;
     try {
       const v = store.get('desk-layout');
-      if (v) { const a = JSON.parse(v); if (Array.isArray(a)) return a; }
+      if (v) { const p = JSON.parse(v); if (Array.isArray(p)) a = p; }
     } catch (e) {}
-    return null;
+    if (!a) return null;
+    const seen = {};
+    const ok = a.length >= DESK_PAGE_MIN && a.length <= DESK_PAGE_MAX &&
+      a.some(function (page) { return Array.isArray(page) && page.length > 0; }) &&
+      a.every(function (page) { return Array.isArray(page) && page.every(function (w) { return typeof w === 'string'; }); }) &&
+      a.every(function (page) { return (page || []).every(function (w) { if (seen[w]) return false; seen[w] = 1; return true; }); });
+    if (!ok) {
+      try { console.info('[mochi] desk-layout 校验失败（损坏/空壳），忽略并清除'); } catch (e) {}
+      try { store.remove('desk-layout'); } catch (e) {}
+      return null;
+    }
+    return a;
   };
   // 保存布局（按当前 DOM 状态，含隐藏池外的所有页）
   const saveDeskLayout = () => {
     const slides = Array.prototype.slice.call(pagesBox.querySelectorAll('.page-slide'));
     const lay = slides.map(s => Array.prototype.slice.call(s.querySelectorAll('[data-desk-widget]')).map(n => n.getAttribute('data-desk-widget')));
+    // v3.27.x（#140）：写前防损坏——非数组/页数超界/组件 id 重复（嵌套遍历或并发装修
+    // 可产生重复 id，回填后校验必失败 → 全卡进隐藏池复发）。异常时放弃本次保存并清除，
+    // 保持 template 默认桌面，不把坏值固化进 IDB。
+    try {
+      const seen = {};
+      const ok = Array.isArray(lay) && lay.length >= DESK_PAGE_MIN && lay.length <= DESK_PAGE_MAX &&
+        lay.every(function (page) { return Array.isArray(page) && page.every(function (w) { return typeof w === 'string' && !seen[w] && (seen[w] = 1); }); });
+      if (!ok) { try { store.remove('desk-layout'); } catch (e) {} return lay; }
+    } catch (e) {}
     store.set('desk-layout', JSON.stringify(lay));
     return lay;
   };
@@ -2790,7 +3696,9 @@ try {
   // 不在 desk-layout 内，重排时保持其节点不动）。
   const applyDeskLayout = () => {
     const lay = deskLayout();
-    if (!lay) return;
+    // FIX 2026-09-04 #151：无布局 ≠ 什么都不做——先按模板快照还原默认排布再返回，
+    // 归还被上个桌面布局扫进隐藏池的本桌组件（见 TEMPLATE_DESK_ARR 注释）
+    if (!lay) { restoreTemplateDesk(); return; }
     const slides = Array.prototype.slice.call(pagesBox.querySelectorAll('.page-slide'));
     // v3.7.x：单个功能图标仍在 app-grid 内（未被移出作独立组件）时跳过——
     // 它由 app-grid 容器管理（grid 4 列横排），移到 slide 会脱离 grid 布局
@@ -2836,7 +3744,12 @@ try {
       syncPageHint(slide);
     });
     // 布局外的组件 → 隐藏池
+    // v3.27.x（#140）：列在「不存在的页」上的组件也视为有主——只隐藏「布局数组里
+    // 完全找不到」的组件。否则页面数被外部改动（删页/校验失败重建）时，布局后半段
+    // 指向缺失页的组件会被误判为「布局外」整批进隐藏池，加重「卡片大部分不显示」。
     const pool = ensureWidgetPool();
+    const inAnyPage = {};
+    lay.forEach(function (page) { (page || []).forEach(function (w) { inAnyPage[w] = 1; }); });
     WIDGET_IDS.forEach(wid => {
       // v3.7.x：apps/p2apps 老兼容——之前 app-grid 没 data-desk-widget，老 layout 不含它们；
       // 加 data-desk-widget 后若按常规移池会把老用户的功能图标藏掉，故跳过池逻辑保持原位
@@ -2847,9 +3760,16 @@ try {
       if (!node) return;
       // v3.7.x：单个功能图标仍在 app-grid 内（未被移出）时跳过池逻辑，保持原位
       if (wid.indexOf('app-') === 0 && node.closest('.app-grid')) return;
+      if (inAnyPage[wid]) return; // 布局里有名（哪怕页已不存在）→ 不进池
       const inLay = lay.some(page => (page || []).indexOf(wid) >= 0);
       if (!inLay && node.parentNode !== pool) pool.appendChild(node);
     });
+    // FIX 2026-09-04 #156：布局应用完毕后重应用一次群聊模式——群聊开启期间占卜图标必须
+    // 停在隐藏池；否则任何 bare applyDeskLayout 都会把占卜按 desk-layout 从池里放回桌面
+    //（典型复活路径：启动 150ms ensureP2AppsBelowWeekend 兜底重跑发生在 applyGroupChatMode
+    // 首次应用之后）。applyGroupChatMode 为同 IIFE 函数声明（提升可用）；群聊关闭时该调用
+    // 对已归位图标是无操作，且其关闭分支回引 applyDeskLayout 最多两层即收敛（幂等）。
+    try { applyGroupChatMode(); } catch (e) {}
     if (window.deskRebuild) window.deskRebuild();
     try { renderDeskWidgets(); } catch (e) {}
   };
@@ -3057,9 +3977,10 @@ try {
     setTimeout(() => { _reapplyScheduled = false; }, 2000);
   });
 
-  // v3.8.x：群聊模式——开启后桌面聊天按钮右侧显示「群聊」按钮，占卜按钮隐藏（移到隐藏池，
-  // 可在美化装修模式组件库自由添加到其他页面）；关闭恢复原样。须在 applyDeskLayout 之后执行
-  // （覆盖 desk-layout 对群聊/占卜图标的处置）。每桌面独立（group-chat-enabled，默认关闭）。
+  // v3.8.x：群聊模式——开启后桌面聊天按钮右侧显示「群聊」按钮，占卜按钮隐藏（FIX 2026-09-04
+  // #156：无论占卜图标当前在首页图标组、其他页还是组件库加回的位置，都强制收进隐藏池）；
+  // 关闭恢复原样。须在 applyDeskLayout 之后执行（覆盖 desk-layout 对群聊/占卜图标的处置）。
+  // group-chat-enabled 为全局键（v3.10.x 起群聊是全局功能），默认关闭。
   function applyGroupChatMode() {
     try {
       // v3.10.x：group-chat-enabled 改全局存储（群聊是全局功能），读时回退旧版每桌面值完成迁移
@@ -3081,8 +4002,12 @@ try {
           }
           gcBtn.hidden = false;
         }
-        // 占卜按钮：若仍在第一页 app-grid（原位），移到隐藏池；已在池或被用户移到其他页则不动
-        if (divBtn && mainGrid && divBtn.parentNode === mainGrid) {
+        // FIX 2026-09-04 #156 群聊模式没隐藏桌面占卜图标（用户反馈）：原逻辑只在占卜图标
+        // 仍在第一页 app-grid（模板原位）时才收进隐藏池，装修过桌面（占卜被拖出图标组
+        // 排在任意页顶层）或从组件库重新加回后，占卜图标一直显示在桌面上。改为群聊开启
+        // 期间无论占卜在桌面哪个位置（图标组/任意页）都强制收进隐藏池（已在池则不动）；
+        // 关闭后由 else 分支放回首页图标组默认位（v3.8 原语义）。
+        if (divBtn && divBtn.parentNode !== pool) {
           pool.appendChild(divBtn);
         }
       } else {
@@ -3090,7 +4015,10 @@ try {
         if (gcBtn && gcBtn.parentNode !== pool) {
           pool.appendChild(gcBtn);
         }
-        // 占卜按钮：若在隐藏池，移回第一页 app-grid 的 memory 后面（原位）；已被用户添加到其他页则不动
+        // 占卜按钮：若在隐藏池，移回第一页 app-grid 的 memory 后面（默认位）。
+        // FIX 2026-09-04 #156 语义：群聊开启期间占卜被强制收池（无论原位置），关闭后
+        // 统一回首页图标组默认位（v3.8 原语义）；desk-layout 里残留的占卜条目因图标
+        // 已回到网格内被「网格管理」规则忽略（inGrid 跳过），下次装修保存自动校正。
         if (divBtn && divBtn.parentNode === pool && mainGrid) {
           if (memBtn) mainGrid.insertBefore(divBtn, memBtn.nextSibling);
           else mainGrid.appendChild(divBtn);
@@ -3126,7 +4054,84 @@ try {
     sub.className = 'desk-lib-sub';
     sub.textContent = '组件全局唯一：选择后会从原位置移动过来';
     box.appendChild(title); box.appendChild(sub);
+    // v3.26.x：组件库顶部按「小组件 / 图标」分类 Tab，点击切换
+    const tabWrap = document.createElement('div');
+    tabWrap.className = 'desk-lib-tabs';
+    const groups = [ { key: 'widget', label: '小组件' }, { key: 'icon', label: '图标' } ];
+    const panels = {};
+    groups.forEach((g, gi) => {
+      const tab = document.createElement('button');
+      tab.type = 'button';
+      tab.className = 'desk-lib-tab' + (gi === 0 ? ' on' : '');
+      tab.textContent = g.label;
+      tab.addEventListener('click', () => {
+        tabWrap.querySelectorAll('.desk-lib-tab').forEach(t => t.classList.remove('on'));
+        tab.classList.add('on');
+        groups.forEach(x => { const p = panels[x.key]; if (p) p.style.display = (x.key === g.key) ? '' : 'none'; });
+      });
+      tabWrap.appendChild(tab);
+    });
+    box.appendChild(tabWrap);
+    let iconSearch = null, iconGrid = null;
+    groups.forEach(g => {
+      const p = document.createElement('div');
+      p.className = 'desk-lib-panel';
+      p.style.display = (g.key === 'widget') ? '' : 'none';
+      if (g.key === 'icon') {
+        // v3.26.x：图标分类——顶部搜索框 + 紧凑网格，方便批量查找/添加管理
+        const search = document.createElement('input');
+        search.type = 'text';
+        search.className = 'desk-lib-search';
+        search.placeholder = '搜索图标名…';
+        p.appendChild(search);
+        const grid = document.createElement('div');
+        grid.className = 'desk-lib-grid';
+        p.appendChild(grid);
+        iconSearch = search; iconGrid = grid;
+      }
+      box.appendChild(p);
+      panels[g.key] = p;
+    });
+    // 添加逻辑（行按钮 / 图标块共用）：把组件节点移到目标页
+    const addWidgetToPage = (wid) => {
+      const node = document.querySelector('[data-desk-widget="' + wid + '"]');
+      if (!node) return;
+      const addBtn = pageSlide.querySelector('.desk-page-add');
+      if (addBtn) pageSlide.insertBefore(node, addBtn);
+      else pageSlide.appendChild(node);
+      syncPageHint(pageSlide);
+      saveDeskLayout();
+      if (window.deskRebuild) window.deskRebuild();
+      lib.remove();
+      toast('已添加到本页');
+    };
     WIDGET_IDS.forEach(wid => {
+      if (wid.indexOf('app-') === 0) {
+        // 图标分类：紧凑网格块（缩略首字 + 名字），点击添加；已在本页置灰
+        const node = document.querySelector('[data-desk-widget="' + wid + '"]');
+        const curPage = node && node.closest('.page-slide') ? Array.prototype.indexOf.call(pagesBox.querySelectorAll('.page-slide'), node.closest('.page-slide')) : -1;
+        const nm = WIDGET_NAMES[wid] || wid;
+        const tile = document.createElement('div');
+        tile.className = 'desk-lib-icon' + (curPage === pageIdx ? ' on' : '');
+        tile.dataset.iconName = nm;
+        const iprev = document.createElement('div');
+        iprev.className = 'dli-prev';
+        const letter = document.createElement('span');
+        letter.className = 'dli-letter';
+        letter.textContent = nm.charAt(0) || '?';
+        iprev.appendChild(letter);
+        const iname = document.createElement('div');
+        iname.className = 'dli-name';
+        iname.textContent = nm.replace(/图标$/, '');
+        tile.appendChild(iprev); tile.appendChild(iname);
+        tile.addEventListener('click', () => {
+          if (curPage === pageIdx) { toast('已在本页'); return; }
+          addWidgetToPage(wid);
+        });
+        iconGrid.appendChild(tile);
+        return;
+      }
+      // 小组件：保持原有行式列表
       const item = document.createElement('div');
       item.className = 'desk-lib-item';
       // v3.7.x：静态预览缩略图
@@ -3139,31 +4144,30 @@ try {
       const name = document.createElement('div');
       name.className = 'dl-name';
       name.textContent = WIDGET_NAMES[wid] || wid;
-      const node = document.querySelector('[data-desk-widget="' + wid + '"]');
-      const curPage = node && node.closest('.page-slide') ? Array.prototype.indexOf.call(pagesBox.querySelectorAll('.page-slide'), node.closest('.page-slide')) : -1;
+      const wnode = document.querySelector('[data-desk-widget="' + wid + '"]');
+      const wcurPage = wnode && wnode.closest('.page-slide') ? Array.prototype.indexOf.call(pagesBox.querySelectorAll('.page-slide'), wnode.closest('.page-slide')) : -1;
       const where = document.createElement('div');
       where.className = 'dl-where';
-      where.textContent = curPage < 0 ? '已隐藏' : (curPage === pageIdx ? '已在本页' : (curPage === 0 ? '首页' : '第 ' + (curPage + 1) + ' 页'));
+      where.textContent = wcurPage < 0 ? '已隐藏' : (wcurPage === pageIdx ? '已在本页' : (wcurPage === 0 ? '首页' : '第 ' + (wcurPage + 1) + ' 页'));
       const btn = document.createElement('button');
       btn.className = 'dl-btn';
-      btn.textContent = curPage === pageIdx ? '已在' : '添加到此页';
-      btn.disabled = curPage === pageIdx;
-      btn.addEventListener('click', () => {
-        if (!node) return;
-        // 插入到「+ 添加卡片」按钮之前
-        const addBtn = pageSlide.querySelector('.desk-page-add');
-        if (addBtn) pageSlide.insertBefore(node, addBtn);
-        else pageSlide.appendChild(node);
-        syncPageHint(pageSlide);
-        saveDeskLayout();
-        if (window.deskRebuild) window.deskRebuild();
-        lib.remove();
-        toast('已添加到本页');
-      });
+      btn.textContent = wcurPage === pageIdx ? '已在' : '添加到此页';
+      btn.disabled = wcurPage === pageIdx;
+      btn.addEventListener('click', () => addWidgetToPage(wid));
       meta.appendChild(name); meta.appendChild(where);
       item.appendChild(prev); item.appendChild(meta); item.appendChild(btn);
-      box.appendChild(item);
+      panels.widget.appendChild(item);
     });
+    // 图标搜索过滤（按名字模糊匹配）
+    if (iconSearch && iconGrid) {
+      iconSearch.addEventListener('input', () => {
+        const q = (iconSearch.value || '').trim().toLowerCase();
+        Array.prototype.slice.call(iconGrid.children).forEach(t => {
+          const nm = (t.dataset.iconName || '').toLowerCase();
+          t.style.display = (!q || nm.indexOf(q) >= 0) ? '' : 'none';
+        });
+      });
+    }
     // v3.6.x：图片组件——可多个，上传新图片到本页
     const imgItem = document.createElement('div');
     imgItem.className = 'desk-lib-item';
@@ -3185,7 +4189,7 @@ try {
     imgBtn.addEventListener('click', () => { addDeskImage(pageIdx); lib.remove(); });
     imgMeta.appendChild(imgName); imgMeta.appendChild(imgWhere);
     imgItem.appendChild(imgPrev); imgItem.appendChild(imgMeta); imgItem.appendChild(imgBtn);
-    box.appendChild(imgItem);
+    panels.widget.appendChild(imgItem);
     // v3.7.x：自定义文字组件——可多个
     const textItem = document.createElement('div');
     textItem.className = 'desk-lib-item';
@@ -3207,7 +4211,7 @@ try {
     textBtn.addEventListener('click', () => { addDeskText(pageIdx); lib.remove(); });
     textMeta.appendChild(textName); textMeta.appendChild(textWhere);
     textItem.appendChild(textPrev); textItem.appendChild(textMeta); textItem.appendChild(textBtn);
-    box.appendChild(textItem);
+    panels.widget.appendChild(textItem);
     // v3.7.x：通用倒计时组件——可多个
     const cdItem = document.createElement('div');
     cdItem.className = 'desk-lib-item';
@@ -3229,7 +4233,7 @@ try {
     cdBtn.addEventListener('click', () => { addDeskCountdown(pageIdx); lib.remove(); });
     cdMeta.appendChild(cdName); cdMeta.appendChild(cdWhere);
     cdItem.appendChild(cdPrev); cdItem.appendChild(cdMeta); cdItem.appendChild(cdBtn);
-    box.appendChild(cdItem);
+    panels.widget.appendChild(cdItem);
     const close = document.createElement('button');
     close.textContent = '关闭';
     close.style.cssText = 'width:100%;margin-top:8px;padding:10px;border:1px solid #eee;border-radius:10px;background:#fafafa;font-size:13px;cursor:pointer;font-family:inherit';
@@ -3513,6 +4517,25 @@ try {
     renderDeskTexts();
     toast('已删除');
   }
+  // v3.26.x：文字组件上移/下移——只与同页相邻文字交换顺序，持久化到 meta
+  function moveDeskText(id, dir) {
+    const meta = loadDeskTextsMeta();
+    const idx = meta.findIndex(x => x.id === id);
+    if (idx < 0) return;
+    const same = [];
+    meta.forEach((x, i) => { if (x.page === meta[idx].page) same.push(i); });
+    const pos = same.indexOf(idx);
+    if (dir === 'up' && pos > 0) {
+      const a = same[pos - 1];
+      const t = meta[a]; meta[a] = meta[idx]; meta[idx] = t;
+    } else if (dir === 'down' && pos < same.length - 1) {
+      const a = same[pos + 1];
+      const t = meta[a]; meta[a] = meta[idx]; meta[idx] = t;
+    } else return;
+    saveDeskTextsMeta(meta);
+    renderDeskTexts();
+    toast(dir === 'up' ? '已上移' : '已下移');
+  }
   function removeDeskTextsOnPage(pageIdx) {
     saveDeskTextsMeta(loadDeskTextsMeta().filter(m => m.page !== pageIdx));
   }
@@ -3547,6 +4570,10 @@ try {
           const ci = colors.indexOf(m.color || '#333');
           m.color = colors[(ci + 1) % colors.length];
           saveDeskTextsMeta(meta); renderDeskTexts(); toast('已换颜色');
+        } else if (v === '__moveup__') {
+          moveDeskText(id, 'up');
+        } else if (v === '__movedn__') {
+          moveDeskText(id, 'down');
         } else if (v === '__del__') {
           removeDeskText(id);
         } else if (v && v.trim()) {
@@ -3559,6 +4586,8 @@ try {
           { label: '字号+', value: '__sizeup__' },
           { label: '字号-', value: '__sizedn__' },
           { label: '换颜色', value: '__color__' },
+          { label: '上移', value: '__moveup__' },
+          { label: '下移', value: '__movedn__' },
           { label: '删除', value: '__del__' },
         ],
       });
@@ -3616,6 +4645,25 @@ try {
     renderDeskCountdowns();
     toast('已删除');
   }
+  // v3.26.x：倒计时组件上移/下移——只与同页相邻倒计时交换顺序，持久化到 meta
+  function moveDeskCountdown(id, dir) {
+    const meta = loadDeskCountdownsMeta();
+    const idx = meta.findIndex(x => x.id === id);
+    if (idx < 0) return;
+    const same = [];
+    meta.forEach((x, i) => { if (x.page === meta[idx].page) same.push(i); });
+    const pos = same.indexOf(idx);
+    if (dir === 'up' && pos > 0) {
+      const a = same[pos - 1];
+      const t = meta[a]; meta[a] = meta[idx]; meta[idx] = t;
+    } else if (dir === 'down' && pos < same.length - 1) {
+      const a = same[pos + 1];
+      const t = meta[a]; meta[a] = meta[idx]; meta[idx] = t;
+    } else return;
+    saveDeskCountdownsMeta(meta);
+    renderDeskCountdowns();
+    toast(dir === 'up' ? '已上移' : '已下移');
+  }
   function removeDeskCountdownsOnPage(pageIdx) {
     saveDeskCountdownsMeta(loadDeskCountdownsMeta().filter(m => m.page !== pageIdx));
   }
@@ -3638,6 +4686,8 @@ try {
       if (!m) return;
       window.openModal('编辑倒计时', m.title + '|' + m.date, (v) => {
         if (v === '__del__') { removeDeskCountdown(id); return; }
+        if (v === '__moveup__') { moveDeskCountdown(id, 'up'); return; }
+        if (v === '__movedn__') { moveDeskCountdown(id, 'down'); return; }
         if (!v || !v.trim()) return;
         const parts = v.split('|');
         const title = (parts[0] || '').trim();
@@ -3648,7 +4698,11 @@ try {
         renderDeskCountdowns();
       }, {
         placeholder: '标题|日期，如 出差|2026-09-16',
-        pills: [{ label: '删除', value: '__del__' }],
+        pills: [
+          { label: '上移', value: '__moveup__' },
+          { label: '下移', value: '__movedn__' },
+          { label: '删除', value: '__del__' },
+        ],
       });
     });
   }
@@ -3948,6 +5002,7 @@ try {
         clearDropLine();
         clearEdge();
         edgeL.remove(); edgeR.remove();
+        // v3.26.x #134：computeDrop 对整组网格拖拽返回 null（禁止自嵌套），落空即放弃
         if (dropInfo) doDrop(el, dropInfo);
       };
       document.addEventListener('pointermove', onMove, { passive: false });
@@ -3973,6 +5028,11 @@ try {
       return { type: 'grid', grid: grid, ref: null, before: false };
     }
     function computeDrop(dragged, clientX, clientY) {
+      // v3.26.x #134：整组图标网格（.app-grid 自带 data-desk-widget=apps/p2apps/p3apps）
+      // 不能作为拖拽对象——dragged 是网格本身时，落点 ref 是网格的子图标，
+      // doDrop 的 insertBefore(网格, 子图标引用) = 节点插进自己内部
+      // → HierarchyRequestError（iPhone X 实测崩在 appendChild@native，拖拽功能报废）。
+      if (dragged.classList && dragged.classList.contains('app-grid')) return null;
       const inGrid = !!dragged.closest('.app-grid');
       if (inGrid) {
         const grid = dragged.closest('.app-grid');
@@ -4027,6 +5087,9 @@ try {
     function doDrop(dragged, info) {
       if (info.type === 'grid') {
         // v3.23.x：跨页移动——目标网格不是图标当前网格时先挪入目标网格（空网格 append）
+        // v3.26.x #134：自嵌套防线——ref 在 dragged 内部时 insertBefore 会抛
+        // HierarchyRequestError（节点不能插进自己的子孙位置），任何路径都不允许
+        if (info.ref && dragged.contains(info.ref)) return;
         if (dragged.parentNode !== info.grid) info.grid.appendChild(dragged);
         if (info.ref && dragged !== info.ref) {
           if (info.before) info.grid.insertBefore(dragged, info.ref);
@@ -4149,7 +5212,19 @@ try {
   }
   renderQuoteOfDay();
 
-  // 恋爱纪念日：已在一起天数（默认不预设日期，设置页选择后显示）
+  // 主纪念日（原「恋爱纪念日」）：已相伴天数（默认不预设日期，设置页选择后显示）
+  // v3.26.x：可设关系类型 rel-cat（love 爱情向 / family 亲情向 / friend 友情向）+ 关系称呼 rel-role（选填）
+  function relCat() {
+    const v = store.get('rel-cat');
+    return v === 'family' || v === 'friend' ? v : 'love';
+  }
+  function relRole() {
+    return (store.get('rel-role') || '').trim();
+  }
+  function relLabel() {
+    const c = relCat();
+    return c === 'family' ? '亲情纪念日' : c === 'friend' ? '友情纪念日' : '恋爱纪念日';
+  }
   function updateLove() {
     const start = store.get('love-start');
     const daysEl = document.getElementById('love-days');
@@ -4157,22 +5232,28 @@ try {
     const mDays = document.getElementById('mem-love-days');
     const mDate = document.getElementById('mem-love-date');
     const mNext = document.getElementById('mem-next');
+    const label = relLabel();
     if (!start) {
       if (daysEl) daysEl.textContent = '';
       if (dateEl) dateEl.textContent = '';
       if (mDays) mDays.textContent = '—';
       if (mDate) mDate.textContent = '';
-      if (mNext) mNext.textContent = '请先设置恋爱纪念日';
+      if (mNext) mNext.textContent = '请先设置' + label;
       return;
     }
     const d = new Date(start + 'T00:00:00');
     if (isNaN(d.getTime())) return;
     const days = Math.max(1, Math.floor((new Date() - d) / 864e5));
     const fmt = start.split('-').join('.');
+    // 爱情向=「我们在一起」，亲情/友情向=「我们相识」；设置了关系称呼时以称呼为对象（如「和姐姐相识」）
+    const role = relRole();
+    const who = role ? '和' + role : '我们';
+    const tog = relCat() === 'love' ? '在一起' : '相识';
+    const base = fmt + ' 起 · ' + who + tog;
     if (daysEl) daysEl.textContent = days + ' 天';
-    if (dateEl) dateEl.textContent = fmt + ' 起 · 我们在一起';
+    if (dateEl) dateEl.textContent = base;
     if (mDays) mDays.textContent = days;
-    if (mDate) mDate.textContent = fmt + ' 起 · 我们在一起';
+    if (mDate) mDate.textContent = base;
     // 下一个纪念日倒计时（下次同月同日）
     const now = new Date();
     const ann = new Date(now.getFullYear(), d.getMonth(), d.getDate());
@@ -4210,6 +5291,56 @@ try {
       }
     });
   }
+
+  // v3.26.x：主纪念日关系类型（爱情向/亲情向/友情向）+ 关系称呼（选填）
+  // 桌面双方头像之间的图标随类型切换：爱情=爱心 / 亲情=家 / 友情=两人
+  const REL_ICONS = {
+    love: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 21s-7.5-4.7-9.3-9A5.3 5.3 0 0112 6.4a5.3 5.3 0 019.3 5.6c-1.8 4.3-9.3 9-9.3 9z"/></svg>',
+    family: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3 9l9-7 9 7v11a2 2 0 01-2 2H5a2 2 0 01-2-2z"/><path d="M9 22V12h6v10"/></svg>',
+    friend: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 00-4-4H6a4 4 0 00-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 00-3-3.87"/><path d="M16 3.13a4 4 0 010 7.75"/></svg>'
+  };
+  function renderDeskRelIcon() {
+    const el = document.getElementById('deco-heart');
+    if (el) el.innerHTML = REL_ICONS[relCat()] || REL_ICONS.love;
+  }
+  function syncRelUI() {
+    const labelEl = document.getElementById('mem-love-label');
+    if (labelEl) labelEl.textContent = relLabel();
+    const row = document.getElementById('rel-type-row');
+    if (row) {
+      row.querySelectorAll('.mem-type-pill').forEach(b => {
+        b.classList.toggle('sel', b.getAttribute('data-rel') === relCat());
+      });
+    }
+    const roleInput = document.getElementById('rel-role-input');
+    if (roleInput && roleInput.value !== (store.get('rel-role') || '')) roleInput.value = store.get('rel-role') || '';
+    renderDeskRelIcon();
+  }
+  const relRow = document.getElementById('rel-type-row');
+  if (relRow) {
+    relRow.addEventListener('click', (e) => {
+      const b = e.target.closest('.mem-type-pill');
+      if (!b) return;
+      store.set('rel-cat', b.getAttribute('data-rel'));
+      syncRelUI();
+      updateLove();
+      renderDeskAnniv();
+    });
+  }
+  const roleInput = document.getElementById('rel-role-input');
+  if (roleInput) {
+    let roleTimer = null;
+    const saveRole = () => {
+      store.set('rel-role', (roleInput.value || '').trim());
+      updateLove();
+    };
+    roleInput.addEventListener('change', saveRole);
+    roleInput.addEventListener('input', () => {
+      clearTimeout(roleTimer);
+      roleTimer = setTimeout(saveRole, 400);
+    });
+  }
+  syncRelUI();
 
   // 其他纪念日：可自由添加/删除（存本地）
   // 条目：{ name, date, type }——type: 'ann' 纪念日（已 X 天）/ 'count' 倒数日（还有 X 天）
@@ -4828,6 +5959,8 @@ try {
     const row = document.getElementById('row-storage-view');
     const back = document.getElementById('storage-back');
     const G = 'xy-home-v2:';
+    // v3.26.x 存储优化：媒体池分类名（catOf 与 IndexedDB 统计回调共用，勿改字面量）
+    const CAT_MEDIA = '媒体池（图片去重）';
     const DIAG_KEYS = [
       'xy-home-v2:__diag-errs',
       'xy-home-v2:__diag-errs-seen',
@@ -4836,10 +5969,6 @@ try {
       'xy-home-v2:__diag-net',
       'xy-home-v2:__diag-tap'
     ];
-    // v3.26.x：自动备份快照（副本）体积统计：split 成 LS 贡献 + IDB 贡献，汇总后显示和提示
-    let snapLs = 0, snapIdb = 0, snapText = '(统计中)';
-    // v3.26.x：IndexedDB 扫描是否完成——完成前禁止删除按钮且显示「统计中…」，防止"打开即点删/删完没落库"拿错数字或多扫到旧快照
-    let idbDone = false;
 
     function fmtBytes(n) {
       if (n == null || isNaN(n)) return '(未知)';
@@ -4847,15 +5976,37 @@ try {
       if (n >= 1024) return (n / 1024).toFixed(1) + ' KB';
       return n + ' B';
     }
+    // v3.29.x：键名可读化——`xy-home-v2:<cid>:xxx` 的机器键名用户读不懂，
+    // 首段能对上联系人 id 的就换成「桌面名 · 剩余键名」，对不上（全局键如
+    // incoming-last:xxx / music-file:xxx）原样显示，不猜。
+    function deskNames() {
+      const map = {};
+      try {
+        (window.getContacts ? window.getContacts() : []).forEach(function (c) {
+          if (c && c.id) map[c.id] = c.name || c.id;
+        });
+      } catch (e) {}
+      return map;
+    }
+    function labelKey(k, names) {
+      const tail = String(k).slice(G.length);
+      const i = tail.indexOf(':');
+      if (i > 0) {
+        const cid = tail.slice(0, i);
+        if (names[cid]) return names[cid] + ' · ' + (tail.slice(i + 1) || cid);
+      }
+      return tail || String(k);
+    }
     // 键名（去掉 xy-home-v2: 前缀，可能带 cid 命名空间）→ 功能分类
     function catOf(tail) {
       if (!tail) return '其他';
       // —— 全局系统 / 诊断 / 索引前缀（无 cid 命名空间）——
       if (tail.indexOf('__diag-') === 0) return '错误诊断记录';
       if (tail.indexOf('music-file:') >= 0) return '本地音乐';
-      if (tail.indexOf('__auto-backup-snapshot') >= 0) return '自动备份快照';
-      // v3.26.x：__last-backup 只是"最近导出时间"小键，不再是副本体积；归到系统设置，
-      // 让「自动备份快照」分类只精确反映副本键，删除后该分类能真正归零
+      // v3.26.x 存储优化：媒体池（#142 聊天图片/表情去重仓库，全局根键 media:<hash>）单独成类
+      if (/^media:[0-9a-f]{32}$/.test(tail)) return CAT_MEDIA;
+      // v3.29.x：「自动备份快照」分类已随副本机制下线（遗留副本由 data-backup.js 启动时清理）
+      // v3.26.x：__last-backup 只是"最近导出时间"小键，归到系统设置
       if (tail.indexOf('__last-backup') >= 0 || tail.indexOf('__last-backup-remind') >= 0) return '系统设置';
       if (tail.indexOf('psync-') >= 0) return '后台同步缓存';
       if (tail.indexOf('__big-idx') >= 0 || tail.indexOf('__ls-dirty') >= 0) return '数据索引';
@@ -4908,12 +6059,16 @@ try {
     }
     function lsStats() {
       const cats = {};
-      let total = 0, count = 0;
+      let total = 0, count = 0, otherSize = 0, otherCount = 0;
       try {
         for (let i = 0; i < localStorage.length; i++) {
           const k = localStorage.key(i);
-          if (!k || k.indexOf(G) !== 0) continue;
+          if (!k) continue;
+          // 同 origin 下非本项目前缀的键（GitHub Pages 同账号各项目共用一个 origin，
+          // #88 实测过配额被别的站点占满）单独计数，不混进本项目的明细里
+          const mine = k.indexOf(G) === 0;
           const sz = (k.length + String(localStorage.getItem(k) || '').length) * 2;
+          if (!mine) { otherSize += sz; otherCount++; continue; }
           total += sz; count++;
           const c = catOf(k.slice(G.length));
           if (!cats[c]) cats[c] = { n: 0, size: 0, keys: [] };
@@ -4921,13 +6076,18 @@ try {
           if (cats[c].keys.length < 20) cats[c].keys.push(k);
         }
       } catch (e) {}
-      return { cats: cats, total: total, count: count };
+      return { cats: cats, total: total, count: count, otherSize: otherSize, otherCount: otherCount };
     }
     // IndexedDB：列出键后分批读取体积（用 idbGetMany 批量事务，比逐键快得多；
     // Blob/ArrayBuffer 只取 size 不读数据，字符串读完即弃，峰值内存=最大单键）
     function idbStats(onProgress, cb) {
-      if (!window.idbGetAllKeys) { cb(null); return; }
-      window.idbGetAllKeys().then(function (keys) {
+      // v3.29.x：清单读取改走 #90 的严格三态 idbListKeys（null＝这次读不到）。
+      // 旧实现用 idbGetAllKeys，失败时退化成 [] → 页面显示「0 B（0 键）」，
+      // 把「读不到」显示成「库里没有」，正是要避免的口径。
+      const listFn = window.idbListKeys || window.idbGetAllKeys;
+      if (!listFn) { cb(null); return; }
+      Promise.resolve(listFn()).then(function (keys) {
+        if (keys === null || keys === undefined) { cb(null); return; }
         const cats = {};
         const list = (keys || []).filter(function (k) { return String(k || '').indexOf(G) === 0; });
         list.forEach(function (k) {
@@ -4968,7 +6128,18 @@ try {
         setTimeout(nextBatch, 0);
       }).catch(function () { cb(null); });
     }
-    function renderCatTable(lsCats, idbCats) {
+    function pctOf(size, total) {
+      if (!total) return '0%';
+      const p = size / total * 100;
+      if (p >= 10) return Math.round(p) + '%';
+      if (p >= 0.1) return p.toFixed(1) + '%';
+      return '<0.1%';
+    }
+    // v3.29.x：明细可读性三改——①只列占用最大的 5 类 + 占比条，其余折成「其他 N 项合计」
+    // （点开展开仍逐类列名列大小，核对覆盖没有变难）；②展开区键名换成「桌面名 · 键名」，
+    // 键数被截断时如实标注「共 N 个键，仅列前 M 个」；③IDB 清单读取失败时明确说
+    // 「下面只统计了 localStorage」，不再静默少算一整块。
+    function renderCatTable(lsCats, idbCats, idbFailed) {
       const el = document.getElementById('st-cat');
       if (!el) return;
       const all = {};
@@ -4985,22 +6156,56 @@ try {
         return { name: c, n: all[c].n, size: all[c].size, keys: all[c].keys };
       }).sort(function (a, b) { return b.size - a.size; });
       el.innerHTML = '';
-      if (!rows.length) { el.innerHTML = '<div class="storage-hint">暂未统计到数据。</div>'; return; }
-      rows.forEach(function (r) {
+      if (idbFailed) {
+        const w = document.createElement('div');
+        w.className = 'storage-cat-warn';
+        w.textContent = '⚠ IndexedDB 键清单这次没读到（是读不到，不是库里没有），下面只统计了 localStorage，重进本页面可再试一次。';
+        el.appendChild(w);
+      }
+      if (!rows.length) {
+        const h = document.createElement('div');
+        h.className = 'storage-hint';
+        h.textContent = '暂未统计到数据。';
+        el.appendChild(h);
+        return;
+      }
+      const names = deskNames();
+      const total = rows.reduce(function (s, r) { return s + r.size; }, 0);
+      const max = rows[0].size || 1;
+      const mkRow = function (name, n, size, subText, noBar) {
         const d = document.createElement('div');
-        d.className = 'storage-cat-row' + (r.keys && r.keys.length ? ' has-keys' : '') + (r.name === '自动备份快照' ? ' snap' : '');
-        d.innerHTML = '<div class="storage-cat-line"><span class="storage-cat-name"></span><span class="storage-cat-num"></span><span class="storage-cat-size"></span></div>';
-        d.querySelector('.storage-cat-name').textContent = r.name;
-        d.querySelector('.storage-cat-num').textContent = r.n + ' 键';
-        d.querySelector('.storage-cat-size').textContent = fmtBytes(r.size);
-        if (r.keys && r.keys.length) {
+        d.className = 'storage-cat-row' + (subText ? ' has-keys' : '');
+        d.innerHTML = '<div class="storage-cat-line"><span class="storage-cat-name"></span><span class="storage-cat-num"></span><span class="storage-cat-size"></span></div>' +
+          (noBar ? '' : '<div class="storage-cat-bar"><i></i></div>');
+        d.querySelector('.storage-cat-name').textContent = name;
+        d.querySelector('.storage-cat-num').textContent = n + ' 键 · ' + pctOf(size, total);
+        d.querySelector('.storage-cat-size').textContent = fmtBytes(size);
+        // 条长按平方根比例：真实数据常是一个大头占九成（实测某项 94%），线性条会把
+        // 第 3~6 名全压到 1.5% 的下限上、彼此分不出来。平方根单调不减、最大项仍满格，
+        // 小项也能排座次；精确份额看行末的百分比数字。
+        if (!noBar) d.querySelector('.storage-cat-bar i').style.width = Math.max(1.5, Math.round(Math.sqrt(size / max) * 100)) + '%';
+        if (subText) {
           const sub = document.createElement('div');
           sub.className = 'storage-cat-keys';
-          sub.textContent = r.keys.join('、');
+          sub.textContent = subText;
           d.appendChild(sub);
         }
-        el.appendChild(d);
+        return d;
+      };
+      const top = rows.slice(0, 5);
+      const rest = rows.slice(5);
+      top.forEach(function (r) {
+        const listed = (r.keys || []).length;
+        let subText = listed ? r.keys.map(function (k) { return labelKey(k, names); }).join('、') : '';
+        if (r.n > listed) subText += (subText ? '｜' : '') + '共 ' + r.n + ' 个键，仅列前 ' + listed + ' 个';
+        el.appendChild(mkRow(r.name, r.n, r.size, subText));
       });
+      if (rest.length) {
+        const rn = rest.reduce(function (s, r) { return s + r.n; }, 0);
+        const rs = rest.reduce(function (s, r) { return s + r.size; }, 0);
+        el.appendChild(mkRow('其他 ' + rest.length + ' 项合计', rn, rs,
+          rest.map(function (r) { return r.name + ' ' + fmtBytes(r.size); }).join('、'), true));
+      }
     }
     function diagSummary() {
       let items = 0, bytes = 0, errs = 0;
@@ -5020,51 +6225,60 @@ try {
       const d = diagSummary();
       el.textContent = (d.items ? d.items + ' 项缓存' : '无缓存') + (d.errs ? ' · ' + d.errs + ' 条错误' : '') + (d.items ? ' · 约 ' + fmtBytes(d.bytes) : '');
     }
-    // v3.26.x：自动备份快照 = LS + IDB 两处之和；同步刷新「当前快照大小」、顶部警示和删除按钮。
-    // IndexedDB 未扫完则按钮禁用并显示「统计中…」，避免打开页面瞬间就点删除拿到不准的数字；
-    // 扫描完成后若快照存在则启用按钮（自愈：删除后又重新导出重建了快照，也能再次删除）。
-    function renderSnap() {
-      const size = (snapLs || 0) + (snapIdb || 0);
-      snapText = size ? fmtBytes(size) : '(无)';
-      const el = document.getElementById('st-snap');
-      if (el) el.textContent = idbDone ? (snapText + (size ? '（一份完整副本）' : '')) : '统计中…';
-      const hintEl = document.getElementById('st-snap-hint');
-      if (hintEl) hintEl.style.display = (idbDone && size) ? 'block' : 'none';
-      const btn = document.getElementById('st-clear-snap');
-      if (btn) {
-        btn.disabled = !(idbDone && size > 0);
-        btn.textContent = !idbDone ? '统计中…' : (size > 0 ? '删除自动备份快照（释放空间）' : '（暂无自动备份快照）');
-      }
-    }
     function renderStorage() {
+      // v3.29.x：总占用摆两个口径——「本项目占用合计」（本页面统计到的 LS+IDB）和
+      // 「浏览器整域已用」（navigator.storage.estimate 是整个 origin，含同域名下其他
+      // 站点与图片缓存，#88 实测过同账号 Pages 共用配额）。以前只报后者，用户拿它跟
+      // 明细一比就觉得「几百 MB 去哪了 / 是不是统计漏了」。
       const quotaEl = document.getElementById('st-quota');
       if (quotaEl && navigator.storage && navigator.storage.estimate) {
         navigator.storage.estimate().then(function (r) {
-          if (quotaEl) quotaEl.textContent = '已用 ' + fmtBytes(r && r.usage) + ' / 共 ' + fmtBytes(r && r.quota);
+          if (quotaEl) quotaEl.textContent = fmtBytes(r && r.usage) + ' / ' + fmtBytes(r && r.quota);
         }).catch(function () { if (quotaEl) quotaEl.textContent = '读取失败'; });
       } else if (quotaEl) quotaEl.textContent = '接口不可用';
       const ls = lsStats();
       const lsEl = document.getElementById('st-ls');
       if (lsEl) lsEl.textContent = fmtBytes(ls.total) + '（' + ls.count + ' 键）';
+      // v3.32.x：可清理空间 · 本机音乐文件占用（从 IndexedDB 的「本地音乐」分类取，
+      // Blob 按真实字节计数；IndexedDB 未读到前先显示占位，读到后由 idbStats 回调刷新）
+      const musicEl = document.getElementById('st-music');
+      if (musicEl) musicEl.textContent = '统计中…（IndexedDB）';
+      // v3.26.x 存储优化：媒体池占用占位（IndexedDB 统计回调里刷新）
+      const mediaEl = document.getElementById('st-media');
+      if (mediaEl) mediaEl.textContent = '统计中…（IndexedDB）';
+      const otherEl = document.getElementById('st-other');
+      if (otherEl) otherEl.textContent = ls.otherCount ? fmtBytes(ls.otherSize) + '（' + ls.otherCount + ' 键）' : '无';
+      const selfEl = document.getElementById('st-self');
+      const showSelf = function (idbTotal) {
+        if (!selfEl) return;
+        if (idbTotal === undefined) { selfEl.textContent = fmtBytes(ls.total) + '（IndexedDB 统计中…）'; return; }
+        if (idbTotal === null) { selfEl.textContent = fmtBytes(ls.total) + '（不含 IndexedDB，见下方告警）'; return; }
+        selfEl.textContent = fmtBytes(ls.total + idbTotal.total) + '（' + ls.count + ' + ' + idbTotal.count + ' 键）';
+      };
+      showSelf(undefined);
       const idbEl = document.getElementById('st-idb');
       if (idbEl) idbEl.textContent = '统计中…';
-      // 重新开始一次完整扫描：先标记未完成，按钮回到「统计中…」禁用态，扫完再启用
-      idbDone = false;
       // 先渲染 localStorage 明细，IndexedDB 异步补齐
-      renderCatTable(ls.cats, null);
-      snapLs = (ls.cats['自动备份快照'] || {}).size || 0;
-      snapIdb = 0;
-      renderSnap();
+      renderCatTable(ls.cats, null, false);
       idbStats(function (done, totalN) {
         if (idbEl) idbEl.textContent = '统计中…（' + done + '/' + totalN + '）';
       }, function (res) {
-        if (idbEl) idbEl.textContent = res ? fmtBytes(res.total) + '（' + res.count + ' 键）' : '不可用';
-        snapIdb = (res && res.cats && res.cats['自动备份快照'] || {}).size || 0;
-        idbDone = true;
-        renderSnap();
-        renderCatTable(ls.cats, res ? res.cats : null);
+        if (idbEl) idbEl.textContent = res ? fmtBytes(res.total) + '（' + res.count + ' 键）' : '读取失败（未计入合计）';
+        showSelf(res ? { total: res.total, count: res.count } : null);
+        renderCatTable(ls.cats, res ? res.cats : null, !res);
+        // 可清理空间 · 本机音乐文件占用（本地音乐分类在 IndexedDB 里的 Blob 真实字节）
+        if (musicEl) {
+          const m = (res && res.cats && res.cats['本地音乐']) ? res.cats['本地音乐'].size : 0;
+          musicEl.textContent = res ? fmtBytes(m) : '读取失败（未计入）';
+        }
+        // v3.26.x 存储优化：媒体池占用（媒体池分类在 IndexedDB 里的真实字节）
+        if (mediaEl) {
+          const mc = (res && res.cats && res.cats[CAT_MEDIA]) ? res.cats[CAT_MEDIA] : null;
+          mediaEl.textContent = res ? (mc ? fmtBytes(mc.size) + '（' + mc.n + ' 条）' : '空') : '读取失败（未计入）';
+        }
       });
       renderDiagCount();
+      renderPersist();
     }
     function clearDiag() {
       DIAG_KEYS.forEach(function (k) {
@@ -5075,19 +6289,6 @@ try {
       try { if (window.mochiRefreshDiagBadge) window.mochiRefreshDiagBadge(); } catch (e) {}
       renderDiagCount();
       try { if (typeof toast === 'function') toast('错误诊断记录已清理'); } catch (e) {}
-    }
-    // v3.26.x：删除自动备份快照（副本，仅删这一份备份，真实数据全部保留）
-    async function deleteSnapshot() {
-      const k = 'xy-home-v2:__auto-backup-snapshot';
-      try { localStorage.removeItem(k); } catch (e) {}
-      // 等 IDB 删除事务落库后再重扫，避免刚删完又扫到旧快照显示"没删掉"
-      try { if (window.idbDelete) await window.idbDelete(k); } catch (e) {}
-      snapLs = 0; snapIdb = 0; idbDone = true;
-      const el = document.getElementById('st-snap');
-      if (el) el.textContent = '(已删除)';
-      renderSnap();
-      renderStorage();
-      try { if (typeof toast === 'function') toast('自动备份快照已删除，空间已释放'); } catch (e) {}
     }
     const clearBtn = document.getElementById('st-clear-err');
     if (clearBtn) {
@@ -5104,19 +6305,157 @@ try {
         }
       });
     }
-    // v3.26.x：删除自动备份快照按钮——二次确认后才删（只删副本，真实数据无损）
-    const snapBtn = document.getElementById('st-clear-snap');
-    if (snapBtn) {
-      snapBtn.addEventListener('click', function () {
-        if (window.openModal) {
-          window.openModal('删除自动备份快照？', '', function () { deleteSnapshot(); }, {
-            noInput: true,
-            staticText: '自动备份快照是全部数据的一份完整副本（当前约 ' + snapText + '，约占近一半空间）。\n删除它不会影响聊天、字卡、头像、音乐等任何真实数据，可立即释放约 ' + snapText + ' 的空间。\n注意：下次你再「导出数据」时会自动重建这份快照。'
-          });
+    // v3.32.x：可清理空间 · 到音乐播放器清理——复用桌面「音乐」App 入口跳到音乐页，
+    // 让用户在那里的 ⚙ 设置里一键清理本地音频缓存。不在本页直接删 IDB 音乐文件，
+    // 避免和音乐播放器的内存歌单/外链/种子歌逻辑脱节（属业务功能，交给音乐设置收口）。
+    const goMusicBtn = document.getElementById('st-goto-music');
+    if (goMusicBtn) {
+      goMusicBtn.addEventListener('click', function () {
+        const app = document.querySelector('.app[data-app="music"]');
+        if (app) {
+          document.querySelectorAll('.page').forEach(function (p) { p.hidden = true; });
+          try { app.click(); } catch (e) {}
         } else {
-          deleteSnapshot();
+          // 兜底：找不到桌面音乐入口时提示手动路径
+          if (window.openModal) window.openModal('找不到音乐入口', '', null, { noInput: true, staticText: '请回到桌面，点右上角「音乐」进入播放器，再点 ⚙ 设置 → 清理本地音频缓存。' });
         }
       });
+    }
+    // ===== v3.26.x 存储优化：媒体池孤儿清理（mark-and-sweep 在 media-pool.js：mochiMediaGC / mochiMediaGCApply）=====
+    const gcBtn = document.getElementById('st-media-gc');
+    if (gcBtn) {
+      gcBtn.addEventListener('click', function () {
+        const orphanEl = document.getElementById('st-media-orphan');
+        if (!window.mochiMediaGC || !window.mochiMediaGCApply) {
+          if (window.openModal) window.openModal('本环境不支持', '', null, { noInput: true, staticText: '媒体池扫描需要安全上下文（HTTPS）与 IndexedDB 支持，当前环境不可用。' });
+          return;
+        }
+        const oldTxt = gcBtn.textContent;
+        gcBtn.disabled = true;
+        gcBtn.textContent = '扫描中…（需通读聊天记录，请稍候）';
+        window.mochiMediaGC().then(function (rep) {
+          gcBtn.disabled = false;
+          gcBtn.textContent = oldTxt;
+          if (orphanEl) orphanEl.textContent = (rep && rep.ok) ? (rep.orphans.length ? fmtBytes(rep.bytes) + '（' + rep.orphans.length + ' 条）' : '无孤儿，池很干净') : ((rep && rep.reason) || '扫描失败');
+          if (!rep || !rep.ok) {
+            if (window.openModal) window.openModal('扫描未完成', '', null, { noInput: true, staticText: (rep && rep.reason || '未知原因') + '\n\n没有删除任何内容，稍后存储空闲时可再试。' });
+            return;
+          }
+          if (!rep.orphans.length) { if (typeof toast === 'function') toast('没有孤儿媒体，无需清理'); return; }
+          if (window.openModal) {
+            window.openModal('删除孤儿媒体？', '', function () {
+              gcBtn.disabled = true;
+              window.mochiMediaGCApply(rep.orphans).then(function (n) {
+                gcBtn.disabled = false;
+                if (orphanEl) orphanEl.textContent = '已清理 ' + n + ' 条，可重新扫描核对';
+                if (typeof toast === 'function') toast('已清理 ' + n + ' 条孤儿媒体，释放约 ' + fmtBytes(rep.bytes));
+              }).catch(function () { gcBtn.disabled = false; });
+            }, {
+              noInput: true,
+              staticText: '扫描到 ' + rep.orphans.length + ' 条不再被任何聊天记录/收藏引用的池内图片（约 ' + fmtBytes(rep.bytes) + '）。删除只影响媒体池副本，聊天记录与收藏本身不动；删除不可撤销，建议先导出备份。'
+            });
+          }
+        }).catch(function () {
+          gcBtn.disabled = false;
+          gcBtn.textContent = oldTxt;
+          if (orphanEl) orphanEl.textContent = '扫描异常';
+        });
+      });
+    }
+    // ===== v3.26.x 存储优化：持久存储（navigator.storage.persist——浏览器承诺不自动清库）=====
+    function renderPersist() {
+      const el = document.getElementById('st-persist');
+      const btn = document.getElementById('st-persist-btn');
+      if (!el) return;
+      if (!(navigator.storage && navigator.storage.persisted && navigator.storage.persist)) {
+        el.textContent = '接口不可用';
+        if (btn) btn.hidden = true;
+        return;
+      }
+      navigator.storage.persisted().then(function (p) {
+        el.textContent = p ? '已持久化（浏览器承诺不自动清理）' : '未持久化（空间紧张时可能被浏览器自动清理）';
+        if (btn) btn.hidden = !!p;
+      }).catch(function () { el.textContent = '读取失败'; if (btn) btn.hidden = true; });
+    }
+    const persistBtn = document.getElementById('st-persist-btn');
+    if (persistBtn) {
+      persistBtn.addEventListener('click', function () {
+        if (!(navigator.storage && navigator.storage.persist)) return;
+        navigator.storage.persist().then(function (ok) {
+          if (typeof toast === 'function') toast(ok ? '已获得持久存储' : '浏览器暂未授予：多访问、多使用本应用后再试');
+          renderPersist();
+        }).catch(function () { renderPersist(); });
+      });
+    }
+    // ===== #168 字卡库瘦身（后端 src/js/storage-slim.js：mochiCcSlimScan / mochiCcSlimDeleteGroup）=====
+    const ccScanBtn = document.getElementById('st-cc-scan');
+    if (ccScanBtn) {
+      const ccListEl = document.getElementById('st-cc-list');
+      const CC_CAT_CN = { text: '文字', kaomoji: '颜文字', emoji: '表情', sticker: '表情包', image: '图片', poke: '拍一拍', voice: '语音' };
+      const runCcScan = function () {
+        if (!window.mochiCcSlimScan || !window.mochiCcSlimDeleteGroup) {
+          if (window.openModal) window.openModal('本环境不支持', '', null, { noInput: true, staticText: '字卡库扫描需要 IndexedDB 支持，当前环境不可用。' });
+          return Promise.resolve(null);
+        }
+        const ccEl = document.getElementById('st-cc');
+        ccScanBtn.disabled = true;
+        if (ccEl) ccEl.textContent = '扫描中…（大库较慢，勿离开本页）';
+        if (ccListEl) ccListEl.innerHTML = '';
+        return window.mochiCcSlimScan().then(function (rep) {
+          ccScanBtn.disabled = false;
+          if (!rep || !rep.ok) {
+            if (ccEl) ccEl.textContent = (rep && rep.reason) || '扫描失败';
+            return rep;
+          }
+          if (ccEl) ccEl.textContent = rep.libs.length ? rep.libs.map(function (l) { return l.label + ' ' + fmtBytes(l.bytes); }).join(' · ') : '未发现字卡库';
+          if (rep.reason && typeof toast === 'function') toast(rep.reason);
+          if (ccListEl) {
+            const tops = rep.groups.slice(0, 12);
+            if (!tops.length) {
+              const h = document.createElement('div');
+              h.className = 'storage-hint';
+              h.textContent = '没有扫到可列的分组。';
+              ccListEl.appendChild(h);
+            }
+            tops.forEach(function (gdata) {
+              const row = document.createElement('div');
+              row.className = 'storage-row';
+              const sp = document.createElement('span');
+              sp.textContent = gdata.label + ' · ' + (CC_CAT_CN[gdata.cat] || gdata.cat) + '「' + gdata.name + '」· ' + gdata.cards + ' 张';
+              const bb = document.createElement('b');
+              bb.textContent = fmtBytes(gdata.bytes);
+              row.appendChild(sp);
+              row.appendChild(bb);
+              ccListEl.appendChild(row);
+              const btn = document.createElement('button');
+              btn.className = 'storage-clear';
+              btn.type = 'button';
+              btn.textContent = '删除「' + gdata.name + '」整组';
+              btn.addEventListener('click', function () {
+                if (!window.openModal) return;
+                window.openModal('删除整组字卡？', '', function () {
+                  btn.disabled = true;
+                  window.mochiCcSlimDeleteGroup(gdata.prefix, gdata.key, gdata.cat, gdata.name).then(function (done) {
+                    if (typeof toast === 'function') toast(done ? '已删除「' + gdata.name + '」整组' : '删除未生效（组可能刚被改过），已重新扫描');
+                    runCcScan();
+                  }).catch(function () { btn.disabled = false; });
+                }, {
+                  noInput: true,
+                  staticText: '将删除 ' + gdata.label + ' · ' + (CC_CAT_CN[gdata.cat] || gdata.cat) + ' 分组「' + gdata.name + '」（' + gdata.cards + ' 张，约 ' + fmtBytes(gdata.bytes) + '）。与在字卡管理页删掉该组效果相同，不可撤销，建议先导出备份。'
+                });
+              });
+              ccListEl.appendChild(btn);
+            });
+          }
+          return rep;
+        }).catch(function () {
+          ccScanBtn.disabled = false;
+          const ccEl2 = document.getElementById('st-cc');
+          if (ccEl2) ccEl2.textContent = '扫描异常';
+          return null;
+        });
+      };
+      ccScanBtn.addEventListener('click', runCcScan);
     }
     if (row) {
       row.addEventListener('click', function () {
@@ -5292,7 +6631,7 @@ try {
       if (!isNaN(d.getTime())) {
         let ann = new Date(now.getFullYear(), d.getMonth(), d.getDate());
         if (ann.getTime() < now.getTime()) ann.setFullYear(ann.getFullYear() + 1);
-        cands.push({ name: '恋爱纪念日', date: ann });
+        cands.push({ name: relLabel(), date: ann });
       }
     }
     try {
@@ -5345,8 +6684,15 @@ try {
     try { applyWidgetBtn(store.get('widget-btn-color') || '#111111'); } catch (e) {}
     try { applyWidgetBtnText(store.get('widget-btn-text-color') || '#ffffff'); } catch (e) {}
     try { applyWidgetHeart(store.get('widget-heart-color') || '#111111'); } catch (e) {}
-    try { const op = store.get('widget-opacity'); if (op) applyWidgetOpacity(parseInt(op, 10)); } catch (e) {}
+    // FIX 2026-09-04 #151：透明度等美化键按桌面独立，但 CSS 变量挂在 documentElement
+    // 全局——此前切到「没有该键」的桌面时跳过应用，上一桌面的值残留 → 切回桌面小组件
+    // 变透明/隐身（opacity 元素不可见但仍可点中）、不同桌面显示互相串。缺键必须复位默认。
+    try { const op = store.get('widget-opacity'); if (op) { const opPct = opacityRawToPct(op); if (!isNaN(opPct)) applyWidgetOpacity(opPct); } else applyWidgetOpacity(100); } catch (e) {} // #146：兼容历史小数脏值（切桌面重应用）
     try { applyIcoRadius(getIcoRadius()); } catch (e) {}
+    // FIX 2026-09-04 #151：背景模糊/遮罩/卡片圆角同族——按桌面重应用，缺键走各自 getter 默认值
+    try { applyBgBlur(getBgBlur()); } catch (e) {}
+    try { applyBgMaskOp(getBgMaskOp()); } catch (e) {}
+    try { applyCardRadius(getCardRadius()); } catch (e) {}
     try {
       const btn = document.querySelector('.checkin .ck-btn');
       if (btn) {
@@ -5367,6 +6713,7 @@ try {
     // 切换联系人后必须按新桌面的 store 重新渲染（store 动态绑定当前联系人）
     try { updateFishDays(); } catch (e) {}
     try { updateLove(); } catch (e) {}
+    try { syncRelUI(); } catch (e) {}
     try { renderQuoteOfDay(); } catch (e) {}
     try { renderExtras(); } catch (e) {}
     try { renderDeskWidgets(); } catch (e) {}

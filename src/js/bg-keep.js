@@ -35,6 +35,7 @@
   let keepAudio = null;
   let keepInterval = null;
   let keepEnabled = false;
+  let keepUserTouched = false; // v3.26.x #88：本会话用户手动动过保活开关 → 回填后不重读覆盖
   let wakeSentinel = null; // v3.5.131：模块级，供 stopKeepAlive 释放
 
   // v3.13.x：保活补播改指数退避——原来每 5 秒无条件 play() 抢回播放权，但安卓上网页
@@ -67,6 +68,12 @@
       kaPauseStreak++;
       delayMs = Math.min(cfg.base * Math.pow(2, Math.min(kaPauseStreak - 1, 10)), cfg.max);
     }
+    // FIX 2026-09-04 #153 Chromium 139 起安卓后台页面冻结从 5 分钟缩到 1 分钟（stop-in-background，
+    // Chrome for Android 139 / Edge 等内核跟进）——保活音频暂停超过冻结线页面即被整个冻结
+    // （定时器全停=后台消息/通知全停）。页面隐藏期间补播退避封顶 20s（前台仍 60s 不变，
+    // 不回归 v3.13.x 音频拉锯修复）：保证冻结线内至少 2~3 次重试，音频焦点一让位就能恢复
+    // 「正在播放」豁免躲过冻结。
+    if (document.visibilityState === 'hidden' && delayMs > 20000) delayMs = 20000;
     kaDelay = delayMs;
     window.__kaNextDelayMs = delayMs; // 回归探针
     kaTimer = setTimeout(function () {
@@ -177,10 +184,16 @@
 
   // v3.9.x：设置"后台保活"媒体会话条。音乐播放时（__musicPlaying）让位给 music-player
   // 的歌曲 metadata + 控制 handler，避免通知栏按钮空响应无法控制音乐。
+  // v3.28.x：音乐「还有播放意图」（__musicWantPlay=true，仅被外部打断短暂暂停）时同样
+  // 让位——否则一次后台瞬断就会把歌曲媒体条覆盖成「Mochi 后台保活」，音乐恢复后元数据
+  // 不再回来，通知栏媒体条时有时无（Chrome 把页面当闲置标签冻结 → 音乐停播）。让位窗口内
+  // 保活音频照常出声（页面持续输出音频，防冻结），歌曲条由 music-player 的 onplay 恢复。
+  function musicIntentPlaying() { try { return !!window.__musicWantPlay; } catch (e) { return false; } }
   function setKeepMediaSession() {
     try {
       if (!('mediaSession' in navigator) || !navigator.mediaSession || !window.MediaMetadata) return;
       if (window.__musicPlaying) return; // 音乐在播，保留音乐的媒体条
+      if (musicIntentPlaying()) return; // 音乐还想播（瞬断暂停中），不覆盖歌曲媒体条
       navigator.mediaSession.metadata = new window.MediaMetadata({
         title: 'Mochi 后台保活',
         artist: 'mochi',
@@ -398,6 +411,21 @@
   window.addEventListener('pageshow', function (e) {
     if (e.persisted || document.visibilityState === 'visible') _onFgVisible();
   });
+  // FIX 2026-09-04 #153 切后台方向保活自愈——原只有回前台的 healKeepAlive，切后台没有：
+  // 若切后台瞬间音频正处暂停（前台被其他 App 抢过音频焦点、退避已在最长 60s 轨道），
+  // 这段静默窗口会直接跨过 Chromium 139 的 1 分钟冻结线 → 页面整个被冻结（定时器全停，
+  // 后台消息/系统通知全停，回前台解冻后积压定时器一口气补跑——用户报障形态）。
+  // 这里切后台时：清退避轨道 + 立即补播一次 + 按最快档（5s）排下一次，把隐藏期静默窗口
+  // 压到 20s 封顶（见 kaSchedule 内隐藏期钳制）；音乐在播时跳过（媒体会话由音乐维持）。
+  document.addEventListener('visibilitychange', function () {
+    if (document.visibilityState !== 'hidden') return;
+    if (!keepEnabled || !keepAudio || !keepAudio.el || musicNowPlaying()) return;
+    if (!keepAudio.el.paused) return;
+    kaResetBackoff();
+    const p = keepAudio.el.play();
+    if (p && p.catch) p.catch(function () {});
+    kaSchedule();
+  });
   function requestWakeLockTop() {
     try {
       if (navigator.wakeLock && document.visibilityState === 'visible' && keepEnabled) {
@@ -418,6 +446,7 @@
   function syncKeepUI() { if (kaBtn) kaBtn.checked = keepEnabled; }
   if (kaBtn) {
     kaBtn.addEventListener('change', function () {
+      keepUserTouched = true; // #88：手动动过 → 回填后不再重读覆盖
       keepEnabled = kaBtn.checked;
       gSet('bg-keepalive', keepEnabled ? '1' : '0');
       if (keepEnabled) startKeepAlive(true);
@@ -439,6 +468,7 @@
 
   // ================= 后台通知 =================
   let notifyEnabled = false;
+  let notifyUserTouched = false; // v3.26.x #88：本会话用户手动动过通知开关 → 回填后不重读覆盖
   // v3.5.151：系统通知左侧图标用「带 mochi 字母的完整图标」（icon-512.png，
   // 与手机桌面快捷方式图标一致）。之前用 icon-192.png（纯心形小图标），
   // 用户看到的左侧是"爱心"而非带字母的 mochi 图标
@@ -611,6 +641,7 @@
   function syncNotifyUI() { if (nbBtn) nbBtn.checked = notifyEnabled; }
   if (nbBtn) {
     nbBtn.addEventListener('change', function () {
+      notifyUserTouched = true; // #88：手动动过 → 回填后不再重读覆盖
       if (nbBtn.checked) {
         requestNotifyPermission(function () {
           notifyEnabled = true;
@@ -665,6 +696,51 @@
     }
     syncNotifyUI();
   })();
+
+  // ===== v3.26.x 修复 #88：IDB 回填完成后重读一次两个开关 =====
+  // 症状：小米 14U Edge 反馈「后台通知有时候会自己关闭」。上面两个初始化 IIFE 在模块
+  // 加载时同步读值，而本机 localStorage 已彻底不可用（诊断：xy-home-v2 键数 0 + 写探针
+  // QuotaExceededError）——值只能等 idbRestore 异步回填进内存缓存，回填必然晚于这次同步
+  // 读 → saved===null → 判成「关」（bg-keepalive / bg-notify 在 IndexedDB 里一直是新值，
+  // xyStore.set 双写过）。「有时候」= 那次回填恰好赶在读值之前（或 LS 还有残值）。
+  // 方案：回填完成 / #40 写日志合并后再读一次，按差量重新应用。差量式实现可重复调用，
+  // 所以三个触发点（含回填挂起设备的定时兜底）都直接调它，不做「只跑一次」的状态机。
+  // 边界：用户本会话手动动过某个开关 → 该开关不再重读覆盖（他的操作就是最新值）。
+  function reheatBgSwitches() {
+    if (!keepUserTouched) {
+      const wantKeep = gGet('bg-keepalive') === '1';
+      if (wantKeep !== keepEnabled) {
+        keepEnabled = wantKeep;
+        syncKeepUI();
+        if (wantKeep) startKeepAlive(false);
+        else stopKeepAlive(false);
+        try { console.info('[mochi] #88 回填后重读后台保活：' + (wantKeep ? '开' : '关')); } catch (e) {}
+      }
+    }
+    if (!notifyUserTouched) {
+      // 与初始化同款权限校验：系统/浏览器回收权限后不得把开关显示成「开」
+      const savedNotify = gGet('bg-notify');
+      const wantNotify = savedNotify === '1' &&
+        'Notification' in window && Notification.permission === 'granted';
+      if (wantNotify !== notifyEnabled) {
+        notifyEnabled = wantNotify;
+        syncNotifyUI();
+        if (wantNotify) getBadgeUrl(function () {}); // 预热 badge 单色图（同初始化）
+        try { console.info('[mochi] #88 回填后重读后台通知：' + (wantNotify ? '开' : '关')); } catch (e) {}
+      }
+      // 权限已被回收：静默把 IDB/LS 的「开」改回「关」保持存储与 UI 一致，
+      // 但不再重复 toast（初始化那次已经提示过）
+      if (savedNotify === '1' && !wantNotify) {
+        try { gSet('bg-notify', '0'); } catch (e) {}
+      }
+    }
+  }
+  try {
+    if (window.__mochiDataReady) setTimeout(reheatBgSwitches, 0);
+    else document.addEventListener('mochi-restore-done', function () { reheatBgSwitches(); });
+    document.addEventListener('mochi-wrj-heal', function () { reheatBgSwitches(); });
+    setTimeout(reheatBgSwitches, 16000); // 回填整体挂起设备的兜底
+  } catch (e) {}
   // v3.5.115：后台通知「测试」按钮——点一下发条测试通知 + 环境诊断，
   //   安卓 Chrome 上通知不生效时一键定位卡在哪一环（HTTPS/权限/后台保活）
   // v3.5.116：增强诊断——权限未授权时主动请求；发送后追加系统级通知检查提示
@@ -1030,12 +1106,16 @@
     if (document.visibilityState === 'visible') { markSeen(nkey); return; }
     if (!('Notification' in window) || Notification.permission !== 'granted') return;
     gateStats.total++;
+    // v3.31.x：extra.force —— 一次性事件（如来电通知）不适用过渡期/去重闸门：
+    // 来电是「错过就没了」的单发事件，切后台头 15 秒内命中、或与近期通知文案
+    // 相同（「XX 来电了」高频重复）都不该被拦。消息类通知仍走原三道闸门。
+    const force = !!extra.force;
     // v3.16.x：过渡期闸门改用「切后台时刻」——lastVisibleAt 是最近一次回前台时间，
     // 前台久驻后（如看了 10 分钟）它很旧，切后台瞬间积压的定时器批量到点产生的
     // 一堆消息会全部通过闸门 → 弹出大量看过的内容。改为切后台头 15 秒内一律不弹
-    if (lastHiddenAt > 0 && Date.now() - lastHiddenAt < NOTIFY_HIDDEN_MIN_MS) { gateStats.tooFresh++; return; }
-    if (notifiedDup(nkey) || seenDup(nkey)) { gateStats.dup++; return; }
-    if (recentChatDup(nkey, ts)) { gateStats.dup++; return; }
+    if (!force && lastHiddenAt > 0 && Date.now() - lastHiddenAt < NOTIFY_HIDDEN_MIN_MS) { gateStats.tooFresh++; return; }
+    if (!force && (notifiedDup(nkey) || seenDup(nkey))) { gateStats.dup++; return; }
+    if (!force && recentChatDup(nkey, ts)) { gateStats.dup++; return; }
     gateStats.sent++;
     // v3.19.x：累加「本次后台实际发送的通知数」——回前台汇总用它（见 visibilitychange
     // 处理器），发送者名取本次通知标题
@@ -1273,7 +1353,7 @@
     }
     if (!psyncEnabled()) { el.textContent = '已关闭 · 页面全关后不再收到 TA 的消息提醒'; return; }
     if (!psyncStandalone()) { el.textContent = '需先添加到主屏生效：浏览器菜单「添加到主屏幕」，再从桌面图标打开本应用，然后重新打开此开关'; return; }
-    if (state === 'denied') { el.textContent = '系统拒绝了后台调度：请去 系统设置→应用→浏览器 里允许通知，并关闭「省电/后台清理」后重试'; return; }
+    if (state === 'denied') { el.textContent = '已开启 · 但后台调度被系统/浏览器拒绝：多半是通知权限被关了。请 ①在本应用网址栏左侧打开「网站设置」→通知→允许；②手机 系统设置→应用→Edge/Chrome→通知→允许；③该应用开启「不受限制/省电」；再回来关闭并重新打开此开关'; return; }
     if ('Notification' in window && Notification.permission !== 'granted') {
       el.textContent = '已开启 · 还需允许系统通知（会弹授权，点「允许」才能收到提醒弹窗）';
       return;

@@ -147,8 +147,11 @@
       // 头像历史标准归属是根命名空间 store，storeFor('default') 读「default 桌面」会取不到，
       // 导致「联系人发送朋友圈」的通知弹窗右侧不显示发布者头像（用户反馈）。未取到且为
       // default 时补根键回退；非 default 联系人仍只读各自桌面，不串头像。
-      let v = s.get('feed-ta-avatar') || s.get('avatar-partner') || '';
-      if (!v && o === 'default') v = store.get('feed-ta-avatar') || store.get('avatar-partner') || '';
+      // v3.27.x：补读聊天专用键 cs-avatar-partner（v3.12.x 起换头像只写该键，桌面
+      // avatar-partner 独立不再跟随）——否则发布者如只在聊天里换过头像，此处分取不到，
+      // 后台通知会回退成当前桌面联系人头像（用户反馈：通知头像显示成当前桌面的 TA）。
+      let v = s.get('feed-ta-avatar') || s.get('avatar-partner') || s.get('cs-avatar-partner') || '';
+      if (!v && o === 'default') v = store.get('feed-ta-avatar') || store.get('avatar-partner') || store.get('cs-avatar-partner') || '';
       if (v && typeof v === 'string' && v.length > 500 * 1024) return '';
       return v || '';
     } catch (e) { return ''; }
@@ -459,7 +462,11 @@
       const a = (window.defaultCardApiFor && st) ? window.defaultCardApiFor(st) : null;
       const useFeed = a ? a.use('feed') : (window.defaultCardUse ? window.defaultCardUse('feed') : true);
       const en = a ? a.enabled() : ((window.defaultCardCfg && window.defaultCardCfg().enabled) !== false);
-      if (en && useFeed && window.getDefaultCardGroups) {
+      // v3.28.x：朋友圈使用概率——读 dc-overall-feed（未设置=100，维持「始终混入」历史行为；
+      //   用户可在默认字卡设置页单独调低朋友圈默认字卡占比）
+      let feedOverall = 100;
+      try { const fv = st ? st.get('dc-overall-feed') : null; if (fv !== null) feedOverall = Math.max(0, Math.min(100, Number(fv))); } catch (e) {}
+      if (en && useFeed && Math.random() * 100 < feedOverall && window.getDefaultCardGroups) {
         const gd = window.getDefaultCardGroups;
         const catOn = a ? a.cat : (window.defaultCardCat || (() => true));
         const isOff = a ? a.isOff : (window.isDefaultCardOff || null);
@@ -1044,7 +1051,16 @@ function comStickerGroups() {
     .map(([n, a]) => [n, (a || []).filter(s => typeof s === 'string' && s.indexOf('data:') === 0)])
     .filter(([, a]) => a.length);
   if (comStickerTab === 'ta') return onlyData((window.getMediaGroups && window.getMediaGroups('sticker')) || []);
-  // v3.12.x：我的表情包改全局键（与聊天面板同源，各桌面互通）
+  // FIX 2026-09-04 #154 朋友圈评论「我的表情包」与聊天面板不同步——优先取 chat.js
+  // 维护的最新内存副本（window.getMyEmojiGroups，启动/打开时已用 IDB 权威值自愈；
+  // store 层对该键可能停在旧 LS 快照或大键驻留挂起，读不到新值）。chat.js 异常时
+  // 保留旧 store 读路径兜底，行为不变。
+  try {
+    if (window.getMyEmojiGroups) {
+      const g = window.getMyEmojiGroups();
+      if (Array.isArray(g) && g.length) return onlyData(g);
+    }
+  } catch (e) {}
   try {
     const v = JSON.parse(window.xyStore('xy-home-v2').get('my-emoji-groups') || 'null');
     return Array.isArray(v) ? onlyData(v) : [];
@@ -1342,8 +1358,10 @@ if (comInput) comInput.addEventListener('keydown', (e) => { if (e.key === 'Enter
     // v3.5.107：新增朋友圈通知且不在朋友圈页 → 前台桌面弹窗（点击进朋友圈）
     if (window.showDeskPopup && !feedPageVisible()) {
       // v3.7.x：弹窗头像带发布者 TA 头像（跨桌面动态弹窗不显示当前桌面 TA 头像）
+      // v3.27.x：avFixed 防误回退——发布者头像为空时不回退当前桌面头像（bgNotifyCheck
+      // 无 avFixed 时 av 为空会兜底成当前桌面的 cs-avatar-partner，导致跨桌面显示错头像）
       const av = owner ? taAvFor(owner) : '';
-      window.showDeskPopup({ name: '朋友圈', text: (window.taFit ? window.taFit(noticeTextClean(text), owner) : noticeTextClean(text)), av: av, onClick: openFeedPage, isHidden: document.visibilityState === 'hidden' });
+      window.showDeskPopup({ name: '朋友圈', text: (window.taFit ? window.taFit(noticeTextClean(text), owner) : noticeTextClean(text)), av: av, avFixed: true, onClick: openFeedPage, isHidden: document.visibilityState === 'hidden' });
     } else if (feedPageVisible() && document.visibilityState !== 'hidden') {
       // v3.13.x：人在朋友圈页内时顶部横幅按设计不弹（v3.5.107，防遮挡）——但 TA
       // 评论/回复/点赞到达毫无感知（用户反馈：联系人回复我朋友圈评论没有提示，
@@ -2324,4 +2342,14 @@ if (comInput) comInput.addEventListener('keydown', (e) => { if (e.key === 'Enter
       return { text: p.text.indexOf(s) >= 0, kaomoji: p.kaomoji.indexOf(s) >= 0, emoji: p.emoji.indexOf(s) >= 0 };
     } catch (e) { return null; }
   };
+  // v3.26.x(#122)：注册朋友圈内置互动回应池跨分类搜索（字卡库列表页搜索同源可查，不再搜不到）
+  window.__cardSearchFns = window.__cardSearchFns || [];
+  window.__cardSearchFns.push({ name: '朋友圈互动', fn: function (kw) {
+    const out = [];
+    try {
+      TA_COMMENT_POOL.forEach(c => { if (String(c).toLowerCase().indexOf(kw) >= 0) out.push({ t: String(c), cat: 'TA评论' }); });
+      TA_REPLY_POOL.forEach(c => { if (String(c).toLowerCase().indexOf(kw) >= 0) out.push({ t: String(c), cat: 'TA回应回复' }); });
+    } catch (e) {}
+    return out;
+  } });
 })();

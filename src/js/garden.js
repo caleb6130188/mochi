@@ -48,8 +48,10 @@ function isJunkGardenStr(raw) {
 }
 function junkEmpty() { try { return isJunkGardenStr(s.get(G)); } catch (e) { return false; } }
 function toast(msg) { try { var t = document.getElementById("cc-toast"); if (!t) { t = document.createElement("div"); t.id = "cc-toast"; document.body.appendChild(t); } t.textContent = msg; t.className = "cc-toast"; void t.offsetWidth; t.className = "cc-toast show"; clearTimeout(t._timer); t._timer = setTimeout(function () { t.className = "cc-toast"; }, 2000); } catch (e) {} }
-// 从 IDB 判定当前桌面的 garden-data：命中→回填 LS（先回查防覆盖期间新写入）→解锁；
-// 未命中→重试一次仍无→解锁并尝试从自动备份副本定向找回。cb(值或null) 在判定完成后回调。
+// 从 IDB 判定当前桌面的 garden-data：命中→回填 LS（先回查防覆盖期间新写入）→解锁。
+// cb(值或null) 在判定完成后回调。
+// v3.29.x：原「未命中则从自动备份副本定向找回花园」已随副本机制一并下线（副本不再写入，
+// 遗留副本体积可达数百 MB，整包 JSON.parse 是 OOM/长任务风险源）。
 var _probeCbs = null;
 function probeIdb(cb) {
   if (cb) { if (_probeCbs) { _probeCbs.push(cb); return; } _probeCbs = [cb]; }
@@ -58,7 +60,6 @@ function probeIdb(cb) {
     saveLock = false;
     var cbs = _probeCbs || []; _probeCbs = null;
     for (var i = 0; i < cbs.length; i++) { try { cbs[i](v); } catch (e) {} }
-    if (!v) offerSnapshotRecover(pf);
   }
   try {
     if (!window.idbGet) { done(null); return; }
@@ -81,33 +82,6 @@ function probeIdb(cb) {
       }).catch(function () { if (attempt < 2) setTimeout(run, 300); else done(null); });
     })();
   } catch (e) { done(null); }
-}
-// 定向找回：IDB 判定为空但自动备份副本里有本桌面花园（含花）时，弹窗询问恢复（每会话一次）
-function offerSnapshotRecover(pf) {
-  try {
-    if (sessionStorage.getItem("xy-garden-recover-offered")) return;
-    sessionStorage.setItem("xy-garden-recover-offered", "1");
-    if (!window.idbGet || !window.openModal) return;
-    window.idbGet("xy-home-v2:__auto-backup-snapshot").then(function (raw) {
-      if (!raw || window.activePrefix() !== pf || !junkEmpty()) return;
-      var snap; try { snap = JSON.parse(typeof raw === "string" ? raw : JSON.stringify(raw)); } catch (e) { return; }
-      var key = pf + ":" + G;
-      var val = (snap.ls && snap.ls[key]) || (snap.idb && snap.idb[key]);
-      if (!val || typeof val !== "string") return;
-      var d; try { d = JSON.parse(val); } catch (e) { return; }
-      var hasFlower = false;
-      if (d && d.p) for (var i = 0; i < d.p.length; i++) if (d.p[i]) { hasFlower = true; break; }
-      if (!hasFlower) return;
-      window.openModal("找回花园", "", function () {
-        if (window.activePrefix() !== pf || !junkEmpty()) return;
-        try { s.set(G, val); } catch (e) {}
-        try { if (window.idbSet) window.idbSet(key, val); } catch (e2) {}
-        dataPf = null; data = load(); selPlot = -1;
-        if (!page.hidden) renderAll();
-        toast("花园数据已找回 🌸");
-      }, { noInput: true, staticText: "这个桌面的花园现在是空的，但在自动备份副本里发现了它种着花的样子。\n\n要恢复吗？（会用副本覆盖当前的空花园）" });
-    }).catch(function () {});
-  } catch (e) {}
 }
 (function r() { try { if (!junkEmpty()) { dataPf = window.activePrefix(); saveLock = false; return; } probeIdb(function (v) { if (v) { try { data = load(); } catch (e) {} } }); } catch (e) { saveLock = false; } })();
 
@@ -1132,19 +1106,22 @@ function renderCraft() {
   var h = '<div class="garden-craft-title">\uD83D\uDC83 \u82B1\u827A\u914D\u65B9</div><div class="garden-craft-list">';
   RECIPES.forEach(function (r) {
     var canMake = true;
-    var needTxt = [];
+    var needTxt = [], lackTxt = [];
     Object.keys(r.need).forEach(function (k) {
       var have = data.inv[k] || 0;
-      if (have < r.need[k]) canMake = false;
+      var need = r.need[k];
+      if (have < need) { canMake = false; lackTxt.push((T[k] ? T[k].e[T[k].e.length - 1] : "") + "\u00d7" + (need - have)); }
       var tp = T[k];
-      needTxt.push((tp ? tp.e[tp.e.length - 1] : "") + "\u00d7" + r.need[k]);
+      needTxt.push('<span class="rq' + (have < need ? " short" : "") + '">' + (tp ? tp.e[tp.e.length - 1] : "") + " " + have + "/" + need + '</span>');
     });
     var made = !!data.recipes[r.id];
     h += '<div class="garden-recipe' + (canMake ? " can" : "") + (made ? " made" : "") + '">';
     h += '<div class="recipe-head"><span class="recipe-emoji">' + r.e + '</span><span class="recipe-name">' + r.n + '</span>' + (made ? '<span class="recipe-made">\u2713\u5DF2\u5408\u6210</span>' : "") + '</div>';
     h += '<div class="recipe-need">' + needTxt.join(" ") + '</div>';
+    if (!canMake && lackTxt.length) h += '<div class="recipe-lack">\u6750\u6599\u4E0D\u8DB3\uFF0C\u8FD8\u7F3A ' + lackTxt.join("\u3001") + '\uFF08\u5728\u82B1\u56ED\u79CD\u4E0B\u5E76\u6536\u83B7\u540E\u53EF\u5408\u6210\uFF09</div>';
     h += '<div class="recipe-wish">' + r.wish + '</div>';
     if (canMake) h += '<button class="recipe-btn" data-recipe="' + r.id + '">\u5408\u6210\u82B1\u675F</button>';
+    else h += '<button class="recipe-btn" disabled>\u6750\u6599\u4E0D\u8DB3</button>';
     h += '</div>';
   });
   h += '</div>';

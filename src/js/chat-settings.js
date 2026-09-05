@@ -58,6 +58,43 @@
       ? { inBg: '#2a2a2a', inInk: '#f0f0f0', outBg: '#3a3a3a', outInk: '#ffffff', timeInk: '#8a8a8a', sendBg: '#f0f0f0', sendInk: '#111111' }
       : { inBg: '#ffffff', inInk: '#111111', outBg: '#111111', outInk: '#ffffff', timeInk: '#111111', sendBg: '#111111', sendInk: '#ffffff' };
   }
+  // v3.26.x：单聊气泡对比度自愈——出站/入站文字色与背景色同色或极低对比（用户误设/导入美化方案）
+  // 时注入高优先级覆盖样式强制文字可见。群聊有 GC_MIN_CONTRAST 保护（group-chat.js），单聊此前没有，
+  // 导致出站消息文字与背景同色看不见（入站因 dark.css:87 覆盖 background 通常不受影响）。
+  function _csHexRgb(h) {
+    if (!h || typeof h !== 'string') return null;
+    var s = h.trim(); if (s.charAt(0) === '#') s = s.slice(1);
+    if (s.length === 3) s = s[0] + s[0] + s[1] + s[1] + s[2] + s[2];
+    if (s.length !== 6) return null;
+    var n = parseInt(s, 16); if (isNaN(n)) return null;
+    return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
+  }
+  function _csRelLum(rgb) {
+    if (!rgb) return 0;
+    function ch(c) { c = c / 255; return c <= 0.03928 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4); }
+    return 0.2126 * ch(rgb[0]) + 0.7152 * ch(rgb[1]) + 0.0722 * ch(rgb[2]);
+  }
+  function _csContrast(c1, c2) {
+    var l1 = _csRelLum(_csHexRgb(c1)), l2 = _csRelLum(_csHexRgb(c2));
+    if (l1 === 0 && l2 === 0) return 0;
+    return (Math.max(l1, l2) + 0.05) / (Math.min(l1, l2) + 0.05);
+  }
+  function _csHiInk(bg) {
+    var rgb = _csHexRgb(bg); return (rgb && _csRelLum(rgb) < 0.5) ? '#ffffff' : '#111111';
+  }
+  function _ensureBubbleContrast() {
+    var fix = document.getElementById('cs-contrast-fix'), rules = [];
+    var ob = root.style.getPropertyValue('--msg-out-bg') || '#111111';
+    var oi = root.style.getPropertyValue('--msg-out-ink') || '#ffffff';
+    if (_csContrast(oi, ob) < 1.5) rules.push('.msg-out .msg-bubble.msg-bubble{color:' + _csHiInk(ob) + '!important}');
+    var ib = root.style.getPropertyValue('--msg-in-bg') || '#ffffff';
+    var ii = root.style.getPropertyValue('--msg-in-ink') || '#111111';
+    if (_csContrast(ii, ib) < 1.5) rules.push('.msg-in .msg-bubble.msg-bubble{color:' + _csHiInk(ib) + '!important}');
+    if (rules.length) {
+      if (!fix) { fix = document.createElement('style'); fix.id = 'cs-contrast-fix'; document.head.appendChild(fix); }
+      fix.textContent = rules.join('\n');
+    } else if (fix) fix.remove();
+  }
   function applySettings() {
     // 设置页值写入（定义在最前，避免暂时性死区）
     const set = (id, v) => { const el = document.getElementById(id); if (el) el.textContent = v; };
@@ -144,6 +181,7 @@
     set('cs-bg-val', bg ? '已设置' : '');
     const rm = document.getElementById('cs-bg-remove');
     if (rm) rm.hidden = !bg;
+    _ensureBubbleContrast();
   }
   window.applyChatSettings = applySettings;
   applySettings();
@@ -246,11 +284,13 @@
   // 头像压缩与桌面 bindAvatar 一致（256px JPEG 0.85），内联实现避免依赖 personalize.js 导出。
   function compressHead(dataUrl, maxSide) {
     return new Promise((resolve) => {
-      if (typeof dataUrl === 'string' && dataUrl.length > 8 * 1024 * 1024) { resolve(null); return; }
+      // v3.26.x：放宽 dataURL 上限 8MB→50MB、移除原图总像素上限（原 2600万像素把
+      // 4800/5000 万像素手机主摄原图误拒 → 头像选完不生效，而同文件聊天背景上传无此
+      // 限制能传）。drawImage 缩放到 maxSide 小 canvas 不会 OOM，try-catch + onerror 兜底。
+      if (typeof dataUrl === 'string' && dataUrl.length > 50 * 1024 * 1024) { resolve(null); return; }
       const img = new Image();
       img.onload = () => {
         try {
-          if (img.width * img.height > 26000000) { resolve(null); return; }
           const scale = Math.min(1, maxSide / Math.max(img.width, img.height));
           const w = Math.max(1, Math.round(img.width * scale));
           const h = Math.max(1, Math.round(img.height * scale));
@@ -456,6 +496,20 @@
     });
     document.addEventListener('contact-switched', syncCsSendShow);
   }
+  // 回车键发送开关（默认开；关闭后按回车不发送，改为换行/不动作）。每联系人独立。
+  const csEnterSend = document.getElementById('cs-enter-send');
+  if (csEnterSend) {
+    const enterGet = () => { try { return store.get('cs-enter-send') !== 'off'; } catch (e) { return true; } };
+    const enterSet = (on) => { try { store.set('cs-enter-send', on ? 'on' : 'off'); } catch (e) {} };
+    const syncCsEnterSend = () => { const v = enterGet(); if (v !== csEnterSend.checked) csEnterSend.checked = v; };
+    syncCsEnterSend();
+    csEnterSend.addEventListener('change', () => {
+      if (csEnterSend.checked === enterGet()) return;
+      enterSet(csEnterSend.checked);
+      toast(csEnterSend.checked ? '回车键发送已开启' : '回车键发送已关闭：按回车键改为换行');
+    });
+    document.addEventListener('contact-switched', syncCsEnterSend);
+  }
 
   const csFont = row('cs-font-size');
   if (csFont) {
@@ -660,34 +714,31 @@
     const css = store.get(CSS_KEY) || '';
     const setVal = document.getElementById('cs-css-val');
     if (setVal) setVal.textContent = css ? '已设置' : '默认';
-    if (!css) return;
-    let out = css;
-    // 声明块（无选择器）→ 应用到我的/对方气泡
-    if (css.indexOf('{') < 0) {
+    if (!css) return null;
+    let out, hint = null;
+    // v3.26.x #181：统一走 chat.js 的 mochiMapBubbleCss（别名扩充 + 未认出气泡类名时整包声明兜底，
+    // 修「上传网页模板气泡 CSS 后界面零变化」多机型反复问题；兜底触发时给出 toast 说明）
+    if (window.mochiMapBubbleCss) {
+      const res = window.mochiMapBubbleCss(css, '');
+      out = res.out;
+      hint = res.hint;
+    } else if (css.indexOf('{') < 0) {
       out = '.msg-out .msg-bubble{' + css + '!important;}' +
             '.msg-in .msg-bubble{' + css + '!important;}';
     } else {
-      // 用户选择器映射到 mochi 气泡
-      out = css
-        .replace(/\.msg-out\b/g, '.msg-out')
-        .replace(/\.msg-in\b/g, '.msg-in')
-        .replace(/\.message-sent\b/g, '.msg-out .msg-bubble')
-        .replace(/\.message-received\b/g, '.msg-in .msg-bubble')
-        .replace(/\.mb\.self\b/g, '.msg-out .msg-bubble')
-        .replace(/\.mb\.other\b/g, '.msg-in .msg-bubble')
-        .replace(/\.bubble-self\b/g, '.msg-out .msg-bubble')
-        .replace(/\.bubble-other\b/g, '.msg-in .msg-bubble');
+      out = css;
     }
     const st = document.createElement('style');
     st.id = 'cs-bubble-style';
     st.textContent = out;
     document.head.appendChild(st);
+    return hint;
   }
   if (csCss) {
     csCss.addEventListener('click', () => {
       if (!window.openTCPanel) return;
       window.openTCPanel('气泡 CSS', '' +
-        '<div class="sm-fld-hint" style="margin-bottom:8px">输入自定义样式，支持两种写法：<br>· 直接写声明，如 <code>border-radius:20px;box-shadow:0 2px 8px rgba(0,0,0,.1)</code>（自动应用到双方气泡）<br>· 或写选择器，如 <code>.msg-out .msg-bubble{...}</code></div>' +
+        '<div class="sm-fld-hint" style="margin-bottom:8px">输入自定义样式，支持两种写法：<br>· 直接写声明，如 <code>border-radius:20px;box-shadow:0 2px 8px rgba(0,0,0,.1)</code>（自动应用到双方气泡）<br>· 或写选择器，如 <code>.msg-out .msg-bubble{...}</code>；网页气泡模板常见的 <code>.me/.friend/.message-me/.bubble{...}</code> 等类名也会自动识别</div>' +
         '<textarea id="cs-css-input" class="tc-input" rows="6" placeholder="border-radius: 20px;' + '&#10;box-shadow: 0 2px 8px rgba(0,0,0,.12);"></textarea>' +
         '<div class="mail-actions"><button class="cc-tool" id="cs-css-clear">清空</button><button class="cc-tool" id="cs-css-ok">应用</button></div>');
       const ta = document.getElementById('cs-css-input');
@@ -702,8 +753,8 @@
         const v = cssReadVal(document.getElementById('cs-css-input')).trim();
         store.set(CSS_KEY, v);
         document.getElementById('tc-mask').hidden = true;
-        applyCss();
-        toast('气泡样式已应用');
+        const hint = applyCss();
+        toast(hint || '气泡样式已应用');
       });
     });
   }
@@ -733,6 +784,9 @@
     CHAT_BEAUTY_KEYS.forEach(k => { if (data[k] !== undefined) store.set(k, data[k]); });
     try { applySettings(); applyCss(); applyFont(); } catch (e) {}
   };
+  // v3.27.x：暴露给 personalize.js 的完整外观方案合并使用（跨域，仅暴露不改动逻辑）
+  window.collectChatBeauty = collectChatBeauty;
+  window.applyChatBeautyData = applyChatBeautyData;
   function chatSchemeModalEl() {
     let m = document.getElementById('chat-beauty-scheme-manager');
     if (!m) {
@@ -785,14 +839,21 @@
     const doExport = (data) => {
       const json = JSON.stringify(data);
       if (!window.openModal) { toast('导出失败'); return; }
+      // v3.26.x #172：文件名用本地日期（原 toISOString 是 UTC，凌晨导出文件名会是前一天）
+      const d = new Date(); const p2 = (n) => (n < 10 ? '0' : '') + n;
+      const fname = 'mochi聊天美化方案-' + d.getFullYear() + '-' + p2(d.getMonth() + 1) + '-' + p2(d.getDate()) + '.json';
       window.openModal('导出聊天美化方案', '', (v) => {
         if (v === 'file') {
+          // v3.26.x #172：走统一三级降级导出链（系统分享面板→系统保存框→确认后下载，
+          // window.mochiExportFile 由 data-backup.js 暴露）——原裸 a[download] 在 iPhone
+          // 主屏安装（standalone 无下载管理器）与部分壳浏览器静默无反应=方案无法导出
+          if (window.mochiExportFile) { window.mochiExportFile(json, fname, 'mochi聊天美化方案'); return; }
           try {
             const blob = new Blob([json], { type: 'application/json' });
             const url = URL.createObjectURL(blob);
             const a = document.createElement('a');
             a.href = url;
-            a.download = 'mochi聊天美化方案-' + new Date().toISOString().slice(0, 10) + '.json';
+            a.download = fname;
             document.body.appendChild(a); a.click();
             setTimeout(() => { try { document.body.removeChild(a); URL.revokeObjectURL(url); } catch (e) {} }, 1000);
             toast('已导出聊天美化方案文件');
@@ -804,7 +865,7 @@
         }
       }, {
         noInput: true,
-        staticText: '选择导出方式：\n· 导出文件：生成 .json 文件，可保存或发送\n· 复制文字：复制配置文本，发给对方粘贴导入',
+        staticText: '选择导出方式：\n· 导出文件：自动弹分享/保存框（iPhone 主屏安装时用这个），不支持时确认后下载，可保存或发送\n· 复制文字：复制配置文本，发给对方粘贴导入',
         pills: [
           { label: '导出文件', value: 'file' },
           { label: '复制文字', value: 'text' },
@@ -1066,19 +1127,33 @@
   const csExport = row('cs-export-msgs');
   if (csExport) {
     csExport.addEventListener('click', () => {
-      if (!window.chatExportMsgs) { toast('聊天记录暂不可用'); return; }
+      if (!window.chatExportMsgs && !window.getChatMsgs) { toast('聊天记录暂不可用'); return; }
       toast('正在导出，请稍候…');
-      const arr = window.chatExportMsgs();
-      const data = { app: 'mochi-zika-chat', version: '1.0', exportTime: new Date().toISOString(), msgs: arr };
-      const json = JSON.stringify(data);
-      const blob = new Blob([json], { type: 'application/json;charset=utf-8' });
-      const a = document.createElement('a');
-      a.href = URL.createObjectURL(blob);
-      a.download = '聊天记录_' + new Date().toISOString().slice(0, 10) + '.json';
-      document.body.appendChild(a);
-      a.click();
-      setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1000);
-      toast('已导出 ' + arr.length + ' 条聊天记录');
+      try {
+        if (window.chatFlushSave) window.chatFlushSave();
+        // v3.26.x：getChatMsgs 取引用免 slice 复制 950MB（slice 会使堆翻倍 OOM）
+        const arr = window.getChatMsgs ? window.getChatMsgs() : window.chatExportMsgs();
+        const n = Array.isArray(arr) ? arr.length : 0;
+        if (!n) { toast('没有聊天记录可导出'); return; }
+        // v3.26.x：流式构建 JSON——每条消息单独 stringify 放进 Blob 数组拼接，
+        // 避免单次 JSON.stringify 整包超 V8 字符串长度上限（~512MB）报 Invalid string length
+        const parts = ['{"app":"mochi-zika-chat","version":"1.0","exportTime":"' + new Date().toISOString() + '","msgs":['];
+        for (let i = 0; i < n; i++) {
+          if (i) parts.push(',');
+          parts.push(JSON.stringify(arr[i]));
+        }
+        parts.push(']}');
+        const blob = new Blob(parts, { type: 'application/json;charset=utf-8' });
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = '聊天记录_' + new Date().toISOString().slice(0, 10) + '.json';
+        document.body.appendChild(a);
+        a.click();
+        setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1000);
+        toast('已导出 ' + n + ' 条聊天记录');
+      } catch (e) {
+        toast('导出失败：' + (e && e.message || '未知错误'));
+      }
     });
   }
   // 导入：读取 JSON → 校验 → 预览摘要二次确认 → 覆盖当前记录

@@ -1,6 +1,11 @@
 /* ===== 基础：重置 / 变量 / 手机外框 / 通用 ===== */
 * { margin:0; padding:0; box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
 :root {
+  /* v3.26.x：显式声明浅色 color-scheme，主动告知浏览器「本页为浅色设计、深色由
+     data-theme 手动切换管理」。缺失时安卓 Chrome 强制深色(Auto Dark)会在系统深色下
+     无视网页配色把内容整体压黑（实测现象：群聊气泡/字体换色无效、纯黑）。
+     深色时下方 [data-theme="dark"] 以更高优先级(更靠后)覆盖回 dark。 */
+  color-scheme:light;
   --ink:#111111; --muted:#8a8a8a; --line:#e6e6e6;
   /* v3.6.x 深色模式语义变量——浅色值（默认），[data-theme="dark"] 覆盖为深色值 */
   --page-bg:#e9e9e9; --page-bg-grad:#f6f6f6;
@@ -23,6 +28,9 @@
 }
 /* v3.6.x 深色模式——两档手动开关（浅色/深色），不跟随系统 */
 [data-theme="dark"] {
+  /* 深色时把 color-scheme 切回 dark（优先级覆盖上面 :root 的 light），
+     原生控件/滚动条随深色、且不与浅色声明冲突 */
+  color-scheme:dark;
   --ink:#f0f0f0; --muted:#8a8a8a; --line:#333333;
   --page-bg:#0c0c0c; --page-bg-grad:#1a1a1a;
   --phone-bg-a:#1c1c1c; --phone-bg-b:#0e0e0e; --phone-inset:rgba(255,255,255,.08);
@@ -98,6 +106,8 @@ html { margin:0; padding:0; }
 /* v3.8.y：原作/部署信息（署名下方）——小灰字低调展示使用网站/GitHub 库 */
 .splash-source { margin-top:12px; padding-top:12px; border-top:1px dashed var(--line); text-align:center; width:100%; }
 .splash-source-line { font-size:9px; color:var(--hint-ink); line-height:1.8; letter-spacing:0; white-space:nowrap; }
+/* v3.26.x：置顶澄清行可换行——nowrap 仅供单行网址/署名，长句澄清不换行会超出手机屏幕 */
+.splash-source-line.splash-clarify { white-space:normal; padding:0 10px; }
 .splash-source-url { color:var(--ink); font-weight:600; }
 /* v3.8.y：底部统一卡片框——版本/加载/提示/按钮装进一个白卡片，与顶部品牌卡片呼应 */
 .splash-footcard {
@@ -146,6 +156,17 @@ html { margin:0; padding:0; }
 .splash-summary-title { font-size:12px; font-weight:800; color:var(--ink); margin-bottom:7px; letter-spacing:.6px; }
 .splash-summary p { font-size:11.5px; line-height:1.75; color:var(--soft-ink); }
 .splash-summary p + p { margin-top:6px; }
+/* v3.27.x：防骗置顶声明——固定在公告最顶部，防收费诈骗醒目提示 */
+.splash-alert {
+  margin:0 0 14px; padding:10px 14px 11px 14px;
+  background:var(--sp-soft); border:1.5px solid var(--sp-ink); border-radius:8px;
+}
+.splash-alert .splash-alert-t {
+  font-size:12px; font-weight:800; color:var(--sp-ink); letter-spacing:.5px; margin-bottom:5px;
+}
+.splash-alert .splash-alert-t::before { content:"!"; display:inline-block; width:15px; height:15px; line-height:15px; text-align:center; margin-right:5px; border-radius:50%; background:var(--sp-ink); color:#fff; font-size:11px; font-weight:800; vertical-align:-2px; }
+.splash-alert p { font-size:12px; line-height:1.7; color:var(--soft-ink); }
+.splash-alert strong { color:var(--ink); font-weight:800; }
 /* 章节容器：编号在章节内重新从 1 开始；章节间拉开间距；折叠章节样式 */
 .splash-sec-wrap { counter-reset: notice; }
 .splash-sec-wrap + .splash-sec-wrap { margin-top:12px; }
@@ -271,6 +292,14 @@ html { margin:0; padding:0; }
   margin-top:16px; font-size:12px; color:var(--hint-ink); letter-spacing:1px;
 }
 .splash-loading[hidden] { display:none; }
+/* v3.26.x：数据加载较慢时的「仍要进入」逃生口——弱化样式（小字、下划线、次级色），
+   表明是"非推荐、数据可能不全"的非常规入口，与主按钮区分 */
+.splash-force-enter {
+  margin-top:10px; font-size:11px; color:var(--hint-ink); letter-spacing:1px;
+  text-decoration:underline; cursor:pointer; -webkit-tap-highlight-color:transparent;
+}
+.splash-force-enter:active { opacity:.6; }
+.splash-force-enter[hidden] { display:none; }
 @keyframes splash-pop {
   0% { transform:scale(.8); opacity:0; }
   100% { transform:scale(1); opacity:1; }
@@ -320,8 +349,10 @@ html { margin:0; padding:0; }
     padding:0 18px 18px;
   }
   .statusbar {
-    /* v3.5.127：max 兜底——真全屏挖孔屏 env() 返回 0 时保留 14px 最小留白 */
-    padding-top:max(calc(14px + env(safe-area-inset-top, 0px)), 14px);
+    /* v3.5.127：max 兜底——真全屏挖孔屏 env() 返回 0 时保留 14px 最小留白。
+       v3.28.x #114：优先用 JS 实测的 --mochi-safe-top（iOS standalone 下
+       env(safe-area-inset-top) 返回 0 时兜底），未设时回落 env() */
+    padding-top:max(calc(14px + var(--mochi-safe-top, env(safe-area-inset-top, 0px))), 14px);
     padding-bottom:10px;
   }
 }
@@ -341,7 +372,7 @@ html.force-mobile .phone {
   padding:0 18px 18px;
 }
 html.force-mobile .statusbar {
-  padding-top:max(calc(14px + env(safe-area-inset-top, 0px)), 14px);
+  padding-top:max(calc(14px + var(--mochi-safe-top, env(safe-area-inset-top, 0px))), 14px);
   padding-bottom:10px;
 }
 html.force-mobile .phone input:not([readonly]):not([type="checkbox"]):not([type="radio"]):not([type="range"]):not([type="file"]):not([type="color"]):not([type="hidden"]):not([type="date"]):not([type="time"]):not([type="datetime-local"]):not([type="month"]):not([type="week"]):not([type="button"]):not([type="submit"]):not([type="reset"]),
@@ -357,7 +388,7 @@ html.force-mobile .phone .page.full .chat-input-row {
   padding-left: 12px; padding-right: 12px; padding-top: 10px;
   padding-bottom: calc(10px + var(--mochi-safe-bottom,env(safe-area-inset-bottom,0px)));
 }
-html.force-mobile .phone .page.full .chat-head { padding-top: calc(10px + env(safe-area-inset-top, 0px)); }
+html.force-mobile .phone .page.full .chat-head { padding-top: calc(10px + var(--mochi-safe-top, env(safe-area-inset-top, 0px))); }
 html.force-mobile .phone .page.full { padding-bottom: 0; }
 html.force-mobile #page-chat { background: var(--page-bg-grad); }
 html.force-mobile button, html.force-mobile .app, html.force-mobile .set-row,
@@ -415,9 +446,39 @@ html.force-mobile .desk-period, html.force-mobile .app-grid, html.force-mobile .
    .ios-pwa-standalone .phone 的 (0,2,0)，不加守卫会把 v3.15.x 的 standalone 100vh
    修复压回去；standalone 没有浏览器工具条，本就不需要这条 */
 html.ios-vv-fit:not(.ios-pwa-standalone) .phone,
-html.tablet.ios-vv-fit:not(.ios-pwa-standalone) .phone { height:var(--mochi-ios-h, 100dvh); }
+html.tablet.ios-vv-fit:not(.ios-pwa-standalone) .phone { height:min(var(--mochi-ios-h, 100dvh), 100dvh); }
 .ios-pwa-standalone .phone,
-html.tablet.ios-pwa-standalone .phone { height:100vh; }
+html.tablet.ios-pwa-standalone .phone { height:min(100vh, var(--mochi-ios-h, 100dvh)); }
+/* v3.27.x：iOS PWA standalone + ios-fs-active（已隐藏模拟状态栏）下，视口 innerHeight
+   即完整可视高，100vh 却等于 screen.height（含被隐藏状态栏区）→ .phone 超出视口、
+   body 可滚、桌面顶部/底部各被裁（iPhone17 Edge 反馈"图标按钮显示不全"）。
+   改用 syncVvFit 实测 --mochi-ios-h（=visualViewport.height=可视高）填满可视区不溢出。
+   非 ios-fs-active（状态栏可见）仍用 100vh（视口含状态栏区，另案处理）。
+   键盘期 syncVvFit 摘除 --mochi-ios-h → 回退 100dvh，但键盘期 .phone 高度由
+   _setPhoneH 内联值接管（内联赢选择器），不受影响。 */
+/* v3.28.x #114（复现）：iPhone15 + Safari 主屏幕全屏实测 100dvh=793 而物理屏=852——
+   100dvh 只算系统状态栏下方的可视区，.phone 停在 793 导致：①底部空 59px（用户报
+   "聊天底部输入栏和手机底部空隙太大"）；②.phone 顶 59px 钻进系统状态栏区，且该环境
+   env(safe-area-inset-top) 返回 0 → 桌面状态栏与系统栏重叠、聊天返回键被系统栏吞点。
+   改回 100vh（=screen.height 整块物理屏）+ padding-top 顶部安全区（JS 实测
+   --mochi-safe-top 写值，兜底 env）：内容整体下移到系统状态栏下方、底部贴满物理屏；
+   组件底部各自用 --mochi-safe-bottom 避让 Home 指示条。iPhone17 Edge 的"图标显示不全"
+   根因是缺顶部安全区补偿，本规则补上后不再复发。 */
+.ios-pwa-standalone.ios-fs-active .phone,
+html.tablet.ios-pwa-standalone.ios-fs-active .phone {
+  /* v3.26.x #148：高度改用 --mochi-ios-h（mobile-adapt syncVvFit 写入的 vv 实测可视高，
+     未写入时回落 100vh）——iOS 26.x 独立应用 100vh = 整块物理屏（如 874）而可视高只有
+     812，100vh 会把 .phone 底部 tabbar 裁出屏幕外（实测 底部空隙=-62）。padding-top
+     语义不变：--mochi-safe-top 已改为 env() 探针实测（#148），「系统已避让」形态返回
+     0，不再与系统避让叠加成双倍顶部空白。 */
+  height:var(--mochi-ios-h, 100vh);
+  padding-top:max(var(--mochi-safe-top, env(safe-area-inset-top, 0px)), 12px);
+  padding-bottom:0;
+}
+/* v3.28.x #114：同模式下 html/body 钉到与 .phone 同高（#148 改 --mochi-ios-h，理由同上），
+   避免 .phone 高于 body(100dvh) 造成页面纵向可滚（v3.27.x 记录过"body 可滚"的副作用） */
+html.ios-pwa-standalone.ios-fs-active,
+html.ios-pwa-standalone.ios-fs-active body { height:var(--mochi-ios-h, 100vh); min-height:0; }
 /* v3.7.x：iPhone 12 mini 实测反馈「桌面底部导航栏下面有灰色图形」——iOS 部分版本
    standalone + black-translucent 下 100vh 不含底部 home indicator 安全区（约 34px），
    .phone 底部外露出 html/body 灰底（--page-bg #e9e9e9）形成灰色带；且与顶部
@@ -491,7 +552,7 @@ html.ios-pwa-standalone body { background: var(--bg-b); }
     padding-top: 10px;
     padding-bottom: calc(10px + var(--mochi-safe-bottom,env(safe-area-inset-bottom,0px)));
   }
-  .phone .page.full .chat-head { padding-top: calc(10px + env(safe-area-inset-top, 0px)); }
+  .phone .page.full .chat-head { padding-top: calc(10px + var(--mochi-safe-top, env(safe-area-inset-top, 0px))); }
   .phone .page.full { padding-bottom: 0; }
   /* v3.6.x：聊天页背景统一为页面渐变底色（浅色 #f6f6f6 / 深色 #1a1a1a）——
      原 #page-chat 背景透明，透出 .phone 渐变灰底（#f2f2f2 叠加 body #e9e9e9），
@@ -499,6 +560,22 @@ html.ios-pwa-standalone body { background: var(--bg-b); }
      "聊天页底部栏之外还有灰色，滑动遮挡消息"）；统一背景后输入栏四周与
      消息区同色，灰条消失，消息气泡（白/深色）对比正常。全局生效（两种模式） */
   #page-chat { background: var(--page-bg-grad); }
+  /* v3.26.x：聊天输入栏聚焦时给一个独立合成层（同款手法见 chat-pages.css
+     .ta-add .ce-box:focus）——修「红米 K60 至尊版 + Edge：聊天输入栏打字不显示，
+     空白到发不出去」。#chat-input / #gc-input 是模板原生 contenteditable div
+     （不经 mobile-adapt ceConvert，所以拿不到 .ce-box 那套 will-change/translateZ
+     保护），而键盘期 .phone 会被 _aPanComp 写 position:relative+top、height 跟随
+     visualViewport 逐帧重算；安卓 Chromium/WebKit 已知缺陷会让文本继续画在旧的
+     合成层位子上＝框内空白（同「文字与框分离/字出界」那一族症状，当年 .ta-add
+     半框就是靠这一条治好的）。只提升合成层、不位移，布局零变化。
+     不用 JS toggle transform：正在键入的元素被强制重建合成层会丢字（摩托罗拉 G100
+     实测，见 mobile-adapt.js _aRefreshCe 的 _aUserTypos 闸门），纯 CSS 提升无此风险。
+     will-change 常驻 + :focus 叠 translateZ 两条一起写，与 chat-pages.css 里治好
+     「文字与框分离」的 .ta-add .ce-box 完全同款：前者让合成层在键盘平移开始前就
+     已存在（不依赖聚焦时机、也不受「文档未获得焦点时 :focus 不匹配」影响），
+     后者在真正输入的那段时间把层钉住。全站只有聊天/群聊两个输入栏命中，层开销可忽略。 */
+  .phone .chat-input { will-change:transform; }
+  .phone .chat-input:focus { transform: translateZ(0); }
   /* v3.5.116：键盘弹起适配改由 mobile-adapt.js 统一处理——
      interactive-widget 只在根元素生效，写在 .phone 上无效（死代码）；
      JS 用 visualViewport 锁定 .phone 到可视高度并 fixed 顶对齐，跨设备统一。 */
@@ -525,15 +602,41 @@ html.ios-pwa-standalone body { background: var(--bg-b); }
 .fs-active .phone .page.full .gs-title, .fs-active .phone .page.full .card-tabs,
 .fs-active .phone .page.full .div-h-title, .fs-active .phone .page.full .stats-top-name { padding-top: max(env(safe-area-inset-top, 0px), 12px); }
 
-/* v3.6.x：iOS 独立应用「全屏模式」（ios-fs-active 类，由 fullscreen.js 控制）——
-   iOS 无 Fullscreen API、系统状态栏永远无法隐藏，唯一能藏的是应用内模拟状态栏
-   （与系统状态栏重复的一栏，正是「有空隙/双状态栏」观感来源）。
-   开启后隐藏它，内容顶到系统状态栏下方；系统状态栏由 iOS 接管安全区。
+/* v3.26.x：iOS 真全屏（浏览器原生全屏 .ios-native-fs / 桌面全屏 .ios-fs-active）下
+   收紧顶部栏贴顶—— iOS 系统状态栏（含灵动岛）始终由系统占据在内容上方、网页内容
+   不会钻进状态栏区，CSS 再给顶部栏加 env(safe-area-inset-top) 只会算出一条多余白带
+   （用户实测：苹果17 自带浏览器 + 全屏模式下聊天顶部栏上方一大块白色空白）。
+   Android 挖孔屏仍靠上面 max(env,12px) 规则避让，不受影响（ios-* 类只在 iOS 加）。
+   特异性压过 .fs-active max(env,12px)：(0,5,1) > (0,5,0)。 */
+html.ios-native-fs .phone .page.full .chat-head,
+html.ios-native-fs .phone .page.full .gs-title,
+html.ios-native-fs .phone .page.full .card-tabs,
+html.ios-native-fs .phone .page.full .div-h-title,
+html.ios-native-fs .phone .page.full .stats-top-name { padding-top: 10px; }
+/* iOS 桌面（添加到主屏幕）全屏：.phone 已由 .ios-fs-active .phone 补
+   padding-top:max(env,12px) 顶格到系统状态栏下方，顶部栏不得再重复加 env——否则与
+   下方 @media(max-width:900px) 的 calc(10px+env) 叠加成双倍安全区白带 */
+.ios-fs-active .phone .page.full .chat-head,
+.ios-fs-active .phone .page.full .gs-title,
+.ios-fs-active .phone .page.full .card-tabs,
+.ios-fs-active .phone .page.full .div-h-title,
+.ios-fs-active .phone .page.full .stats-top-name { padding-top: 10px; }
+/* v3.26.x #114：iOS 全屏态（standalone + ios-fs-active）下模拟状态栏与系统状态栏重叠。
+   窄屏 @media 的 .statusbar safe-area 顶部留白（0,1,0）被全局 .statusbar 的
+   padding:4px 4px 12px（同特异性、源顺序靠后）覆盖失效，模拟状态栏内容顶到 y=0，
+   与系统时间/电量重叠（用户实测「mochi 时间 电量这一行和手机自己的顶部栏重叠」）。
+   v3.28.x #114（复现）：安全区避让改由上方 .ios-pwa-standalone.ios-fs-active .phone
+   的 padding-top 统一承担（.phone 整体下移到系统状态栏下方），这里只留 14px 常态
+   留白，不再重复加 env/safe-area——否则与 .phone 顶部内边距叠加成双倍白带。 */
+html.ios-fs-active .phone .statusbar { padding-top:14px; }
+
+/* v3.6.x→v3.28.x：iOS 独立应用「全屏模式」（ios-fs-active 类，由 fullscreen.js 控制）——
+   iOS 无 Fullscreen API、系统状态栏永远无法隐藏，应用内模拟状态栏（Mochi/时间/电量那行）
+   原设计在全屏时隐藏以免与系统栏重复。但桌面顶部那一行是全站品牌信息，隐藏后用户反馈
+   「桌面顶部 Mochi/时间/电量不见了」→ 改为全屏时也保留状态栏。状态栏自身已带
+   env(safe-area-inset-top) 安全区留白（见上方手机端 .statusbar 规则），故不再给 .phone
+   额外加顶部 padding（否则安全区双倍、顶部多一条白带）。
    只影响真实手机窄屏，桌面模拟器外壳不受影响 */
-@media (max-width: 900px) {
-  .ios-fs-active .phone { padding-top: max(env(safe-area-inset-top, 0px), 12px); }
-  .ios-fs-active .phone .statusbar { display: none; }
-}
 
 /* v3.6.x：Via 等浏览器「网页全屏」强制转横屏时的 CSS 兜底全屏
    （fs-css-active 类，由 fullscreen.js 控制）——原生全屏被浏览器转成横屏时
@@ -562,7 +665,7 @@ html.tablet .phone {
 }
 html.tablet .phone.no-statusbar { padding:0; }
 html.tablet .statusbar {
-  padding-top:max(calc(14px + env(safe-area-inset-top, 0px)), 14px);
+  padding-top:max(calc(14px + var(--mochi-safe-top, env(safe-area-inset-top, 0px))), 14px);
   padding-bottom:10px;
 }
 /* 平板真全屏（Fullscreen API / display_override）：仍是整屏铺满（与手机端一致） */
@@ -578,7 +681,7 @@ html.tablet .phone .page.full .chat-input-row {
   padding-top:10px;
   padding-bottom:calc(10px + var(--mochi-safe-bottom,env(safe-area-inset-bottom,0px)));
 }
-html.tablet .phone .page.full .chat-head { padding-top:calc(10px + env(safe-area-inset-top, 0px)); }
+html.tablet .phone .page.full .chat-head { padding-top:calc(10px + var(--mochi-safe-top, env(safe-area-inset-top, 0px))); }
 html.tablet .phone .page.full { padding-bottom:0; }
 html.tablet #page-chat { background:var(--page-bg-grad); }
 html.tablet .tabbar { margin-bottom:var(--mochi-safe-bottom,env(safe-area-inset-bottom,0px)); }
@@ -890,7 +993,7 @@ input.ce-ghost, textarea.ce-ghost {
   position:fixed; top:0; left:0; right:0; z-index:998;
   display:flex; align-items:center; justify-content:center; gap:10px;
   padding:10px 14px;
-  padding-top:calc(10px + env(safe-area-inset-top, 0px));
+  padding-top:calc(10px + var(--mochi-safe-top, env(safe-area-inset-top, 0px)));
   background:rgba(17,17,17,.94); color:#fff; font-size:13px;
   box-shadow:0 4px 16px rgba(0,0,0,.25);
 }

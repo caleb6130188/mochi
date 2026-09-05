@@ -297,7 +297,9 @@
     if (!n) return '';
     let hit = '', hits = 0;
     contacts().forEach(ct => {
-      if (taIdentity(ct.id) === n) { hit = ct.id; hits++; }
+      const idn = taIdentity(ct.id);
+      const cn = contactName(ct.id);
+      if (idn === n || cn === n) { hit = ct.id; hits++; }
     });
     return hits === 1 ? hit : '';
   }
@@ -322,6 +324,7 @@
     const plan = {}; // cid -> { add: [], state: {} }
     grArr.forEach(x => {
       const target = homeCidForName(x.name) || cur;
+      x.cid = target; // 显式归属，后续不再靠名字认亲（防改名/同名导致串桌）
       const p = plan[target] || (plan[target] = { add: [], state: {} });
       p.add.push(x);
       if (gsObj[x.id]) p.state[x.id] = gsObj[x.id];
@@ -420,6 +423,83 @@
     r.set(REHOME_KEY, '1');
   }
 
+  // ---- 归属纠偏（幂等，启动 + IDB 就绪后跑）----
+  // 给梦角补显式 cid 归属字段，并把物理存错桌面的梦角搬回 storeOf(cid)。
+  // 取代靠名字认亲的脆弱性：多个联系人 TA 昵称同名 / lbl-partner 与联系人名不一致时，
+  // migrateSplit 可能认不到家把梦角一锅端给当前桌面，rehomeMisfiled 因"已在同名桌面"不纠正。
+  // 这里按 cid 字段权威归属：无 cid 的按名字认亲补 cid（认不到的固化在当前桌面），
+  // 有 cid 但物理存错桌面的搬到 storeOf(cid)。幂等：搬过后 cid=所在桌面，下次不动。
+  function fixBelonging() {
+    const r = rootStore();
+    if (!r) return;
+    let regOk = false;
+    try { regOk = !!r.get('contacts'); } catch (e) {}
+    if (!regOk) return; // 注册表未就绪：contacts() 不全，等 mochi-restore-done
+    const cidSet = {};
+    contacts().forEach(ct => { cidSet[ct.id] = 1; });
+    // 第一遍：补 cid 字段，收集需搬移的梦角
+    const moves = []; // {from, to, id, name}
+    contacts().forEach(ct => {
+      const list = loadRoster(ct.id);
+      if (!list.length) return;
+      let dirty = false;
+      list.forEach(c => {
+        // 归属判定：按名认亲优先——梦角名唯一命中某桌面 TA 身份（lbl-partner/联系人名）时，
+        // 那里才是它的家。早期迁移可能既把梦角物理放错桌面、又把它 cid 固化成了错的桌面
+        // （此时「cid 权威」会把串桌梦角永久冻在错桌面，跑多少次自愈都搬不回来），
+        // 但只要名字对得上就能纠正。认不到家才退回存储的 cid；cid 也无效最后兜底留当前桌面。
+        let home = homeCidForName(c.name);
+        if (!home) home = (c.cid && cidSet[c.cid]) ? c.cid : '';
+        const target = home || ct.id;
+        if (c.cid !== target) { c.cid = target; dirty = true; }
+        if (c.cid !== ct.id) moves.push({ from: ct.id, to: c.cid, id: c.id, name: c.name });
+      });
+      if (dirty) saveRoster(list, ct.id);
+    });
+    if (!moves.length) return;
+    // 第二遍：执行搬移（批量加载，避免遍历时修改）
+    const rosters = {}, states = {};
+    moves.forEach(m => {
+      if (!rosters[m.from]) rosters[m.from] = loadRoster(m.from);
+      if (!rosters[m.to]) rosters[m.to] = loadRoster(m.to);
+      if (!states[m.from]) states[m.from] = loadState(m.from);
+      if (!states[m.to]) states[m.to] = loadState(m.to);
+    });
+    moves.forEach(m => {
+      const src = rosters[m.from], dst = rosters[m.to];
+      const i = src.findIndex(x => x.id === m.id);
+      if (i < 0) return;
+      if (dst.some(x => x.id === m.id)) return; // 目标已有同 id：跳过
+      const twin = dst.find(x => x.name === m.name && (!x.cid || x.cid === m.to));
+      if (twin) {
+        // 同名冲突：外来者带互动痕迹而家里那位没有才替换（家里那位多半是自动播种的幻影）
+        const stFrom = states[m.from], stTo = states[m.to];
+        const mMark = stFrom[m.id] && (stFrom[m.id].lastPerceive || stFrom[m.id].__chat || stFrom[m.id].__open);
+        const tMark = stTo[twin.id] && (stTo[twin.id].lastPerceive || stTo[twin.id].__chat || stTo[twin.id].__open);
+        if (!mMark || tMark) return; // 分不清真身/幻影：宁留错位不删真身
+        dst.splice(dst.indexOf(twin), 1);
+        delete stTo[twin.id];
+        try {
+          r.remove('narc-' + twin.id);
+          if ((r.get('narc-cur') || '') === twin.id) r.remove('narc-cur');
+        } catch (e) {}
+      }
+      const c = src.splice(i, 1)[0];
+      c.cid = m.to;
+      dst.push(c);
+      if (states[m.from][m.id] !== undefined) {
+        states[m.to][m.id] = states[m.from][m.id];
+        delete states[m.from][m.id];
+      }
+    });
+    Object.keys(rosters).forEach(cid => {
+      saveRoster(rosters[cid], cid);
+      if (states[cid]) saveState(states[cid], cid);
+    });
+    todayCacheMap = {};
+    try { const pg = document.getElementById('page-cjian'); if (pg && !pg.hidden && typeof window.renderCjian === 'function') window.renderCjian(false); } catch (e) {}
+  }
+
   // 首次使用：该桌面第一次打开此间时，用 TA 的名字种下自己的第一个梦角
   //（v3.14.x 修复：不再在启动时给【每个】桌面都种——老版会在用户从没碰过的桌面凭空
   // 造出以联系人命名的梦角，看起来像别人的数据串了进来）
@@ -435,7 +515,7 @@
         if (lbl) name = lbl;
         if (!name) name = contactName(cid);
       } catch (e) {}
-      list.push({ id: makeId(), name: name || 'TA', offsetMin: 0 });
+      list.push({ id: makeId(), name: name || 'TA', offsetMin: 0, cid: cid });
       saveRoster(list, cid);
       s.set(SEED_KEY, '1');
     } catch (e) {}
@@ -489,9 +569,11 @@
   }
 
   // 每梦角独立状态（含随机冷却：状态持续一段时间后梦角才会重新选择）
+  // v3.27.x：防御无效状态值——旧版/数据损坏时 s.p/s.a 可能不在 PRESENCE/ACTIVITY 中，
+  //   后续 PRESENCE[s.p].label 会抛 TypeError 导致整页空白。这里检测到无效值时重新随机。
   function ensureState(c, st, now) {
     const s = st[c.id] || (st[c.id] = {});
-    if (!s.p) {
+    if (!s.p || !PRESENCE[s.p] || !s.a || !ACTIVITY[s.a]) {
       const h = Math.floor(worldMinuteOf(c) / 60);
       s.p = rollPresence(h, false);
       s.a = rollActivity(h);
@@ -773,6 +855,30 @@
   function saveTaTime(cid, obj) {
     try { storeOf(cid).set('cjian-ta-time', JSON.stringify(obj)); } catch (e) {}
   }
+  // 由世界分钟算半小时段区间与标签（与 timeInfo 的 half/range 同源，但接收世界分钟）。
+  // 返回 {lo, hi, half, range}：lo/hi 为该半小时段的分钟闭区间，half 如「未正」，range 如「14:30–14:59」。
+  function halfRangeOf(wm) {
+    const wh = Math.floor(wm / 60) % 24;
+    const wmin = wm % 60;
+    const idx = shichenAt(wh);
+    const stH = shichenStartHour(idx);
+    const mInto = wh * 60 + wmin - stH * 60;
+    let lo, hi, half, range;
+    if (mInto < 30) {
+      lo = stH * 60; hi = stH * 60 + 29;
+      half = SHICHEN[idx] + '初';
+      range = pad(stH) + ':00–' + pad(stH) + ':29';
+    } else if (mInto < 90) {
+      lo = stH * 60 + 30; hi = stH * 60 + 89;
+      half = SHICHEN[idx] + '正';
+      range = pad(stH) + ':30–' + pad((stH + 1) % 24) + ':29';
+    } else {
+      lo = stH * 60 + 90; hi = stH * 60 + 119;
+      half = SHICHEN[idx] + '正';
+      range = pad((stH + 1) % 24) + ':30–' + pad((stH + 1) % 24) + ':59';
+    }
+    return { lo: lo, hi: hi, half: half, range: range };
+  }
   function taTimeOf(cid) {
     const now = Date.now();
     let t = loadTaTime(cid);
@@ -780,23 +886,24 @@
     let next = (t && typeof t.next === 'number') ? t.next : 0;
     if (last > now || last < 0 || isNaN(last)) { last = 0; next = 0; }
     if (!t || (now - last) / 36e5 >= next) {
-      // 在梦角所设的时间段（时辰区间）里抽具体时刻；桌面无 slots 梦角则退回全天随机。
-      // 时间段 = 该桌面全部梦角 slots 时辰起始整点的并集。
+      // 复用列表首位梦角的世界时间半小时段（与列表卡片时段完全一致），再在该半小时段里
+      // 抽具体时刻；桌面无梦角时退回全天先抽时辰再抽时刻。标签存 half/range 供展示。
       const list0 = loadRoster(cid);
-      const slotSet = [];
-      list0.forEach(function (c2) {
-        if (Array.isArray(c2.slots) && c2.slots.length) {
-          c2.slots.forEach(function (h) { if (slotSet.indexOf(h) < 0) slotSet.push(h); });
-        }
-      });
-      let hh, mm, stH = -1;
-      if (slotSet.length) {
-        stH = slotSet[rand(0, slotSet.length - 1)];
+      const c0 = list0 && list0[0];
+      let hh, mm, halfLabel = '', rangeLabel = '';
+      if (c0) {
+        const info = halfRangeOf(worldMinuteOf(c0));
+        const total = info.lo + rand(0, info.hi - info.lo);
+        hh = Math.floor(total / 60) % 24; mm = total % 60;
+        halfLabel = info.half; rangeLabel = info.range;
+      } else {
+        const stH = shichenStartHour(rand(0, 11));
         const total = slotMinuteRange(stH);
         hh = Math.floor(total / 60) % 24; mm = total % 60;
-      } else { hh = rand(0, 23); mm = rand(0, 59); }
-      t = { hh: hh, mm: mm, last: now, next: 1 + Math.random() * 7 };
-      if (stH >= 0) t.slotStartH = stH; // 记录抽中的时辰起时，供「时间段」标签展示具体范围
+        const info = halfRangeOf(total);
+        halfLabel = info.half; rangeLabel = info.range;
+      }
+      t = { hh: hh, mm: mm, last: now, next: 1 + Math.random() * 7, half: halfLabel, range: rangeLabel };
       saveTaTime(cid, t);
     }
     return t;
@@ -831,15 +938,16 @@
       card.appendChild(row);
     });
   }
-  // 「对方当前时间」的时间段标签：显示抽中时辰的名字 + 具体时间范围（如「未时 13:00–15:59」）。
-  // 该桌面无 slots 梦角则为全天随机；旧数据无 slotStartH 时按抽到的时刻反推时辰。
+  // 「对方当前时间」的时间段标签：与列表首位梦角的半小时段完全一致（如「未正 14:30–14:59」）。
+  // 优先用重抽时存住的 half/range；旧数据无该字段则实时取首位梦角当前半小时段兜底。
   function taSlotLabel(cid, t) {
-    const hasSlots = loadRoster(cid).some(function (c2) { return Array.isArray(c2.slots) && c2.slots.length; });
-    if (!hasSlots) return '全天随机';
-    let startH;
-    if (t && typeof t.slotStartH === 'number' && t.slotStartH >= 0) startH = t.slotStartH;
-    else startH = shichenStartHour(shichenAt(t.hh));
-    return SHICHEN[shichenAt(startH)] + '时 ' + pad(startH) + ':00–' + pad((startH + 2) % 24) + ':59';
+    if (t && t.half && t.range) return t.half + ' ' + t.range;
+    const c0 = loadRoster(cid)[0];
+    if (c0) {
+      const info = halfRangeOf(worldMinuteOf(c0));
+      return info.half + ' ' + info.range;
+    }
+    return '全天随机';
   }
   // 刷新检查：启动立即一次 + 每 60 秒；仅当「此间」页开着才重抽/刷新显示（后台不空转）
   function taTimePoll() {
@@ -1070,17 +1178,20 @@
   }
 
   // ---- 整页渲染 ----
+  // v3.27.x：每个渲染步骤独立 try/catch——单步抛错不再连坐整页空白
+  //   （旧数据含无效状态值 / DOM 被外部改结构 / 某桌面 store 异常时，
+  //    某一步可能抛错，但其余步骤仍渲染，用户至少能看到部分内容而非白屏）
   window.renderCjian = function (forceForecast) {
-    if (viewCid !== ALL && !contacts().some(ct => ct.id === viewCid)) viewCid = curCid(); // 视图兜底
+    try { if (viewCid !== ALL && !contacts().some(ct => ct.id === viewCid)) viewCid = curCid(); } catch (e) {} // 视图兜底
     if (forceForecast) todayCacheMap = {}; // 每次打开此间：TA们重新选择今天的可能样子
-    if (!todayCacheMap[scopeKey()]) rollTodayForecast();
-    refreshStates();
-    renderHero();
-    renderGroupBar();
-    renderTaTime();
-    renderList();
-    renderToday(true);
-    if (detailId) renderDetail();
+    try { if (!todayCacheMap[scopeKey()]) rollTodayForecast(); } catch (e) {}
+    try { refreshStates(); } catch (e) {}
+    try { renderHero(); } catch (e) {}
+    try { renderGroupBar(); } catch (e) {}
+    try { renderTaTime(); } catch (e) {}
+    try { renderList(); } catch (e) {}
+    try { renderToday(true); } catch (e) {}
+    try { if (detailId) renderDetail(); } catch (e) {}
   };
 
   window.openCjian = function () {
@@ -1192,7 +1303,7 @@
             [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11],
             function (idxs) {
               const list = loadRoster(mCid);
-              list.push({ id: makeId(), name: pendingName, offsetMin: pendingOffset, slots: idxs.map(i => SHICHEN_START[i]) });
+              list.push({ id: makeId(), name: pendingName, offsetMin: pendingOffset, slots: idxs.map(i => SHICHEN_START[i]), cid: mCid });
               saveRoster(list, mCid);
               toast('已加入此间：「' + pendingName + '」');
               pendingName = ''; pendingOffset = 0;
@@ -1202,7 +1313,7 @@
             function () { pendingName = ''; pendingOffset = 0; }, // 取消：不创建
             function () {
               const list = loadRoster(mCid);
-              list.push({ id: makeId(), name: pendingName, offsetMin: pendingOffset });
+              list.push({ id: makeId(), name: pendingName, offsetMin: pendingOffset, cid: mCid });
               saveRoster(list, mCid);
               toast('已加入此间：「' + pendingName + '」');
               pendingName = ''; pendingOffset = 0;
@@ -1313,6 +1424,7 @@
   function boot() {
     migrateSplit();
     rehomeMisfiled();
+    fixBelonging();
     // 迁移时机加固：IndexedDB 回填（mochi-restore-done）可能晚于本模块启动——旧全局键
     // 迟到时首次迁移会扑空（老梦角要等下次刷新才合并回来）。就绪后幂等重跑一次合并
     // （按名认亲 + 并集去重 + 清根键，重复执行无副作用），升级当天即可见老梦角；
@@ -1323,6 +1435,7 @@
       reMigrated = true;
       try { migrateSplit(); } catch (e) {}
       try { rehomeMisfiled(); } catch (e) {}
+      try { fixBelonging(); } catch (e) {}
     });
     setInterval(function () {
       tickApproach();

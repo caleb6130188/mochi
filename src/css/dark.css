@@ -43,6 +43,16 @@
   .desk-lib-box { background:var(--dark-card); }
   .desk-lib-sub { color:#888; }
   .desk-lib-item { border-color:#3a3a3a; }
+  .desk-lib-tab { background:#2a2a2a; border-color:#3a3a3a; color:#888; }
+  .desk-lib-tab.on { background:var(--ink,#f0f0f0); color:#111; border-color:var(--ink,#f0f0f0); }
+  .desk-lib-search { background:#2a2a2a; border-color:#3a3a3a; color:var(--ink,#f0f0f0); }
+  .desk-lib-search::placeholder { color:#777; }
+  .desk-lib-icon { border-color:#3a3a3a; }
+  .desk-lib-icon .dli-prev { background:#2e2e2e; }
+  .desk-lib-icon .dli-letter { color:#aaa; }
+  .desk-lib-icon .dli-name { color:var(--ink,#f0f0f0); }
+  .desk-lib-icon.on { border-color:var(--ink,#f0f0f0); background:rgba(255,255,255,.06); }
+  .desk-lib-icon.on .dli-letter { color:var(--ink,#f0f0f0); }
   .desk-lib-item .dl-where { color:#777; }
   .desk-lib-item .dl-btn { background:#f0f0f0; color:#111; }
   .desk-lib-item .dl-btn:disabled { background:#333; color:#777; }
@@ -67,6 +77,8 @@
   .set-row.sub .txt { color:#ccc; }
   .ver { color:#666; }
   .ver-credit { color:#777; }
+  .set-alert { background:#232323; color:#aaa; }
+  .set-alert b { color:#eee; }
   .gs-row { border-bottom-color:rgba(255,255,255,.05); }
   .stp-min, .stp-max { background:var(--dark-hover); color:#aaa; }
   .stp-min:active, .stp-max:active { background:var(--ink); color:#111; }
@@ -184,6 +196,10 @@
   .cc-group-header { color:var(--dark-soft); }
   .cc-g-chip { background:var(--dark-hover); border-color:var(--dark-border-12); color:var(--dark-soft); }
   .cc-g-chip.sel { background:var(--btn-bg); color:var(--btn-ink); border-color:var(--btn-bg); }
+  /* v3.30.x：自定义字卡 分组停用开关暗色适配 */
+  #cc-list .ccg-toggle { background:var(--dark-hover); border-color:var(--dark-border-12); color:var(--dark-soft); }
+  #cc-list .ccg-toggle.off { background:var(--btn-bg); border-color:var(--btn-bg); color:var(--btn-ink); }
+  #cc-list .cc-group-header.off .ccg-name { color:#777; }
   .cc-check { background:var(--dark-card); border-color:#555; }
   .cc-check.on { background:var(--btn-bg); border-color:var(--btn-bg); }
   .cc-check.on::after { color:var(--btn-ink); }
@@ -195,6 +211,12 @@
   .fav-empty { color:#666; }
   .fav-tab { background:var(--dark-hover); border-color:var(--dark-border-12); color:var(--dark-soft); }
   .fav-tab.sel { background:var(--btn-bg); color:var(--btn-ink); border-color:var(--btn-bg); }
+  /* 收藏批量管理（v3.31.x） */
+  .fav-batch-bar { background:var(--dark-card-92); border-top-color:var(--dark-border); }
+  .fb-btn { background:var(--dark-hover); border-color:var(--dark-border-12); color:var(--dark-soft); }
+  .fb-btn:active { background:rgba(255,255,255,.08); }
+  .fb-btn.fb-del { background:#e05555; color:#fff; }
+  .fav-check { background:var(--dark-hover); border-color:var(--dark-border); }
 
   .mem-card { background:var(--dark-card-92); border-color:var(--dark-border); }
   .mem-tip { background:var(--dark-hover); }
@@ -269,6 +291,8 @@
   .tc-opt:active { background:rgba(255,255,255,.08); }
   .tc-hint { color:var(--muted); }
   .tc-li-q { color:var(--ink); }
+  /* v3.26.x：通话中断记录暗色适配 */
+  .tc-call-interrupt { background:rgba(224,85,85,.14); border-left-color:#e05555; }
 
   .qa-mask { background:rgba(0,0,0,.6); }
   .qa-body { background:var(--dark-card-97); border-color:var(--dark-border); }
@@ -507,7 +531,7 @@
   .card-list.cc-grid .cc-ico { background:var(--dark-hover) !important; }
   .card-list.cc-grid2 .cc-ico { background:var(--dark-hover) !important; }
   .card-list.cc-managing .cc-item.sel::before { color:var(--btn-ink); }
-  #poke-list .cc-item, #poke-list .cc-group-header { background:var(--dark-card); border-color:var(--dark-border); }
+  #poke-list .cc-item, #poke-list .cc-group-header, #invite-list .cc-item { background:var(--dark-card); border-color:var(--dark-border); }
   #poke-list .cc-group-header { background:var(--dark-hover); }
   #poke-list .cc-item .ccg-name, #poke-list .ccg-name { color:#ddd; }
   #poke-list .cc-item .ccg-count { background:var(--dark-hover); color:var(--dark-soft); }

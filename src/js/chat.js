@@ -5,6 +5,7 @@
 (function () {
 const body = document.getElementById('chat-body');
 if (!body) return;
+const chatLoadingEl = document.getElementById('chat-loading'); // v3.26.x：聊天记录加载进度条
 const uid = window.activePrefix();
 const store = window.activeStore();
 function closeIme() {
@@ -80,53 +81,284 @@ try { if (input) input.value = ''; } catch (e) {}
 try { updateChatPartnerName(); } catch (e) {}
 try { fillAvatar('chat-user-av', 'cs-avatar-user'); fillAvatar('chat-partner-av', 'cs-avatar-partner'); } catch (e) {}
 try { if (window.applyContinueSayUI) window.applyContinueSayUI(); } catch (e) {}
+try { updateChatLoading(); } catch (e) {}   // 切桌面聊天页已隐藏 → 进度条同步隐藏
+// v3.26.x：切桌面立即预读新桌面聊天记录——用户导航/点开聊天前读库已在跑，
+//   打开聊天页时记录往往已就绪，不再等 enterChat 才开始读（省下数秒等待）
+// FIX 2026-09-01 #120：大历史桌面套门控，跳过预读（进入聊天页才读），防低端机崩溃
+try { chatPrefetchIfLight(function () { loadMsgs(); }); } catch (e) {}
 } catch (e) {}
 });
 const LS_SNAP_LIMIT = 2 * 1024 * 1024;
 let lsSnapTimer = null;
-let lsSnapPending = null; // { raw, prefix }：窗口内最新一次请求，trailing 时写
-function performLsSnapWrite(raw, prefix) {
+let lsSnapPending = null; // { arr, prefix }：窗口内最新一次请求，trailing 时写
+// v3.26.x OOM：聊天大包（图片 base64 内联）浅层字节估算——只取字符串 .length 相加，
+// 不拷贝/串化数据本身，用于「是否走精简快照 / 是否数组直存 IDB」的阈值判断。
+function msgsBytes(arr) {
+if (!Array.isArray(arr)) return 0;
+let n = 0;
+for (let i = 0; i < arr.length; i++) {
+const m = arr[i];
+if (!m || typeof m !== 'object') { n += 32; continue; }
+const t = m.text; if (typeof t === 'string') n += t.length;
+const im = m.img; if (typeof im === 'string') n += im.length;
+const vc = m.voice; if (typeof vc === 'string') n += vc.length;
+const ps = m.parts;
+if (Array.isArray(ps)) { for (let j = 0; j < ps.length; j++) { const p = ps[j]; if (p && typeof p.v === 'string') n += p.v.length; } }
+n += 64;
+}
+return n;
+}
+// v3.26.x OOM 核心：聊天记录 IDB 直存数组（structured clone，读写都免整包 JSON 串化/解析）。
+// 旧实现单键可达数百 MB（图片 base64 内联）时：读库 JSON.parse 数百 MB（秒级阻塞+堆尖峰）、
+// 每次落盘 JSON.stringify 再数百 MB（OPPO Reno10Pro+ 自带浏览器实测 JS 堆被推到 905/1078MB，
+// 渲染进程被杀、页面自动重启）。小历史（估算 ≤CHAT_STR_THRESHOLD）沿用字符串路径，与旧数据
+// 完全一致（loadMsgs 双形态兼容）；数组路径失败（DataCloneError/事务异常）回退字符串，绝不丢数据。
+const CHAT_STR_THRESHOLD = 3 * 1024 * 1024;
+function persistMsgsToIdb(key, arr) {
+if (!window.idbSet) return Promise.resolve(false);
+if (!arr || !arr.length || msgsBytes(arr) <= CHAT_STR_THRESHOLD) {
+return window.idbSet(key, JSON.stringify(arr || []));
+}
+return window.idbSet(key, arr).then(ok => {
+if (ok) return true;
+return window.idbSet(key, JSON.stringify(arr));
+});
+}
+// v3.26.x #90：聊天记录「条数账本」+ 缩水守卫（本会话跨桌面/读库异常路径的最后止损）。
+// #88 的 authOk 闸门只挡「本会话没读到权威值」；账本再挡一种：读到了、但内存里的数组
+// 明显不是库里那一份（切错桌面残留、快照污染、并发覆盖）。账本 = 本命名空间最近一次
+// 权威条数，存 <prefix>:chat-meta（几百字节小键，idb.js 已把它排除出写日志，
+// 不会被 LS 回滚补回过期值）。整包落盘前同步比对：新条数不足账本一半且账本 ≥300 条
+// → 判定可疑缩水，IDB 与 LS 快照一律不写（LS 废机上覆盖就是永久丢），弹窗告知一次
+// 并补挂 scheduleIdbRetry()：权威读回后 loadMsgs 会把内存里的新消息合并进完整历史再存。
+// 守卫判定全同步（比对内存数字，零额外开销），只在可疑路径才弹窗。
+const CHAT_LEDGER_MIN = 300;
+const CHAT_LEDGER_STEP = 50;   // IDB 账本按步进落盘：只需量级正确，免每次存盘多发事务
+const chatLedger = {};         // prefix -> 已知权威条数
+let chatLedgerWarned = {};
+const chatLedgerRetryAt = {};  // prefix -> 上次强制重读时间（限流，防重读风暴）
+const chatLedgerBytes = {};    // prefix -> 已落盘的字节估算（FIX 2026-09-01 #120，防重复写）
+// FIX 2026-09-01 #120：账本额外记 b（msgsBytes 估算，近似值即可，不用精确），供冷启动
+// 「大历史懒读」门控（chatPrefetchIfLight）廉价判断当前桌面聊天包是否巨大——重启后不必
+// 读 155MB 大键才知道它大。b 缺失按「未知」，门控会保守选择行为（见 chatPrefetchIfLight，不破坏旧逻辑）。
+function chatLedgerSave(prefix, n, bytes) {
+const prev = chatLedger[prefix];
+chatLedger[prefix] = n;
+const bChanged = typeof bytes === 'number' && bytes >= 0 && chatLedgerBytes[prefix] !== bytes;
+if (prev === n && !bChanged) return;
+if (!bChanged && typeof prev === 'number' && n > prev && n - prev < CHAT_LEDGER_STEP) return;
+const obj = { n: n, t: Date.now() };
+if (typeof bytes === 'number' && bytes >= 0) obj.b = bytes;
+try { window.idbSet(prefix + ':chat-meta', JSON.stringify(obj)); } catch (e) {}
+if (typeof bytes === 'number' && bytes >= 0) chatLedgerBytes[prefix] = bytes;
+}
+// 小键补读（chat-msgs 大键读失败时，恰恰只有它能回答「库里到底有多少条」）：
+// 已知有值就不重复读，异步回来也不覆盖本会话更新过的内存值。
+function chatLedgerLoad(prefix) {
+if (!window.idbGet || chatLedger[prefix] !== undefined) return;
 try {
-let snap = raw;
-if (snap.length > LS_SNAP_LIMIT) {
-const arr = JSON.parse(raw);
-if (Array.isArray(arr)) {
-snap = JSON.stringify(arr.map(m => {
+window.idbGet(prefix + ':chat-meta').then(function (v) {
+try {
+if (v === undefined || v === null || chatLedger[prefix] !== undefined) return;
+const o = typeof v === 'string' ? JSON.parse(v) : v;
+if (o && typeof o.n === 'number' && o.n > 0) chatLedger[prefix] = o.n;
+} catch (e) {}
+}).catch(function () {});
+} catch (e) {}
+}
+// FIX 2026-09-01 #120：低端安卓真机（OPPO findx9 等）开网站/进聊天崩溃——default 桌面
+// 聊天大包（图片 base64 内联，实测 155MB/1656条≈94KB每条）在冷启动和切桌面时被两处预读
+// （mochi-restore-done 的 loadMsgs(true)、启动 loadMsgs、contact-switched 预读）一次性
+// idbGet 反序列化超大值，与启动回填叠加成堆尖峰，渲染进程被杀。这里用账本 b 判断「历史很大」
+// 的桌面：冷启动跳过预读，改为进入聊天页才读（enterChat 内部会调 loadMsgs）；小历史保留
+// 原预读加速（不影响大众体验）。零数据风险：读库本就异步，且 saveMsgs 的 authOk 闸门保证
+// 未读到权威前新消息只进 pendingLocal、绝不整包覆盖历史。
+const CHAT_LAZY_BYTES = 8 * 1024 * 1024; // 历史字节估算门槛：超此即视为大包，冷启动懒读
+function chatPrefetchIfLight(load) {
+  let prefix;
+  try { prefix = window.activePrefix(); } catch (e) { prefix = ''; }
+  if (!window.idbGet) { try { load(); } catch (e2) {} return; }
+  window.idbGet(prefix + ':chat-meta').then(function (v) {
+    // FIX 2026-09-01 #120：冷启动预读门控——
+    //   · 账本「完全缺失」（全新/空账号：无 #90 账本=从未落盘，实为无数据）→ 照常预读；
+    //   · 账本存在且 b 已知 ≤ 门槛（小历史）→ 照常预读；
+    //   · 账本存在但 b 缺失或超门槛（旧格式超大历史 / 本次未写 b）→ 跳过冷启动预读，
+    //     进入聊天页才读（enterChat 会 loadMsgs）。理由：老用户超大历史在账本里一定
+    //     有 n（每次落盘都写），只是缺新字段 b；唯一能防低端机首启崩的就是此时不预读，
+    //     首启跑过我行 loadMsgs 落盘会补写 b，之后冷启动按 b 精确判断。
+    //   · 读账本失败（catch）→ 也不预读（防低端机在高峰期抢读大包）。
+    let knownSmall = false;
+    let noLedger = v === undefined || v === null;
+    try {
+      if (!noLedger) {
+        const o = typeof v === 'string' ? JSON.parse(v) : v;
+        if (o && typeof o.b === 'number' && o.b >= 0 && o.b <= CHAT_LAZY_BYTES) knownSmall = true;
+      }
+    } catch (e2) {}
+    if (knownSmall || noLedger) { try { load(); } catch (e2) {} return; }
+    try { window.__xyChatLazyLoad = true; } catch (e2) {} // 大包/未知大小 → 冷启动跳过预读
+  }).catch(function () { /* 读账本失败：也不预读（防低端机在高峰期抢读大包） */ });
+}
+// 返回 true=允许整包落盘（账本已更新）；false=可疑缩水，已拒绝落盘
+function chatLedgerGuard(prefix, arr) {
+const n = Array.isArray(arr) ? arr.length : 0;
+const base = chatLedger[prefix];
+if (typeof base === 'number' && base >= CHAT_LEDGER_MIN && n * 2 < base) {
+if (!chatLedgerWarned[prefix]) {
+chatLedgerWarned[prefix] = 1;
+try {
+if (window.openModal) window.openModal('聊天记录保护', '', function () {}, {
+noInput: true, okText: '知道了',
+staticText: '检测到本次要保存的记录比已存的历史少了很多（' + base + ' 条 → ' + n + ' 条），' +
+'已暂缓保存以防历史被覆盖。请留意稍后重进聊天页确认记录是否完整。'
+});
+} catch (e) {}
+try { scheduleIdbRetry(); } catch (e) {}
+}
+// v3.26.x #90：拒绝落盘不是终点——① 暂存内存数组，权威读回后 loadMsgs 会把其中的新
+// 消息合并进完整历史（切桌面时也不会随内存一起丢）；② 强制重读：scheduleIdbRetry 走的
+// 普通 loadMsgs 会被 IDB_RELOAD_MIN_GAP 时间闸跳过（此刻刚读过），只有 forceIdb 才真重读。
+// 按命名空间 20 秒限流，防极端情况下反复重读整包大历史。
+try { if (Array.isArray(arr) && arr.length && (!pendingLocal || pendingLocal.length < arr.length)) pendingLocal = arr.slice(); } catch (e) {}
+try {
+const nowR = Date.now();
+if (nowR - (chatLedgerRetryAt[prefix] || 0) > 20000) {
+chatLedgerRetryAt[prefix] = nowR;
+setTimeout(function () {
+try { if (window.activePrefix() === prefix) loadMsgs(true); } catch (e) {}
+}, 1500);
+}
+} catch (e) {}
+return false;
+}
+chatLedgerSave(prefix, n, msgsBytes(arr));
+return true;
+}
+// 精简快照：大历史时剥掉 img/voice/long-text 及 parts 里的图片/语音负载（保留占位与 _lsLite
+// 标记，合并逻辑按原语义识别），使 localStorage 兜底快照始终 ≤2MB、且构建过程不再整包串化。
+function liteSnapArray(arr) {
+if (msgsBytes(arr) <= LS_SNAP_LIMIT) return arr; // 小历史：全量快照
+return arr.map(m => {
 if (!m || typeof m !== 'object') return m;
-const hasBig = m.img || m.voice || (typeof m.text === 'string' && m.text.length > 8192);
+const hasBig = m.img || m.voice || (typeof m.text === 'string' && m.text.length > 8192) ||
+(Array.isArray(m.parts) && m.parts.some(p => p && typeof p.v === 'string' && p.v.length > 512));
 if (!hasBig) return m;
 const c = Object.assign({}, m);
 c._lsLite = 1;
 if (c.img) c.img = '';
 if (c.voice) c.voice = '';
 if (typeof c.text === 'string' && c.text.length > 8192) c.text = '[内容已省略]';
-return c;
-}));
+if (Array.isArray(c.parts)) {
+c.parts = c.parts.map(p => {
+if (!p || typeof p !== 'object' || typeof p.v !== 'string') return p;
+if (p.k === 'img' || p.k === 'voice' || p.v.length > 8192) {
+const pc = Object.assign({}, p);
+if (p.k === 'img' || p.k === 'voice') pc.v = '';
+else pc.v = '[内容已省略]';
+return pc;
 }
+return p;
+});
+}
+return c;
+});
+}
+function performLsSnapWrite(arr, prefix) {
+try {
+if (!Array.isArray(arr)) return;
+let snapArr = liteSnapArray(arr);
+let snap = JSON.stringify(snapArr);
+// #180：超限不再整体放弃——原实现静默不写＝LS 兜底全空，权威读取失败窗口里聊的
+// 消息没有任何副本。改为从最旧开始折半丢弃（最多 5 轮），保住最近的尾巴落 LS。
+let round = 0;
+while (snap.length > LS_SNAP_LIMIT && snapArr.length > 1 && round < 5) {
+round++;
+const keep = Math.max(1, Math.floor(snapArr.length / 2));
+snapArr = liteSnapArray(arr.slice(arr.length - keep));
+snap = JSON.stringify(snapArr);
 }
 if (snap.length <= LS_SNAP_LIMIT) {
 localStorage.setItem((prefix || window.activePrefix()) + ':chat-msgs', snap);
 }
 } catch (e) {}
 }
-function writeLsSnapshot(raw, prefix, force) {
+function writeLsSnapshot(arr, prefix, force) {
+if (!Array.isArray(arr)) return;
 if (force) {
 if (lsSnapTimer) { clearTimeout(lsSnapTimer); lsSnapTimer = null; }
 lsSnapPending = null;
-performLsSnapWrite(raw, prefix);
+performLsSnapWrite(arr, prefix);
 return;
 }
-if (raw.length <= LS_SNAP_LIMIT) { performLsSnapWrite(raw, prefix); return; }
-if (lsSnapTimer) { lsSnapPending = { raw: raw, prefix: prefix }; return; }
-performLsSnapWrite(raw, prefix);
+if (msgsBytes(arr) <= LS_SNAP_LIMIT) { performLsSnapWrite(arr, prefix); return; }
+if (lsSnapTimer) { lsSnapPending = { arr: arr, prefix: prefix }; return; }
+performLsSnapWrite(arr, prefix);
 lsSnapTimer = setTimeout(() => {
 lsSnapTimer = null;
 if (lsSnapPending) {
 const p = lsSnapPending;
 lsSnapPending = null;
-performLsSnapWrite(p.raw, p.prefix);
+performLsSnapWrite(p.arr, p.prefix);
 }
 }, 4000);
+}
+// ===== 2026-09-05 #180 聊天尾巴日志（同步兜底，修多机型反复「刷新重开丢最近一段聊天」）=====
+// 背景：整包落盘走「空闲回调+最小2.5s间隔」低频合并（v3.26.x 止血），且 16MB 级异步 IDB
+// 事务在部分安卓内核（一加/OPPO/真我/荣耀/小米 Edge 等实测族）会挂起或随进程被杀回滚、
+// flushSave 的离页事务也未必来得及提交——最近几条消息在这几个窗口里没有任何第二副本。
+// 防线：每条新消息同步写 LS 小键 <cid>:chat-tail（纯文本轻量副本，≤60 条，大负载不进），
+// localStorage 同步写必达；下次权威读库成功后按签名去重合并回放。不与 saveMsgs 链路
+// （#88 权威守卫/#90 账本守卫）耦合：权威守卫拒绝落盘的窗口里日志照样在攒，恢复时一并带回。
+const CHAT_TAIL_MAX = 60;
+const CHAT_TAIL_TEXT_MAX = 1000;
+function chatTailSig(m) {
+try { return ((m && m.ts) || 0) + '|' + (m.side || '') + '|' + String((m && m.text) || '').slice(0, 120); } catch (e) { return ''; }
+}
+function chatTailRead() {
+try {
+const arr = JSON.parse(store.get('chat-tail') || '[]');
+return Array.isArray(arr) ? arr : [];
+} catch (e) { return []; }
+}
+function chatTailClear() {
+try { store.remove('chat-tail'); } catch (e) {}
+}
+// 只收纯文本/轻消息：img/voice/大 parts 同步写 LS 会写爆，仍走整包落盘链路
+function chatTailAppend(rec) {
+try {
+if (!rec || rec.retracted || rec.img || rec.voice) return;
+if (Array.isArray(rec.parts) && rec.parts.some(p => p && typeof p.v === 'string' && p.v.length > 128)) return;
+const arr = chatTailRead();
+arr.push({ ts: rec.ts || Date.now(), side: rec.side || '', special: rec.special || '', text: typeof rec.text === 'string' ? rec.text.slice(0, CHAT_TAIL_TEXT_MAX) : String(rec.text || '') });
+while (arr.length > CHAT_TAIL_MAX) arr.shift();
+store.set('chat-tail', JSON.stringify(arr));
+} catch (e) {}
+}
+// 撤回后日志里的原文不得回放（否则刷新后已撤回内容复活）——按签名整条摘除
+function chatTailDrop(rec) {
+try {
+if (!rec) return;
+const sig = chatTailSig(rec);
+const arr = chatTailRead().filter(j => chatTailSig(j) !== sig);
+store.set('chat-tail', JSON.stringify(arr));
+} catch (e) {}
+}
+// 权威读库成功后调用：日志中不在当前历史里的条目按 ts 归位合并（整包落盘仍走 saveMsgs 守卫链）
+function chatTailMerge() {
+try {
+const arr = chatTailRead();
+if (!arr.length || !Array.isArray(msgs)) return;
+const have = new Set();
+for (let i = 0; i < msgs.length; i++) have.add(chatTailSig(msgs[i]));
+const add = [];
+for (let i = 0; i < arr.length; i++) {
+const j = arr[i];
+if (j && !have.has(chatTailSig(j))) add.push({ ts: j.ts, side: j.side, special: j.special, text: j.text });
+}
+if (!add.length) return;
+msgs = msgs.concat(add).sort((a, b) => ((a && a.ts) || 0) - ((b && b.ts) || 0));
+saveMsgs();
+} catch (e) {}
 }
 // v3.14.x：防「权威读取失败被当空历史」守卫状态——idbGet 的 4s+4s 超时兜底
 //（v3.9.x 防挂起）对「键存在但读取超时」也 resolve undefined，与「键不存在」不可区分；
@@ -158,7 +390,7 @@ try { if (window.activePrefix() !== fusePrefix) return; } catch (e) {}
 chatDbReady = true;
 const fuseMsgs = (pendingLocal && pendingLocal.length) ? pendingLocal : msgs;
 if (fuseMsgs && fuseMsgs.length) {
-try { writeLsSnapshot(JSON.stringify(fuseMsgs), fusePrefix, true); } catch (e) {}
+try { writeLsSnapshot(fuseMsgs, fusePrefix, true); } catch (e) {}
 } else {
 try {
 const lsRaw = store.get('chat-msgs');
@@ -177,34 +409,116 @@ renderWindow(false, true);
 scrollChatBottom();
 }
 } catch (e) {}
+// v3.26.x #88：保险丝只放开「显示 + LS 有损快照」，整包落盘仍要等真读到权威
+//（authLoadedPrefix 不匹配时 saveMsgs/saveMsgsNow 一律暂存）。这里顺带补挂一次有界
+// 读回重试（scheduleIdbRetry 自身限 6 次/5s 间隔），否则读库超时的设备本会话再也拿不回历史。
+try { scheduleIdbRetry(); } catch (e) {}
+try { updateChatLoading(); } catch (e) {} // 保险丝已就绪 → 隐藏聊天记录加载进度条
 }, 15000);
 }
 function saveMsgs() {
-if (!chatDbReady) {
+try { scheduleMediaPass(1500); } catch (e) {} // #142：有新消息写入即安排增量令牌化（pass 自带权威守卫与 WeakSet 去重）
+// v3.26.x #88：守卫从「未就绪」收紧到「本会话没读到该桌面的权威数据」。
+// chatDbReady 会被 15 秒就绪保险丝（armReadyFuse）置 true，而那时 authLoadedPrefix 仍
+// 不等于当前命名空间（IDB 读库超时/挂起）。旧逻辑在这个窗口只要 msgs 非空就整包写
+// IDB：用户发一条消息 → msgs=[这一条] → 整包覆盖 = 该桌面全部历史被抹成一条。
+// 诊断实证（小米 14U Edge）：本机 localStorage 已废（键数 0 + 写探针 QuotaExceededError），
+// writeLsSnapshot 的 LS 兜底同样写不进去，覆盖就是永久丢；配合该机启动耗时 24 秒，
+// 读库必然压不过 15 秒保险丝 → 高发。
+// 现在这种窗口一律只暂存 pendingLocal + 写 LS 有损快照 + 安排重试读回权威；权威读回后
+// loadMsgs 会把 pendingLocal 合并进完整历史再落盘。语义：宁可晚存几条，绝不覆盖全部。
+const authOk = chatDbReady && authLoadedPrefix === window.activePrefix();
+if (!authOk) {
 try { pendingLocal = msgs.slice(); } catch (e) {}
 // v3.14.x：内存为空时不写 LS 快照——权威读取失败窗口里任何模块触发保存，
 // 会把 LS 里仅存的有损备份也覆盖成 "[]"（IDB 万一后续丢失将无从恢复）
-if (msgs.length) writeLsSnapshot(JSON.stringify(msgs), undefined, true);
+if (msgs.length) writeLsSnapshot(msgs, undefined, true);
+try { scheduleIdbRetry(); } catch (e) {}
 return;
 }
 // v3.26.x 止血：改为合并+低频+空闲落盘（见上方调度器），不再每个动作同步写整包
 const myPrefix = window.activePrefix();
 schedulePersist(() => {
-  // v3.14.x：空记录落盘守卫——本会话从未成功读过该桌面的权威数据时，
-  // 禁止把空数组写进 IDB。清空聊天记录走 clearChatHistory 的 store.remove 直删。
-  if (!msgs.length && authLoadedPrefix !== myPrefix) return;
-  const data = JSON.stringify(msgs);
-  try { if (window.idbSet) window.idbSet(myPrefix + ':chat-msgs', data); } catch (e) {}
-  writeLsSnapshot(data, myPrefix);
+  // v3.26.x #88：原守卫只挡空数组（防覆盖全部历史），非空时仍会整包覆盖——改为
+  // 「本会话确实读到过该命名空间的权威数据」才允许整包落盘。排队到执行之间若切过
+  // 桌面，contact-switched 会先 flushPersistNow() 落完再归位 authLoadedPrefix，不漏存。
+  if (authLoadedPrefix !== myPrefix) return;
+  // v3.26.x #90：条数缩水守卫——内存数组明显少于库内账本时整包不落（含 LS 快照）
+  if (!chatLedgerGuard(myPrefix, msgs)) return;
+  // v3.26.x OOM：大历史 IDB 直存数组（免整包 stringify），小历史仍字符串路径
+  try { if (window.idbSet) persistMsgsToIdb(myPrefix + ':chat-msgs', msgs); } catch (e) {}
+  writeLsSnapshot(msgs, myPrefix);
 });
 }
 function flushSave() {
 if (window.__resetting) return;
-// v3.26.x 止血：立即落盘待写（离页/切走兜底）；未就绪则仅写 LS 有损快照
+// v3.26.x 止血：立即落盘待写（离页/切走兜底）；#88：未读到权威则仅写 LS 有损快照
 flushPersistNow();
-if (!chatDbReady && msgs.length) writeLsSnapshot(JSON.stringify(msgs), undefined, true);
+if ((!chatDbReady || authLoadedPrefix !== window.activePrefix()) && msgs.length) writeLsSnapshot(msgs, undefined, true);
 }
 window.chatFlushSave = flushSave;
+// ===== #142 媒体池：聊天图片内容寻址去重 =====
+// 同一张表情包/图片每发一次就整份 base64 进库（诊断实证 chat-msgs 全桌面 ≈214MB，
+// 重复占大头）。normalize 把消息里的 data:image 替换为池令牌 @@m:<hash>（media-pool.js
+// 负责哈希/落池/渲染解析），消息体只留 44 字符引用。安全设计：
+//   · 令牌化只发生在内存 msgs 上，落盘走 saveMsgs() 原路（#88 权威守卫/#90 账本守卫全保留）；
+//   · 池数据落盘（mochiMediaFlush）先于 msgs 落盘——崩溃窗口最多「池多一条孤儿」，
+//     不可能出现「令牌入库而池数据丢失」；
+//   · WeakSet 记录已处理消息：每条消息每会话只哈希一次，pass 高频触发零重复开销；
+//   · 令牌跨桌面/跨设备稳定（内容哈希），备份导出带池键即可在他机恢复；
+//   · crypto.subtle 不可用（非安全上下文）时 tokenize 恒 null，一切保持旧路径。
+let _mediaPassT = null, _mediaPassBusy = false;
+const _mediaTokSeen = new WeakSet();
+function scheduleMediaPass(delay) {
+if (!window.mochiMediaTokenize) return;
+clearTimeout(_mediaPassT);
+_mediaPassT = setTimeout(mediaNormalizePass, delay || 1500);
+}
+async function mediaNormalizePass() {
+if (_mediaPassBusy) { scheduleMediaPass(4000); return; }
+// 与 saveMsgs 同款权威守卫：本会话没读到该桌面权威数据时绝不改写（防把半库令牌化覆盖全史）
+if (!chatDbReady || authLoadedPrefix !== window.activePrefix()) return;
+_mediaPassBusy = true;
+try {
+let changed = 0;
+for (let i = 0; i < msgs.length; i++) {
+const m = msgs[i];
+if (!m || _mediaTokSeen.has(m)) continue;
+let did = false;
+if (typeof m.text === 'string' && m.text.indexOf('data:image/') === 0) {
+const t = await window.mochiMediaTokenize(m.text);
+if (t) { m.text = t; changed++; did = true; }
+}
+if (typeof m.img === 'string' && m.img.indexOf('data:image/') === 0) {
+const t = await window.mochiMediaTokenize(m.img);
+if (t) { m.img = t; changed++; did = true; }
+}
+if (Array.isArray(m.parts) && m.parts.length) {
+for (let j = 0; j < m.parts.length; j++) {
+const p = m.parts[j];
+if (p && typeof p.v === 'string' && p.v.indexOf('data:image/') === 0) {
+const t = await window.mochiMediaTokenize(p.v);
+if (t) { p.v = t; changed++; did = true; }
+}
+}
+}
+_mediaTokSeen.add(m);
+if ((i & 63) === 63) {
+await new Promise(r => setTimeout(r, 0));
+// 中途切桌面/权威归属变化 → 立即中止（WeakSet 未标记的记录留给下次 pass）
+if (authLoadedPrefix !== window.activePrefix()) break;
+}
+}
+if (changed > 0) {
+await window.mochiMediaFlush(); // 池数据先落盘，再让引用落盘（顺序不可反）
+saveMsgs();
+try { console.info('[mochi] 媒体池：' + changed + ' 处聊天图片已去重为池引用'); } catch (e) {}
+}
+} catch (e) {} finally { _mediaPassBusy = false; }
+}
+document.addEventListener('mochi-restore-done', function () { setTimeout(function () { scheduleMediaPass(1000); }, 18000); });
+document.addEventListener('contact-switched', function () { setTimeout(function () { scheduleMediaPass(1000); }, 12000); });
+window.chatMediaNormalizeNow = mediaNormalizePass; // 可测性/诊断钩子（verify-media-pool 用）
 try {
 window.addEventListener('beforeunload', flushSave);
 document.addEventListener('visibilitychange', () => {
@@ -289,8 +603,16 @@ function runDeferredNormalization() {
     try { if (sysNickCatchup()) changed = true; } catch (e) {}
     normPrefix = null;
     if (!changed) return;
-    try { if (window.idbSet) window.idbSet(myPre + ':chat-msgs', JSON.stringify(msgs)); } catch (e) {}
-    try { writeLsSnapshot(JSON.stringify(msgs), myPre, true); } catch (e) {}
+    // v3.26.x #88：未读到权威时不整包写回（同 saveMsgs 守卫）。归一化是幂等的，
+    // 本次跳过会在下次读库成功后重跑；拿内存里的部分数组覆盖 = 丢全部历史。
+    if (authLoadedPrefix !== myPre) return;
+    // v3.26.x #90：归一化会删相邻重复（条数变少）——命中缩水判定时只跳过落盘（幂等，
+    // 下次读库成功后重跑），渲染照常，不影响本会话使用。
+    const canPersist = chatLedgerGuard(myPre, msgs);
+    if (canPersist) {
+    try { if (window.idbSet) persistMsgsToIdb(myPre + ':chat-msgs', msgs); } catch (e) {}
+    try { writeLsSnapshot(msgs, myPre, true); } catch (e) {}
+    }
     try { if (chatVisible() && msgs.length) { renderWindow(false, true); scrollChatBottom(); } } catch (e) {}
   };
   const tick = () => {
@@ -374,19 +696,28 @@ if (!skipRead) {
 try {
 if (window.idbGet) {
 const myPrefix = window.activePrefix();
+// v3.26.x #90：先补读条数账本（小键，几乎不会超时）。大键读取失败时它是唯一
+// 能回答「库里到底有多少条」的依据，落盘守卫全靠它。
+try { chatLedgerLoad(myPrefix); } catch (e) {}
 window.idbGet(myPrefix + ':chat-msgs').then(v => {
 if (window.activePrefix() !== myPrefix) return;
 if (v === undefined || v === null) {
 // v3.14.x：先区分「键确实不存在」与「读取失败/超时」——idbGet 超时兜底也
 // resolve undefined，真机切桌面并发抢事务时大键读取超时并不罕见；若当"无权威"
-// 会置 ready 并用内存/LS 有损快照覆盖 IDB = 全部历史被清。用 idbGetAllKeys
-// 复核：键在列表=这次读取失败，绝不落盘、安排有界重试；不在=确认无历史才走原逻辑。
+// 会置 ready 并用内存/LS 有损快照覆盖 IDB = 全部历史被清。
+// v3.26.x #90：复核改走 idb.js 的严格三态探测 idbHasKey（true 存在/false 确认没有/
+// null 没读到）。原 idbGetAllKeys 在超时、挂起时 resolve 空数组，与「确认空库」
+// 不可区分 → 读取失败被当成「这个桌面没有历史」，置 authLoadedPrefix 放开整包落盘
+// → 发一条消息即把全部历史覆盖成一条（诊断实证：小米 14U Edge，LS 已废无第二副本）。
+// 现在只有 has === false 才认「无历史」；null 与 true 一律按读取失败处理。
 const idbKey = myPrefix + ':chat-msgs';
-const confirmMiss = window.idbGetAllKeys
+const confirmMiss = window.idbHasKey
+? window.idbHasKey(idbKey).then(function (has) { return has === false; })
+: (window.idbGetAllKeys
 ? window.idbGetAllKeys().then(function (keys) {
 return !(keys || []).some(function (k) { return k === idbKey; });
 }).catch(function () { return false; })
-: Promise.resolve(true);
+: Promise.resolve(true));
 confirmMiss.then(function (isMiss) {
 if (window.activePrefix() !== myPrefix) return;
 if (!isMiss) { scheduleIdbRetry(); return; }
@@ -406,9 +737,12 @@ if (window.idbSet) window.idbSet(myPrefix + ':chat-msgs', lsRaw);
 if (pendingLocal && pendingLocal.length) {
 msgs = pendingLocal.concat(msgs.filter(m => !pendingLocal.some(p => p && p.ts === m.ts && p.text === m.text)));
 pendingLocal = null;
-try { if (window.idbSet) window.idbSet(myPrefix + ':chat-msgs', JSON.stringify(msgs)); } catch (e) {}
-writeLsSnapshot(JSON.stringify(msgs), myPrefix, true);
+try { if (window.idbSet) persistMsgsToIdb(myPrefix + ':chat-msgs', msgs); } catch (e) {}
+writeLsSnapshot(msgs, myPrefix, true);
 }
+// #90：已确认库里没有 chat-msgs，账本随之对齐真实状态（过期的高账本不该再拦正常保存）
+try { chatLedgerSave(myPrefix, (msgs && msgs.length) || 0, msgsBytes(msgs)); } catch (e) {}
+try { chatTailMerge(); } catch (e) {} // #180：确认空库也回放尾巴日志（本会话/上次会话未落盘部分）
 });
 return;
 }
@@ -466,6 +800,9 @@ chatDbReady = true;
 // v3.14.x：本命名空间已读到权威（此后空数组落盘才被允许——内存已含全部历史）
 authLoadedPrefix = myPrefix;
 idbRetryCount = 0;
+try { chatTailMerge(); } catch (e) {} // #180：权威就绪后回放尾巴日志（上次会话未落盘的最近消息）
+// v3.26.x #90：账本基线＝刚读到的库内条数（同值不重复落盘，见 chatLedgerSave 节流）
+try { chatLedgerSave(myPrefix, idbArr.length, msgsBytes(idbArr)); } catch (e) {}
 try {
 lastIdbLoadPrefix = window.activePrefix();
 lastIdbLoadAt = Date.now();
@@ -473,13 +810,26 @@ lastIdbLoadAt = Date.now();
 try { localStorage.removeItem('xy-home-v2:chat-msgs'); } catch (e) {}
 if (changed) {
 __prof('ch6_save');
-try { if (window.idbSet) window.idbSet(myPrefix + ':chat-msgs', JSON.stringify(msgs)); } catch (e) {}
-try { writeLsSnapshot(JSON.stringify(msgs), myPrefix, true); } catch (e) {}
+try { if (window.idbSet) persistMsgsToIdb(myPrefix + ':chat-msgs', msgs); } catch (e) {}
+try { writeLsSnapshot(msgs, myPrefix, true); } catch (e) {}
 __prof('ch7_end');
 if (chatVisible() && chatNearBottom()) {
 renderWindow(false, true);
 scrollChatBottom();
 }
+} else if (chatVisible() && msgs.length && !body.children.length) {
+// v3.26.x：冷加载（切桌面后 msgs=[]、无本地待合并，changed=false 原路径不会重渲）——
+//   读库完成后聊天页仍开着且消息区为空 → 补渲染一次（同时隐藏加载进度条）
+renderWindow(false, true);
+scrollChatBottom();
+}
+// v3.26.x OOM：旧大数据字符串存量（升级前写入的 chat-msgs 单键字符串）后台一次性
+// 转数组直存——此后每次读库免整包 JSON.parse（消除数百 MB 解析尖峰与秒级主线程阻塞）。
+// 放在 if(changed) 之外：无本地改动（changed=false）的常见大数据场景也要迁移。
+if (typeof v === 'string' && v.length > CHAT_STR_THRESHOLD && idbArr && idbArr.length) {
+setTimeout(function () {
+try { if (window.activePrefix() === myPrefix && window.idbSet) persistMsgsToIdb(myPrefix + ':chat-msgs', msgs); } catch (e) {}
+}, 0);
 }
 // v3.26.x：读库完成后调度后台分批归一化（幂等，仅对当前联系跑一次）
 scheduleDeferredNormalization();
@@ -509,6 +859,36 @@ const end = s.indexOf('</svg>');
 if (end >= 0) return s.slice(0, end + 6) + escTxt(s.slice(end + 6));
 }
 return escTxt(s);
+}
+// v3.30.x：拍一拍人称「昵称制」——聊天昵称与桌面解耦后（v3.26.x），联系人昵称是聊天里
+// 唯一的人称来源。拍一拍消息里除了 {ta}/{me} 占位符外，字卡文案中写死的独立人称占位
+// （TA / ta / 他 / 她，语义上均指代联系人/被拍方）也一并按「联系人昵称」回填，
+// 不再跟随性别称呼（他/她/TA）——否则用户改了联系人昵称，拍一拍里仍出现 TA 很费解。
+// 保护段：<svg>…</svg> 图标、data:*;base64 与合成词（其他/他们/她们/他人）不受影响；
+// 不用 lookbehind（旧版 iOS Safari 不支持），占位符先掩成控制符防二次替换。
+function pokePersonMap(s, taNm, meNm) {
+if (s === null || s === undefined) return s;
+let t = String(s);
+if (typeof t !== 'string' || !t) return t;
+const hasPh = t.indexOf('{ta}') >= 0 || t.indexOf('{me}') >= 0;
+if (hasPh) t = t.split('{ta}').join('\u0002').split('{me}').join('\u0003');
+const segs = t.split(/(<svg[\s\S]*?<\/svg>)/);
+for (let i = 0; i < segs.length; i += 2) {
+const parts = segs[i].split(/(data:[a-zA-Z0-9.+-]+\/[a-zA-Z0-9.+-]+;base64,[A-Za-z0-9+/=]+)/);
+for (let j = 0; j < parts.length; j += 2) {
+let p = parts[j];
+p = p.split('其他').join('\u0004').split('他们').join('\u0005').split('她们').join('\u0006').split('他人').join('\u0007');
+p = p.split('TA').join(taNm);
+p = p.replace(/\bta\b/g, taNm);
+p = p.split('他').join(taNm).split('她').join(taNm);
+p = p.split('\u0004').join('其他').split('\u0005').join('他们').split('\u0006').join('她们').split('\u0007').join('他人');
+parts[j] = p;
+}
+segs[i] = parts.join('');
+}
+t = segs.join('');
+if (hasPh) t = t.split('\u0002').join(taNm).split('\u0003').join(meNm);
+return t;
 }
 function attrEsc(s) {
 return String(s == null ? '' : s)
@@ -649,7 +1029,8 @@ fillAvatar('chat-partner-av', 'cs-avatar-partner');
 try {
 document.addEventListener('mochi-restore-done', function () {
 try {
-loadMsgs(true);
+// FIX 2026-09-01 #120：大历史桌面跳过 restore 完成时的强读（进入聊天页才读），防低端机崩溃
+chatPrefetchIfLight(function () { loadMsgs(true); });
 if (chatVisible() && chatNearBottom() && body && msgs.length) {
 renderWindow(false, true);
 scrollChatBottom();
@@ -687,9 +1068,18 @@ function chatVisible() {
 const p = document.getElementById('page-chat');
 return !!(p && !p.hidden);
 }
+// v3.26.x：聊天记录加载进度条显隐——消息区为空且权威数据未就绪时显示「正在加载聊天记录…」，
+//   读库完成（chatDbReady=true 且 msgs 非空）或离开聊天页自动隐藏
+function updateChatLoading() {
+if (!chatLoadingEl) return;
+chatLoadingEl.hidden = !(chatVisible() && !chatDbReady && !msgs.length);
+}
+// FIX #162（iPad Air 7 / iPadOS 26 Safari：对方回一条消息视图就向上漂一次，不贴最新消息）
+// 贴底钉住态：程序化滚到底时置真，用户手动触摸/滚轮滚动即解除；复写与图片补滚只在钉住时进行
+let chatPinnedBottom = true;
 function scrollChatBottom() {
 const cb = document.getElementById('chat-body');
-if (cb) cb.scrollTop = cb.scrollHeight;
+if (cb) { chatPinnedBottom = true; cb.scrollTop = cb.scrollHeight; }
 }
 function chatNearBottom() {
 const cb = document.getElementById('chat-body');
@@ -708,6 +1098,11 @@ scrollChatBottom();
 if (out) {
 requestAnimationFrame(scrollChatBottom);
 setTimeout(scrollChatBottom, 120);
+} else {
+// FIX #162：来消息侧原本只写一次 scrollTop——iPadOS 26 Safari 内核可能丢弃/被迟到的
+// 布局变更顶开；对齐 out 侧三连写口径，钉住期间才复写（用户已手动滚走则不抢滚动权）
+requestAnimationFrame(() => { if (chatPinnedBottom) scrollChatBottom(); });
+setTimeout(() => { if (chatVisible() && chatPinnedBottom) scrollChatBottom(); }, 150);
 }
 }
 function showTyping() {
@@ -765,7 +1160,12 @@ const isOff = window.isDefaultCardOff || null;
 const useChat = window.defaultCardUse ? window.defaultCardUse('chat') : true;
 const catOn = window.defaultCardCat || (() => true);
 if (dcfg.enabled !== false && useChat) {
-if (catOn('main')) {
+// v3.26.x #157：默认主字卡只在自定义 text 池为空时兜底并入——原实现开启即把 4600+
+// 张默认主字卡无条件全量并入回复池，「整体概率」dc-overall（如 5%）只管 genOneReply
+// 里 drawCards 那条混入路径，对池子本身无效：650 张自定义对 4600+ 默认均匀随机抽取，
+// 体感「概率调到 5% 联系人还是基本用默认字卡」（小米15Pro+Chrome 等多机型反馈）。
+// 对齐颜文字/emoji 分支的兜底语义：有自定义就用自定义，默认字卡按 dc-overall 概率混入。
+if (catOn('main') && !text.length) {
 const defGrps = (window.getDefaultCardGroups && window.getDefaultCardGroups('main')) || [];
 defGrps.forEach(g => {
 const arr = g[1] || [];
@@ -915,7 +1315,11 @@ window.__replyPoolDiag = function () {
       '自定义字卡=' + customRaw.length,
       '默认总开关=' + cfg.enabled,
       '聊天使用=' + (window.defaultCardUse ? window.defaultCardUse('chat') : '?'),
-      '主字卡=' + (window.defaultCardCat ? window.defaultCardCat('main') : '?')
+      '主字卡=' + (window.defaultCardCat ? window.defaultCardCat('main') : '?'),
+      // v3.26.x #163：补概率滑杆现场——「默认概率调到八九十还是总发自定义字卡」类报障
+      // 直接核对 dc-overall-chat（场景概率，未设回退整体）与主字卡分类占比是否真调到位
+      '默认概率chat=' + (cfg.overallFor ? cfg.overallFor('chat') : cfg.overall),
+      '主卡占比=' + (cfg.probs ? cfg.probs.main : '?')
     ].join(' / ');
   } catch (e) { return '诊断出错:' + e.message; }
 };
@@ -984,6 +1388,8 @@ const QUOTE_PLACEHOLDER = /^(图片|表情包|\[图片\]|\[表情包\])$/;
 // 直出会整串 base64 铺满屏幕。渲染前统一还原成可读标签，新数据本已是标签、原样通过。
 function quoteTextSafe(s) {
 let str = String(s == null ? '' : s);
+// #148：媒体池令牌（@@m:hash）是图片载荷不是文本，直出会把令牌串当文字铺进引用块/引用预览条
+if (window.mochiMediaIsToken && window.mochiMediaIsToken(str)) return '';
 const bar = str.indexOf('|||');
 if (bar >= 0) str = bar > 0 ? '[语音] ' + str.slice(0, bar) : '';
 const di = str.indexOf('data:');
@@ -994,7 +1400,10 @@ function quoteHtml(q, side) {
 const __fitQ = (side !== 'out') && !!window.taFit;
 const FQ = (s) => (__fitQ ? window.taFit(s) : s);
 if (q && typeof q === 'object') {
-const imgs = (q.imgs || []).filter(s => typeof s === 'string' && s.indexOf('data:') === 0).slice(0, 3);
+// #148：图片载荷除 data: 外还有媒体池令牌 @@m:hash——令牌照常渲染成 <img src>，
+// 渲染期由 media-pool 文档级观察器解析成池数据（与消息本体图片同一机制）
+const isQM = (s) => typeof s === 'string' && (s.indexOf('data:') === 0 || (window.mochiMediaIsToken && window.mochiMediaIsToken(s)));
+const imgs = (q.imgs || []).filter(isQM).slice(0, 3);
 const t = quoteTextSafe(q.t);
 const tHtml = (t && t.indexOf('data:') !== 0 && !(imgs.length && QUOTE_PLACEHOLDER.test(t))) ? escTxtBr(FQ(t)) : '';
 let inner = '';
@@ -1002,7 +1411,7 @@ if (imgs.length) inner += '<span class="msg-quote-imgs">' + imgs.map(s => '<img 
 if (tHtml) inner += '<span class="msg-quote-text">' + tHtml + '</span>';
 return '<div class="msg-quote">' + inner + '</div>';
 }
-if (typeof q === 'string' && q.indexOf('data:') === 0) {
+if (typeof q === 'string' && (q.indexOf('data:') === 0 || (window.mochiMediaIsToken && window.mochiMediaIsToken(q)))) {
 return '<div class="msg-quote"><img class="msg-quote-img" src="' + attrEsc(q) + '" alt="图片" loading="lazy" decoding="async"></div>';
 }
 const qs = quoteTextSafe(q);
@@ -1290,7 +1699,9 @@ body.querySelectorAll('.msg-ask-card.show-fav, .msg-choose-card.show-fav').forEa
 const favBtn = e.target.closest('.msg-fav-heart');
 if (favBtn) {
 e.stopPropagation();
-const fItem = favBtn.closest('.msg-ask');
+// v3.28.x：心形不只挂在 .msg-ask 家族（红包/送花/礼物/佳肴是 .msg-rp/.msg-flower/.msg-gift），
+// 改为按最近的 data-idx 容器定位，保证所有带心形的互动卡片都能收藏
+const fItem = favBtn.closest('[data-idx]');
 if (fItem && fItem.dataset.idx !== undefined) window.favCardFromMsg(Number(fItem.dataset.idx));
 return;
 }
@@ -1431,6 +1842,7 @@ scrollChatBottom();
 }
 suppressScrollUntil = Date.now() + 200; // 本轮渲染/滚动结束后 200ms 内不响应 scroll
 restoreInplaceDrafts();
+updateChatLoading(); // 渲染完成（有内容或就绪）→ 隐藏加载进度条
 }
 window.chatReRenderTime = function () {
 if (chatPage.hidden || !body.children.length) return;
@@ -1532,6 +1944,17 @@ loadNewerIncremental();
 }
 }, 100);
 }, { passive: true });
+// FIX #162：用户手动触摸/滚轮滚动＝解除贴底钉住，之后的自动复写不再抢滚动权
+body.addEventListener('touchstart', () => { chatPinnedBottom = false; }, { passive: true, capture: true });
+body.addEventListener('wheel', () => { chatPinnedBottom = false; }, { passive: true });
+// FIX #162：消息图片是 loading=lazy，加载完成晚于滚底，加载后内容长高会把视图从底部顶开
+//（iPadOS 26 Safari 尤其明显＝「回一条滑一次」）——钉住期间任何消息图片 onload 后回到底部
+body.addEventListener('load', (e) => {
+const t = e.target;
+if (!t || t.tagName !== 'IMG') return;
+if (!chatPinnedBottom || batchRendering || !chatVisible()) return;
+requestAnimationFrame(scrollChatBottom);
+}, true);
 function renderMsg(rec) {
 const m = document.createElement('div');
 if (!batchRendering) m.classList.add('msg-enter');
@@ -1563,7 +1986,7 @@ m.innerHTML = '<div class="msg-ask-card' + (answered ? ' answered' : '') + '">' 
 (answered
 ? '<div class="msg-ask-a">✓ ' + escTxt(T(rec.inviteAnswer || 'TA 回应了你')) + '</div>'
 : '<div class="msg-ask-tip">' + T('等待 TA 回应…') + '</div>') +
-favHeartHtml() +
+favHeartHtml(rec) +
 '</div>';
 appendMsg(m);
 maybeScrollChatBottom(rec.side);
@@ -1579,7 +2002,7 @@ m.innerHTML = '<div class="msg-ask-card' + (answered ? ' answered' : '') + '">' 
 (answered
 ? '<div class="msg-ask-a">✓ ' + T('TA：') + escTxt(T(rec.askAnswer || '回答了你')) + '</div>' + (rec.askReply ? '<div class="msg-choose-r">' + T('TA：') + escTxt(T(rec.askReply)) + '</div>' : '')
 : '<div class="msg-ask-tip">' + (askIsSingle ? T('等待 TA 选择…') : T('等待 TA 回答…')) + '</div>') +
-favHeartHtml() +
+favHeartHtml(rec) +
 '</div>';
 appendMsg(m);
 maybeScrollChatBottom(rec.side);
@@ -1594,7 +2017,9 @@ return m;
 }
 if (rec.special === 'poke' || rec.special === 'ask-msg') {
 m.className = 'msg-poke' + (rec.mailNotice ? ' mail-notice' : '');
-m.innerHTML = '<span>' + pokeIconHtml(T(rec.text)) + '</span>' +
+// v3.30.x：拍一拍人称昵称制——不再走 T()（taFit 称呼替换），改用 pokePersonMap：
+// {ta}/{me} 与字卡里写死的 TA/ta/他/她 一律按 我的昵称/联系人昵称 回填
+m.innerHTML = '<span>' + pokeIconHtml(pokePersonMap(rec.text, __taNm, __meNm)) + '</span>' +
 (rec.img ? '<img class="msg-poke-img" src="' + attrEsc(rec.img) + '" alt="新头像">' : '');
 if (rec.mailNotice) {
 m.addEventListener('click', () => { if (window.openMailPage) window.openMailPage(); });
@@ -1683,10 +2108,10 @@ m.innerHTML = '<div class="msg-rp-card' + (cls ? ' ' + cls : '') + '">' +
 '<span class="msg-rp-side">' + escTxt(sideTxt) + ' 发出</span>' +
 '<span class="msg-rp-status">' + escTxt(rpStatusText(rec)) + '</span>' +
 '</div>' +
-favHeartHtml() +
+favHeartHtml(rec) +
 '</div>';
 if (rec.rpCover) {
-const cover = rpCoverGet();
+const cover = rpCoverGet(rec.side);
 if (cover) {
 const card = m.querySelector('.msg-rp-card');
 if (card) {
@@ -1709,6 +2134,7 @@ return m;
 }
 if (rec.special === 'flower') {
 m.className = 'msg-flower';
+m.dataset.idx = msgs.length - 1;
 const sideTxt = rec.side === 'out' ? '我' : chatPartnerName();
 m.innerHTML = '<div class="msg-flower-card">' +
 '<div class="msg-flower-bar"></div>' +
@@ -1717,7 +2143,7 @@ m.innerHTML = '<div class="msg-flower-card">' +
 '<div class="msg-flower-divider"><span></span>\u2739<span></span></div>' +
 '<div class="msg-flower-wish">\u201C' + escTxt(rec.flWish || '\u9001\u7ED9\u4F60~') + '\u201D</div>' +
 '<div class="msg-flower-foot"><span>' + escTxt(sideTxt) + ' \u9001\u51FA</span></div>' +
-favHeartHtml() +
+favHeartHtml(rec) +
 '</div>';
 appendMsg(m);
 maybeScrollChatBottom(rec.side);
@@ -1725,6 +2151,7 @@ return m;
 }
 if (rec.special === 'gift') {
 m.className = 'msg-gift';
+m.dataset.idx = msgs.length - 1;
 const sideTxt = rec.side === 'out' ? '我 送出' : (chatPartnerName() + ' 送来');
 const gc = ((window.GIFT_CAT_COLOR || {})[rec.giftCat]) || '#f2f2f5';
 m.innerHTML = '<div class="msg-gift-card">' +
@@ -1734,7 +2161,7 @@ m.innerHTML = '<div class="msg-gift-card">' +
 '<div class="msg-gift-wish">\u201C' + escTxt(rec.giftWish || '心意') + '\u201D</div>' +
 '<div class="msg-gift-foot"><span class="mg-side">' + escTxt(sideTxt) + '</span>' +
 '<span class="msg-gift-price">\u00A5' + escTxt(Number(rec.giftPrice || 0).toFixed(2)) + '</span></div>' +
-favHeartHtml() +
+favHeartHtml(rec) +
 '</div>';
 appendMsg(m);
 maybeScrollChatBottom(rec.side);
@@ -1742,6 +2169,7 @@ return m;
 }
 if (rec.special === 'dish') {
 m.className = 'msg-gift msg-dish';
+m.dataset.idx = msgs.length - 1;
 const sideTxt = rec.side === 'out' ? '我 烹饪送出' : (chatPartnerName() + ' 烹饪送来');
 const stars = rec.dishQuality === 'perfect' ? '★★★' : rec.dishQuality === 'good' ? '★★' : '★';
 m.innerHTML = '<div class="msg-gift-card msg-dish-card">' +
@@ -1751,7 +2179,7 @@ m.innerHTML = '<div class="msg-gift-card msg-dish-card">' +
 '<div class="msg-gift-wish">\u201C' + escTxt(rec.dishWish || '尝尝手艺') + '\u201D</div>' +
 '<div class="msg-gift-foot"><span class="mg-side">' + escTxt(sideTxt) + '</span>' +
 '<span class="msg-gift-price">\u00A5' + escTxt(Number(rec.dishPrice || 0).toFixed(2)) + '</span></div>' +
-favHeartHtml() +
+favHeartHtml(rec) +
 '</div>';
 appendMsg(m);
 maybeScrollChatBottom(rec.side);
@@ -1767,7 +2195,7 @@ m.innerHTML = '<div class="msg-choose-card' + (answered ? ' answered' : '') + '"
 (answered
 ? '<div class="msg-ask-a">✓ 你选择了：' + escTxt(rec.choiceAnswer) + '</div><div class="msg-choose-r">' + T('TA：') + escTxt(T(rec.choiceReply)) + '</div>'
 : '<div class="msg-ask-tip">点击选择你的答案</div>') +
-favHeartHtml() +
+favHeartHtml(rec) +
 '</div>';
 appendMsg(m);
 maybeScrollChatBottom(rec.side);
@@ -1782,7 +2210,7 @@ m.innerHTML = '<div class="msg-choose-card' + (answered ? ' answered' : '') + '"
 (answered
 ? '<div class="msg-ask-a">✓ 你：' + escTxt(rec.curiousAnswer) + '</div><div class="msg-choose-r">' + T('TA：') + escTxt(T(rec.curiousReply)) + '</div>'
 : '<div class="msg-ask-tip">' + T('点击回答 TA 的好奇') + '</div>') +
-favHeartHtml() +
+favHeartHtml(rec) +
 '</div>';
 appendMsg(m);
 maybeScrollChatBottom(rec.side);
@@ -1797,7 +2225,7 @@ m.innerHTML = '<div class="msg-choose-card' + (answered ? ' answered' : '') + '"
 (answered
 ? '<div class="msg-ask-a">✓ 你：' + escTxt(rec.roastAnswer) + '</div><div class="msg-choose-r">' + T('TA：') + escTxt(T(rec.roastReply)) + '</div>'
 : '<div class="msg-ask-tip">' + T('点击回 TA 一句') + '</div>') +
-favHeartHtml() +
+favHeartHtml(rec) +
 '</div>';
 appendMsg(m);
 maybeScrollChatBottom(rec.side);
@@ -1813,7 +2241,7 @@ m.innerHTML = '<div class="msg-ask-card' + (answered ? ' answered' : '') + '">' 
 (answered
 ? '<div class="msg-ask-a">✓ 已回答：' + escTxt(rec.askAnswer) + '</div>' + (rec.askReply ? '<div class="msg-choose-r">' + T('TA：') + escTxt(T(rec.askReply)) + '</div>' : '')
 : '<div class="msg-ask-tip">' + (isSingle ? '点击选择你的答案' : T('点击回答 TA 的提问')) + '</div>') +
-favHeartHtml() +
+favHeartHtml(rec) +
 '</div>';
 appendMsg(m);
 maybeScrollChatBottom(rec.side);
@@ -2035,7 +2463,11 @@ sessionChangedIdx.clear();
 chatDbReady = true;
 renderStart = 0; // v3.6.x：分页窗口起点复位（消息已清空）
 cancelPersist();
+// v3.26.x #90：用户主动清空＝合法归零，账本必须同步（否则缩水守卫会一直拒绝后续保存）
+try { chatLedger[window.activePrefix()] = 0; } catch (e) {}
 try { store.remove('chat-msgs'); } catch (e) {}
+try { store.remove('chat-meta'); } catch (e) {}
+chatTailClear(); // #180：清空记录＝日志一并清（否则刷新后已清内容回放复活）
 if (body) body.innerHTML = '';
 clearChatUnread();
 };
@@ -2051,9 +2483,11 @@ sessionChangedIdx.clear();
 chatDbReady = true;
 renderStart = 0;
 cancelPersist();
-const importedData = JSON.stringify(msgs);
-try { if (window.idbSet) window.idbSet(window.activePrefix() + ':chat-msgs', importedData); } catch (e) {}
-writeLsSnapshot(importedData, undefined, true);
+chatTailClear(); // #180：整包导入替换＝旧日志作废
+try { if (window.idbSet) persistMsgsToIdb(window.activePrefix() + ':chat-msgs', msgs); } catch (e) {}
+writeLsSnapshot(msgs, undefined, true);
+// v3.26.x #90：主动整包替换＝合法，账本直接对齐新条数（旧的高账本不得继续拦后续保存）
+try { chatLedgerSave(window.activePrefix(), msgs.length, msgsBytes(msgs)); } catch (e) {}
 if (body) body.innerHTML = '';
 clearChatUnread();
 if (chatVisible() && msgs.length) {
@@ -2096,7 +2530,7 @@ notifyT = notifyT + ' ' + phOf();
 const isHidden = opts.isHidden === true;
 if (isHidden) {
 if (window.bgNotifyCheck) {
-window.bgNotifyCheck(notifyT, Date.now(), { name: opts.name, img: opts.img, av: opts.av });
+window.bgNotifyCheck(notifyT, Date.now(), { name: opts.name, img: opts.img, av: opts.av, avFixed: opts.avFixed === true });
 }
 return;
 }
@@ -2128,8 +2562,14 @@ function extractDeskMsg(rec) {
 let text = rec.text || '';
 // v3.26.x：拍一拍/系统消息存 {ta}/{me} 占位符，桌面弹窗预览需回填昵称
 // （renderMsg 走 T() 替换，此处同义；不走 taFit 称呼改写，避免昵称被改成 他/她）
+// v3.30.x：拍一拍人称昵称制——poke/ask-msg 整体走 pokePersonMap（{ta}/{me} 与字卡写死的
+// TA/ta/他/她 一律按昵称回填，与聊天内渲染一致；须在回填前整体替换，防昵称含 TA/他/她 被二次改写）
+if ((rec.special === 'poke' || rec.special === 'ask-msg') && typeof text === 'string') {
+text = pokePersonMap(text, chatPartnerName(), chatUserName());
+} else {
 if (typeof text === 'string' && text.indexOf('{ta}') >= 0) text = text.split('{ta}').join(chatPartnerName());
 if (typeof text === 'string' && text.indexOf('{me}') >= 0) text = text.split('{me}').join(chatUserName());
+}
 let img = rec.img || '';
 let imgSub = '';
 if (rec.parts && rec.parts.length) {
@@ -2278,6 +2718,7 @@ const dts = (rec.ts || 0) - (p.ts || 0);
 if (dts >= 0 && dts <= 1200) { saveMsgs(); return null; }
 }
 msgs.push(rec);
+chatTailAppend(rec); // #180：同步尾巴日志先落 LS，再交低频整包落盘
 saveMsgs();
 	const notable = rec.side === 'in' && (!rec.special || rec.special === 'poke' || rec.special === 'gift');
 	// v3.19.x：rec.silent（psync 跨桌面补投递）——消息进聊天+未读角标，但不触发
@@ -2344,7 +2785,7 @@ try { if (chatVisible()) renderWindow(true); } catch (e) {}
 };
 window.chatAddSystem = function (text, opts) {
 opts = opts || {};
-return addIn(text, { special: opts.special || 'poke', img: opts.img, mailNotice: opts.mailNotice, askQuestion: opts.askQuestion, askStatus: opts.askStatus, askOptions: opts.askOptions, askType: opts.askType, choiceQuestion: opts.choiceQuestion, choiceOptions: opts.choiceOptions, choicePref: opts.choicePref, choiceCat: opts.choiceCat, curiousQuestion: opts.curiousQuestion, curiousQuick: opts.curiousQuick, curiousReplies: opts.curiousReplies, curiousFollowup: opts.curiousFollowup, curiousQid: opts.curiousQid, curiousCat: opts.curiousCat, roastText: opts.roastText, roastCat: opts.roastCat, deskCk: opts.deskCk, deskCkDir: opts.deskCkDir });
+return addIn(text, { special: opts.special || 'poke', img: opts.img, mailNotice: opts.mailNotice, askQuestion: opts.askQuestion, askStatus: opts.askStatus, askOptions: opts.askOptions, askType: opts.askType, askTs: opts.askTs, choiceQuestion: opts.choiceQuestion, choiceOptions: opts.choiceOptions, choicePref: opts.choicePref, choiceCat: opts.choiceCat, curiousQuestion: opts.curiousQuestion, curiousQuick: opts.curiousQuick, curiousReplies: opts.curiousReplies, curiousFollowup: opts.curiousFollowup, curiousQid: opts.curiousQid, curiousCat: opts.curiousCat, roastText: opts.roastText, roastCat: opts.roastCat, deskCk: opts.deskCk, deskCkDir: opts.deskCkDir });
 };
 window.chatAddIn = function (text, opts) {
 const r = addIn(text, opts);
@@ -2373,24 +2814,33 @@ let tries = 0;
 const writeArr = function (arr) {
 try { window.idbSet(key, JSON.stringify(arr)); } catch (e) {}
 try { localStorage.setItem(key, JSON.stringify(arr)); } catch (e) {}
+// v3.26.x #90：跨桌面追加后同步条数账本（下次冷启动大键读失败时它就是守卫依据）
+try { chatLedgerSave('xy-home-v2:' + cid, arr.length, msgsBytes(arr)); } catch (e) {}
 };
 const attempt = function () {
 tries++;
 window.idbGet(key).then(function (v) {
 if (v !== undefined && v !== null) {
 let arr = [];
-try { arr = typeof v === 'string' ? JSON.parse(v) : v; } catch (e) { arr = []; }
-if (!Array.isArray(arr)) arr = [];
+let readOk = true;
+try { arr = typeof v === 'string' ? JSON.parse(v) : v; } catch (e) { arr = []; readOk = false; }
+if (!Array.isArray(arr)) { arr = []; readOk = false; }
+// v3.26.x #90：读到有值却解析失败＝库里有历史只是读不懂，写回 [这一条] 等于删光，绝不写
+if (!readOk) return;
 arr.push({ side: 'in', special: opts.special || 'poke', text: text, ts: Date.now(), mailNotice: !!opts.mailNotice });
 writeArr(arr);
 return;
 }
 // undefined：复核键是否真的不存在
-const confirmMiss = window.idbGetAllKeys
+// v3.26.x #90：改走严格三态探测 idbHasKey，只有确认「库里没有」(false) 才允许新建只含
+// 一条的数组；true（读取失败）与 null（探测本身失败）都按未知处理，安排重试。
+const confirmMiss = window.idbHasKey
+? window.idbHasKey(key).then(function (has) { return has === false; })
+: (window.idbGetAllKeys
 ? window.idbGetAllKeys().then(function (keys) {
 return !(keys || []).some(function (k) { return k === key; });
 }).catch(function () { return false; })
-: Promise.resolve(true);
+: Promise.resolve(true));
 confirmMiss.then(function (isMiss) {
 if (isMiss) writeArr([{ side: 'in', special: opts.special || 'poke', text: text, ts: Date.now(), mailNotice: !!opts.mailNotice }]);
 else if (tries < 3) setTimeout(attempt, 1500);
@@ -2414,23 +2864,33 @@ window.chatAppendDeskRec = function (cid, rec) {
   const writeArr = function (arr) {
     try { window.idbSet(key, JSON.stringify(arr)); } catch (e) {}
     try { localStorage.setItem(key, JSON.stringify(arr)); } catch (e) {}
+    // v3.26.x #90：跨桌面追加后同步条数账本（下次冷启动大键读失败时它就是守卫依据）
+    try { chatLedgerSave('xy-home-v2:' + cid, arr.length, msgsBytes(arr)); } catch (e) {}
   };
   const attempt = function () {
     tries++;
     window.idbGet(key).then(function (v) {
       if (v !== undefined && v !== null) {
         let arr = [];
-        try { arr = typeof v === 'string' ? JSON.parse(v) : v; } catch (e) { arr = []; }
-        if (!Array.isArray(arr)) arr = [];
+        let readOk = true;
+        try { arr = typeof v === 'string' ? JSON.parse(v) : v; } catch (e) { arr = []; readOk = false; }
+        if (!Array.isArray(arr)) { arr = []; readOk = false; }
+        // v3.26.x #90：读到有值却解析失败＝库里有历史只是读不懂，写回 [这一条] 等于删光，绝不写
+        if (!readOk) return;
         arr.push(rec);
         writeArr(arr);
         return;
       }
-      const confirmMiss = window.idbGetAllKeys
-        ? window.idbGetAllKeys().then(function (keys) {
-            return !(keys || []).some(function (k) { return k === key; });
-          }).catch(function () { return false; })
-        : Promise.resolve(true);
+      // v3.26.x #90：同 chatAppendToDeskMsg——改走严格三态探测 idbHasKey，只有确认库里
+      // 没有（false）才新建只含一条的数组；true/null 一律按读取失败重试。后台通知回到
+      // 浏览器瞬间 IDB 事务最容易未热，这条路径正是「记录自己消失」最像的触发点。
+      const confirmMiss = window.idbHasKey
+        ? window.idbHasKey(key).then(function (has) { return has === false; })
+        : (window.idbGetAllKeys
+          ? window.idbGetAllKeys().then(function (keys) {
+              return !(keys || []).some(function (k) { return k === key; });
+            }).catch(function () { return false; })
+          : Promise.resolve(true));
       confirmMiss.then(function (isMiss) {
         if (isMiss) writeArr([rec]);
         else if (tries < 3) setTimeout(attempt, 1500);
@@ -2455,16 +2915,24 @@ window.chatAppendDeskTextTo = function (cid, text) {
   window.chatAppendDeskRec(cid, { side: 'in', special: 'poke', text: text || '想你了，来聊聊天吧。' });
 };
 function saveMsgsNow() {
-// v3.14.x：空记录落盘守卫（同 saveMsgs）——调用方都是作答/回应后触发，
-// msgs 必非空；真出现空+权威未读过时绝不写盘（防覆盖全部历史）
-if (!msgs.length && authLoadedPrefix !== window.activePrefix()) return;
+// v3.26.x #88：与 saveMsgs 同一条守卫。调用方都是作答/回应后触发，msgs 必非空，
+// 所以 v3.14.x 的「只挡空数组」在这里等于没挡——未读到权威的窗口照旧整包覆盖全部历史。
+const authOk = chatDbReady && authLoadedPrefix === window.activePrefix();
+if (!authOk) {
+try { pendingLocal = msgs.slice(); } catch (e) {}
+if (msgs.length) writeLsSnapshot(msgs, undefined, true);
+try { scheduleIdbRetry(); } catch (e) {}
+return;
+}
 // v3.26.x 止血：合并到低频空闲落盘（不再立即同步写整包），离页 flushSave 兜底
 const myPrefix = window.activePrefix();
 schedulePersist(() => {
-  if (!msgs.length && authLoadedPrefix !== myPrefix) return;
-  const data = JSON.stringify(msgs);
-  try { if (window.idbSet) window.idbSet(myPrefix + ':chat-msgs', data); } catch (e) {}
-  writeLsSnapshot(data, myPrefix, true);
+  if (authLoadedPrefix !== myPrefix) return;
+  // v3.26.x #90：条数缩水守卫（同 saveMsgs）
+  if (!chatLedgerGuard(myPrefix, msgs)) return;
+  // v3.26.x OOM：大历史 IDB 直存数组（免整包 stringify）
+  try { if (window.idbSet) persistMsgsToIdb(myPrefix + ':chat-msgs', msgs); } catch (e) {}
+  writeLsSnapshot(msgs, myPrefix, true);
 });
 }
 window.chatChooseReply = function (msgIdx, answer, opt, match) {
@@ -2497,7 +2965,7 @@ addIn(reply || '…');
 taFavCard(rec);
 const el = body.querySelector('.msg-ask[data-idx="' + msgIdx + '"]');
 if (el) {
-el.innerHTML = '<div class="msg-choose-card answered"><div class="msg-ask-q">' + escTxt(rec.choiceQuestion || '') + '</div><div class="msg-ask-a">✓ 你选择了：' + escTxt(answer) + '</div><div class="msg-choose-r">' + (window.taFit ? window.taFit('TA：') : 'TA：') + escTxt(window.taFit ? window.taFit(reply || '…') : (reply || '…')) + '</div>' + favHeartHtml() + '</div>';
+el.innerHTML = '<div class="msg-choose-card answered"><div class="msg-ask-q">' + escTxt(rec.choiceQuestion || '') + '</div><div class="msg-ask-a">✓ 你选择了：' + escTxt(answer) + '</div><div class="msg-choose-r">' + (window.taFit ? window.taFit('TA：') : 'TA：') + escTxt(window.taFit ? window.taFit(reply || '…') : (reply || '…')) + '</div>' + favHeartHtml(rec) + '</div>';
 }
 };
 window.chatCuriousReply = function (msgIdx, answer, reply, followup) {
@@ -2514,7 +2982,7 @@ if (followup) addIn(followup);
 taFavCard(rec);
 const el = body.querySelector('.msg-ask[data-idx="' + msgIdx + '"]');
 if (el) {
-el.innerHTML = '<div class="msg-choose-card answered"><div class="msg-ask-q">' + escTxt(rec.curiousQuestion || '') + '</div><div class="msg-ask-a">✓ 你：' + escTxt(answer) + '</div><div class="msg-choose-r">' + (window.taFit ? window.taFit('TA：') : 'TA：') + escTxt(window.taFit ? window.taFit(reply || '…') : (reply || '…')) + '</div>' + favHeartHtml() + '</div>';
+el.innerHTML = '<div class="msg-choose-card answered"><div class="msg-ask-q">' + escTxt(rec.curiousQuestion || '') + '</div><div class="msg-ask-a">✓ 你：' + escTxt(answer) + '</div><div class="msg-choose-r">' + (window.taFit ? window.taFit('TA：') : 'TA：') + escTxt(window.taFit ? window.taFit(reply || '…') : (reply || '…')) + '</div>' + favHeartHtml(rec) + '</div>';
 }
 };
 window.chatRoastReply = function (msgIdx, answer, reply) {
@@ -2530,7 +2998,7 @@ addIn(reply || '…');
 taFavCard(rec);
 const el = body.querySelector('.msg-ask[data-idx="' + msgIdx + '"]');
 if (el) {
-el.innerHTML = '<div class="msg-choose-card answered"><div class="msg-ask-q">' + escTxt(rec.roastText || '') + '</div><div class="msg-ask-a">✓ 你：' + escTxt(answer) + '</div><div class="msg-choose-r">' + (window.taFit ? window.taFit('TA：') : 'TA：') + escTxt(window.taFit ? window.taFit(reply || '…') : (reply || '…')) + '</div>' + favHeartHtml() + '</div>';
+el.innerHTML = '<div class="msg-choose-card answered"><div class="msg-ask-q">' + escTxt(rec.roastText || '') + '</div><div class="msg-ask-a">✓ 你：' + escTxt(answer) + '</div><div class="msg-choose-r">' + (window.taFit ? window.taFit('TA：') : 'TA：') + escTxt(window.taFit ? window.taFit(reply || '…') : (reply || '…')) + '</div>' + favHeartHtml(rec) + '</div>';
 }
 };
 window.chatAskReply = function (msgIdx, answer, reply) {
@@ -2590,7 +3058,7 @@ addIn(finalReply);
 taFavCard(rec);
 const el = body.querySelector('.msg-ask[data-idx="' + msgIdx + '"]');
 if (el) {
-el.innerHTML = '<div class="msg-ask-card answered"><div class="msg-ask-q">' + escTxt(rec.askQuestion || '') + '</div><div class="msg-ask-a">✓ 已回答：' + escTxt(answer) + '</div><div class="msg-choose-r">' + (window.taFit ? window.taFit('TA：') : 'TA：') + escTxt(window.taFit ? window.taFit(finalReply) : finalReply) + '</div>' + favHeartHtml() + '</div>';
+el.innerHTML = '<div class="msg-ask-card answered"><div class="msg-ask-q">' + escTxt(rec.askQuestion || '') + '</div><div class="msg-ask-a">✓ 已回答：' + escTxt(answer) + '</div><div class="msg-choose-r">' + (window.taFit ? window.taFit('TA：') : 'TA：') + escTxt(window.taFit ? window.taFit(finalReply) : finalReply) + '</div>' + favHeartHtml(rec) + '</div>';
 }
 return finalReply;
 };
@@ -2607,6 +3075,7 @@ if (!isNaN(idx) && msgs[idx]) {
 msgs[idx].retracted = true;
 msgs[idx].orig = b.innerHTML;
 sessionChangedIdx.add(idx); // v3.6.x：标记本会话变更，防 loadMsgs 合并回滚撤回
+chatTailDrop(msgs[idx]); // #180：撤回消息从尾巴日志摘除，防刷新后回放复活
 saveMsgs();
 if (msgs[idx].side === 'out') syncLastMineText();
 }
@@ -2676,6 +3145,7 @@ const si = remain.splice(Math.floor(Math.random() * remain.length), 1)[0];
 rec.retractedSegs.push({ text: segs[si], idx: si });
 }
 sessionChangedIdx.add(idx); // v3.6.x：标记本会话变更，防 loadMsgs 合并回滚局部撤回
+chatTailDrop(rec); // #180：局部撤回后日志原文不得回放（与撤回同口径）
 saveMsgs();
 const m = renderMsg(rec);
 m.dataset.idx = idx;
@@ -2693,6 +3163,7 @@ if (remain.length) {
 const pick = remain[Math.floor(Math.random() * remain.length)];
 rec.retractedMood.push(pick);
 sessionChangedIdx.add(idx); // v3.6.x：标记本会话变更，防 loadMsgs 合并回滚局部撤回
+chatTailDrop(rec); // #180：局部撤回后日志原文不得回放（与撤回同口径）
 saveMsgs();
 const m = renderMsg(rec);
 m.dataset.idx = idx;
@@ -2748,7 +3219,8 @@ return;
 }
 const rpMin = Math.max(1, Number(c['reply-min']) || 1);
 const rpMax = Math.max(rpMin, Number(c['reply-max']) || 2);
-const count = randInt(rpMin, rpMax);
+// #167 多字卡回复(py-en)是总开关：关闭时回复条数强制 1 条（关=彻底只回一条），开启才按「回复条数」拆条
+const count = (c['py-en'] === 1) ? randInt(rpMin, rpMax) : 1;
 try { console.log('[mochi-reply] scheduleReply count=%s rpMin=%s rpMax=%s raw reply-min=%s reply-max=%s', count, rpMin, rpMax, c['reply-min'], c['reply-max']); window.__replyDiag = (window.__replyDiag||0)+1; window.__replyOnceDiag = 0; } catch(e){}
 const wantQuote = hit(c['quote-prob']) && !!quoteSrc;
 for (let i = 0; i < count; i++) {
@@ -2864,7 +3336,8 @@ const rsMax = Math.max(rsMin, Number(c['rs-max']) || rsMin);
 delay = (rsMin + Math.random() * (rsMax - rsMin)) * 1000;
 const rpMin = Math.max(1, Number(c['reply-min']) || 1);
 const rpMax = Math.max(rpMin, Number(c['reply-max']) || 2);
-count = randInt(rpMin, rpMax);
+// #167 同 scheduleReply：py-en 总开关关闭时「让对方继续说」也只回一条
+count = (c['py-en'] !== 1) ? 1 : randInt(rpMin, rpMax);
 } else {
 delay = randInt(300, 1000); count = 1;
 }
@@ -2890,7 +3363,23 @@ if (c['cs-trigger-name'] === 1 && window.continueChat) window.continueChat();
 });
 }
 const csBtn = document.getElementById('chat-continue-btn');
-if (csBtn) csBtn.addEventListener('click', () => { if (window.continueChat) window.continueChat(); });
+// #152：安卓键盘收起与点按手势重叠时（打字后立刻点「继续说」最典型），输入栏随视口
+// 回弹下移，touchend 的二次命中测试落在位移后的别的元素上，合成 click 被派发到错误
+// 元素——按钮监听器不触发、无报错、无回复（iQOO Neo10Pro/多安卓机型报障，无头复现实证）。
+// 触摸改 pointerdown「按下即触发」：目标是真实按压元素，不经历触摸后的二次命中测试，
+// 键盘怎么收都吞不掉；1.2s 防重入挡住随后补发的合成 click（干净点按双事件只回一次）。
+// 鼠标仍走 click（不响应按下半程）；无 PointerEvent 的老内核 click 路径照常兜底。
+let _csFiredAt = 0;
+function csFireContinue() {
+  const now = Date.now();
+  if (now - _csFiredAt < 1200) return;
+  _csFiredAt = now;
+  if (window.continueChat) window.continueChat();
+}
+if (csBtn) {
+  csBtn.addEventListener('pointerdown', (e) => { if (e.pointerType === 'mouse') return; csFireContinue(); });
+  csBtn.addEventListener('click', () => { csFireContinue(); });
+}
 window.applyContinueSayUI = function () {
 try {
 const c = cfg();
@@ -2926,8 +3415,11 @@ e.stopPropagation();
 if (morePanel) morePanel.hidden = true;
 if (window.openCjian) {
 window.__cjianFrom = 'chat';
-window.openCjian();
-} else toast('此间加载失败');
+try { window.openCjian(); } catch (err) {
+try { if (window.__jsErrors) window.__jsErrors.push('openCjian: ' + (err && err.message || err)); } catch (e2) {}
+toast('此间打开出错，请刷新页面重试');
+}
+} else toast('此间加载失败，请刷新页面重试');
 });
 }
 let lastMineText = '';
@@ -3006,11 +3498,24 @@ window.rescheduleAutoSend = function () { try { scheduleAutoSend(); } catch (e) 
 document.addEventListener('contact-switched', function () {
 try { if (window.replyCfg) scheduleAutoSend(); } catch (e) {}
 });
-const INVITE_DECLINE = ['下次吧，现在不太想玩~', '等会儿再陪我玩好不好', '先不玩啦，待会儿再说', '现在没状态，下次一定'];
+// FIX 2026-09-04 #158 本池是「我」拒绝 TA 邀请后自己发的婉拒话术，逐条必须是拒绝者视角；原第二条「等会儿再陪我玩好不好」是邀请者(TA)口吻（陪我玩=要对方陪），用户误以为该由联系人发送，改为「等会儿再陪你玩好不好」
+const INVITE_DECLINE = ['下次吧，现在不太想玩~', '等会儿再陪你玩好不好', '先不玩啦，待会儿再说', '现在没状态，下次一定'];
 // v3.14.x：贴贴邀请（cuddle）——正常情侣贴贴互动（贴/抱/牵手/靠着），没有游戏半框：
 // 同意后轻震动一下（体感反馈），TA 稍后回应一句贴贴的话；婉拒用专属文案
 const CUDDLE_DECLINE = ['下次再贴吧，先记着这笔~', '等会儿补给你，说话算数', '先欠着，攒到晚上一起还~', '今天想先自己待会儿，明天加倍还你'];
 const CUDDLE_REPLIES = ['嗯……蹭到了。暖暖的，很喜欢。', '那我要贴很久哦，不许偷偷跑掉。', '手被握住了，就这样待一会儿。', '感觉到了，你在旁边。很安心。', '贴贴充电中……好，满格了。'];
+// v3.26.x(#122)：注册聊天内置系统回应池跨分类搜索（字卡库列表页搜索同源可查，不再搜不到）
+window.__cardSearchFns = window.__cardSearchFns || [];
+window.__cardSearchFns.push({ name: '聊天系统回应', fn: function (kw) {
+  const out = [];
+  try {
+    FALLBACK_REPLY_POOL.forEach(c => { if (String(c).toLowerCase().indexOf(kw) >= 0) out.push({ t: String(c), cat: '兜底回复' }); });
+    INVITE_DECLINE.forEach(c => { if (String(c).toLowerCase().indexOf(kw) >= 0) out.push({ t: String(c), cat: '游戏邀请·婉拒' }); });
+    CUDDLE_DECLINE.forEach(c => { if (String(c).toLowerCase().indexOf(kw) >= 0) out.push({ t: String(c), cat: '贴贴·婉拒' }); });
+    CUDDLE_REPLIES.forEach(c => { if (String(c).toLowerCase().indexOf(kw) >= 0) out.push({ t: String(c), cat: '贴贴·回应' }); });
+  } catch (e) {}
+  return out;
+} });
 function openInviteConfirm(title, staticText, onAccept, declinePool) {
 const mask = document.getElementById('modal-mask');
 if ((mask && !mask.hidden) || !window.openModal) { onAccept(); return; }
@@ -3028,7 +3533,7 @@ staticText: staticText
 function openInvitePanelFor(kind, name) {
 if (kind === 'cuddle') {
 try { if (navigator.vibrate) navigator.vibrate([30, 60, 90]); } catch (e) {}
-setTimeout(() => { try { addIn(name + ' ' + pick(CUDDLE_REPLIES), { initiative: true }); } catch (e) {} }, randInt(600, 1200));
+setTimeout(() => { try { addIn(name + ' ' + pick(CUDDLE_REPLIES), {}); } catch (e) {} }, randInt(600, 1200));
 return;
 }
 if (kind === 'rps') { if (window.openRpsPanel) window.openRpsPanel(); return; }
@@ -3100,6 +3605,16 @@ if (window.ckQuestionTry && window.ckQuestionTry(c)) return;
 try { await ensureReplyCardsReady(); } catch (e) {}
 const pool = getPool();
 const autoMsg = () => {
+// v3.26.x #163：主动消息此前完全不走默认字卡概率——dc-overall-chat（如 85%）只管
+// genOneReply 文本覆盖路径，TA 主动发的消息仍 85% 是自定义（45% 固定从仅有的几张
+// 文字卡里抽+15% 固定那 1 张 emoji+25% 自家贴纸/图片），用户体感「默认概率调到
+// 八九十还是总发我自己设置的字卡，反复出现」。对齐回复路径口径：先掷 getDefaultCards
+// （内部按场景概率+分类占比抽，总开关/聊天使用/分类/单卡开关同源生效），命中非拍一拍
+// 即用默认字卡，未掷中才落自定义池原比例。
+try {
+const defs = (window.getDefaultCards && window.getDefaultCards()) || null;
+if (defs && defs.type !== 'poke' && defs.text) return { text: defs.text, type: 'text' };
+} catch (e) {}
 const r = Math.random() * 100;
 if (pool.sticker.length && r < 15) return { text: pick(pool.sticker), type: 'sticker' };
 if (pool.image.length && r < 25) return { text: pick(pool.image), type: 'image' };
@@ -3157,6 +3672,7 @@ fillAvatar('chat-partner-av', 'cs-avatar-partner');
 if (window.applyChatSettings) window.applyChatSettings();
 clearChatUnread();
 loadMsgs();
+updateChatLoading(); // 记录未就绪时显示「正在加载聊天记录…」进度条
 renderWindow(false, true);
 scrollToBottom();
 if (window.requestAnimationFrame) {
@@ -3811,7 +4327,7 @@ if (rpQixiSection) { rpQixiSection.hidden = false; rpQixiSection.classList.add('
 if (rpWishInput) rpWishInput.placeholder = '七夕快乐';
 } else {
 if (rpQixiTag) rpQixiTag.hidden = true;
-if (rpQixiSection) { rpQixiSection.hidden = false; rpQixiSection.classList.remove('qixi-today'); }
+if (rpQixiSection) { rpQixiSection.hidden = true; rpQixiSection.classList.remove('qixi-today'); }
 if (rpWishInput) rpWishInput.placeholder = '心意';
 }
 rpSide = 'out';
@@ -3833,6 +4349,7 @@ btn.addEventListener('click', (e) => {
 e.stopPropagation();
 rpSide = btn.dataset.rpside || 'out';
 rpPanel.querySelectorAll('.rp-side').forEach(b => b.classList.toggle('sel', b === btn));
+rpRenderCover();
 });
 });
 rpPanel.querySelectorAll('.rp-amt').forEach(btn => {
@@ -3970,7 +4487,7 @@ const amt = amtFen / 100;
 const myCid = window.__activeCid || 'default';
 setTimeout(() => {
 if ((window.__activeCid || 'default') !== myCid) return;
-addIn('', { special: 'redpacket', rpAmount: amt, rpWish: wish, rpStatus: 'pending', rpTs: Date.now(), rpCover: rpCoverGet() ? 1 : 0 });
+addIn('', { special: 'redpacket', rpAmount: amt, rpWish: wish, rpStatus: 'pending', rpTs: Date.now(), rpCover: rpCoverGet('in') ? 1 : 0 });
 if (window.logFish) window.logFish();
 }, randInt(800, 2000));
 }
@@ -3984,9 +4501,11 @@ const k = ASK_DAILY_PREFIX + new Date().toISOString().slice(0, 10);
 store.set(k, String((Number(store.get(k)) || 0) + 1));
 }
 // v3.15.x：TA 也会随机「向 Mochi 申请」心意币——金额与红包同款随机分布（genRpAmount），
-// 概率门固定 4%（不沿用红包七夕加成），无次数上限；入 TA 的 systemBalance，聊天留 askcoin 卡片
+// 概率门读取存钱罐右上角设置的申请概率（默认 4%，不沿用红包七夕加成），无次数上限；
+// 入 TA 的 systemBalance，聊天留 askcoin 卡片
 function trySystemAskMochi() {
-const baseRate = 0.04;
+let baseRate = 0.04;
+try { const p = JSON.parse((window.xyStore('xy-home-v2')).get('piggy-coin-prob') || 'null'); if (p && typeof p.ask === 'number') baseRate = p.ask; } catch (e) {}
 if (Math.random() >= baseRate) return;
 const amtFen = genRpAmount(5200000);
 if (amtFen < 1) return;
@@ -4149,16 +4668,17 @@ if (ctl) ctl.okText('申请');
 }
 const rpBalanceEl = document.getElementById('rp-balance');
 if (rpBalanceEl) rpBalanceEl.addEventListener('click', (e) => { e.stopPropagation(); rpEditWallet(); });
-const RP_COVER_KEY = 'rp-cover';
-function rpCoverGet() { return store.get(RP_COVER_KEY) || ''; }
-function rpCoverSet(dataUrl) {
-if (dataUrl) {
-store.set(RP_COVER_KEY, dataUrl);
-try { if (window.idbSet) window.idbSet(window.activePrefix() + ':' + RP_COVER_KEY, dataUrl); } catch (e) {}
-} else {
-try { store.remove(RP_COVER_KEY); } catch (e) {}
-try { if (window.idbSet) window.idbSet(window.activePrefix() + ':' + RP_COVER_KEY, ''); } catch (e) {}
-}
+function rpCoverKey(side) { return 'rp-cover-' + (side || 'out'); }
+function rpCoverGet(side) { return store.get(rpCoverKey(side)) || ''; }
+function rpCoverSet(side, dataUrl) {
+	const k = rpCoverKey(side);
+	if (dataUrl) {
+		store.set(k, dataUrl);
+		try { if (window.idbSet) window.idbSet(window.activePrefix() + ':' + k, dataUrl); } catch (e) {}
+	} else {
+		try { store.remove(k); } catch (e) {}
+		try { if (window.idbSet) window.idbSet(window.activePrefix() + ':' + k, ''); } catch (e) {}
+	}
 }
 function rpCompressCover(dataUrl) {
 return new Promise((resolve) => {
@@ -4183,20 +4703,24 @@ const rpCoverUploadBtn = document.getElementById('rp-cover-upload');
 const rpCoverDelBtn = document.getElementById('rp-cover-del');
 let rpCoverFileInput = null;
 function rpRenderCover() {
-const cover = rpCoverGet();
-if (cover) {
-if (rpCoverPreview) {
-rpCoverPreview.style.backgroundImage = 'url("' + cover + '")';
-const sp = rpCoverPreview.querySelector('span'); if (sp) sp.style.display = 'none';
-}
-if (rpCoverDelBtn) rpCoverDelBtn.hidden = false;
-} else {
-if (rpCoverPreview) {
-rpCoverPreview.style.backgroundImage = '';
-const sp = rpCoverPreview.querySelector('span'); if (sp) sp.style.display = '';
-}
-if (rpCoverDelBtn) rpCoverDelBtn.hidden = true;
-}
+	const side = rpSide;
+	const cover = rpCoverGet(side);
+	const who = side === 'out' ? '我的' : (chatPartnerName() + '的');
+	if (rpCoverUploadBtn) rpCoverUploadBtn.textContent = '上传' + who + '封面';
+	if (rpCoverDelBtn) rpCoverDelBtn.textContent = '删除' + who + '封面';
+	if (cover) {
+		if (rpCoverPreview) {
+			rpCoverPreview.style.backgroundImage = 'url("' + cover + '")';
+			const sp = rpCoverPreview.querySelector('span'); if (sp) sp.style.display = 'none';
+		}
+		if (rpCoverDelBtn) rpCoverDelBtn.hidden = false;
+	} else {
+		if (rpCoverPreview) {
+			rpCoverPreview.style.backgroundImage = '';
+			const sp = rpCoverPreview.querySelector('span'); if (sp) { sp.style.display = ''; sp.textContent = '未设置' + who + '封面'; }
+		}
+		if (rpCoverDelBtn) rpCoverDelBtn.hidden = true;
+	}
 }
 if (rpCoverUploadBtn) {
 rpCoverUploadBtn.addEventListener('click', (e) => {
@@ -4212,7 +4736,7 @@ const reader = new FileReader();
 reader.onload = () => {
 rpCompressCover(reader.result).then(data => {
 if (!data) { toast('图片处理失败'); return; }
-rpCoverSet(data);
+rpCoverSet(rpSide, data);
 rpRenderCover();
 toast('封面已设置');
 });
@@ -4227,7 +4751,7 @@ rpCoverFileInput.click();
 if (rpCoverDelBtn) {
 rpCoverDelBtn.addEventListener('click', (e) => {
 e.stopPropagation();
-rpCoverSet('');
+rpCoverSet(rpSide, '');
 rpRenderCover();
 toast('已恢复默认封面');
 });
@@ -4249,7 +4773,7 @@ wallet.myBalance -= amtFen;
 wallet.systemBalance -= amtFen;
 }
 rpWalletSet(wallet);
-const cover = rpCoverGet();
+const cover = rpCoverGet(rpSide);
 const rec = { side: rpSide, special: 'redpacket', rpAmount: amt, rpWish: wish, rpStatus: 'pending', rpTs: Date.now(), rpCover: cover ? 1 : 0 };
 addRec(rec);
 if (window.logFish) window.logFish();
@@ -4684,6 +5208,17 @@ if (chatAskInput) {
 chatAskInput.placeholder = chatAskMode === 'invite' ? '想邀请TA做什么？' : '你的问题？';
 chatAskInput.value = '';
 }
+// v3.26.x：邀请TA 模式显示「我的邀请」字卡库（分组栏 + 字卡 + 存入按钮）；问问TA 模式隐藏
+const invGroups = document.getElementById('invite-groups');
+const invList = document.getElementById('invite-list');
+const invSave = document.getElementById('chat-ask-save');
+const isInvite = chatAskMode === 'invite';
+if (invGroups) invGroups.hidden = !isInvite;
+if (invList) invList.hidden = !isInvite;
+if (invSave) invSave.hidden = !isInvite;
+if (isInvite) {
+myInviteAdoptFromIdb().then(() => { if (chatAskMode === 'invite') renderInviteBank(); });
+}
 const pc = document.getElementById('poke-card');
 if (pc) pc.hidden = true;
 const ep = document.getElementById('emoji-panel');
@@ -4718,6 +5253,53 @@ if (!askOpts.length) { toast('单选题请填写选项，每行一个'); return;
 }
 closeChatAskPanel();
 if (chatAskMode === 'invite') {
+sendInviteContent(content);
+} else {
+const isSingle = !!askOpts;
+addRec({ side: 'out', text: '问：' + content, special: 'ask', askQuestion: content, askType: isSingle ? 'single' : 'text', askOptions: askOpts, askStatus: 'pending' });
+const askIdx = msgs.length - 1;
+if (window.logFish) window.logFish();
+const recTs = Date.now();
+const myCid = window.__activeCid || 'default';
+const sameCid = () => (window.__activeCid || 'default') === myCid;
+setTimeout(() => {
+if (!sameCid()) return;
+const defs = window.getInteractPool
+? window.getInteractPool('问问TA·回应', ['嗯嗯', '我想想…', '应该吧', '好呀', '我陪你', '可以的', '那挺好呀', '我觉得可以', '听你的', '当然可以', '我很乐意'])
+: ['嗯嗯', '我想想…', '应该吧', '好呀', '我陪你', '可以的', '那挺好呀', '我觉得可以', '听你的', '当然可以', '我很乐意'];
+let text;
+if (isSingle && askOpts && askOpts.length) {
+const o = askOpts[Math.floor(Math.random() * askOpts.length)];
+text = o.t;
+} else {
+text = (window.pickAskCardReply ? window.pickAskCardReply(defs) : defs[Math.floor(Math.random() * defs.length)]);
+}
+const rec = msgs[askIdx];
+if (rec && rec.special === 'ask') {
+rec.askStatus = 'answered';
+rec.askAnswer = text;
+saveMsgs();
+const el = body.querySelector('.msg-ask[data-idx="' + askIdx + '"]');
+if (el) {
+el.innerHTML = '<div class="msg-ask-card answered"><div class="msg-ask-q">' + (window.taFit ? window.taFit('问问TA') : '问问TA') + ' · ' + escTxt(content) + '</div><div class="msg-ask-a">✓ ' + (window.taFit ? window.taFit('TA：') : 'TA：') + escTxt(window.taFit ? window.taFit(text) : text) + '</div>' + favHeartHtml(rec) + '</div>';
+}
+}
+addIn(text);
+try {
+const list = JSON.parse(store.get('invite-ask-history') || '[]');
+list.unshift({ type: 'ask', q: content, a: text, ts: recTs });
+if (list.length > 200) list.length = 200;
+store.set('invite-ask-history', JSON.stringify(list));
+} catch (err) {}
+if (window.renderAskRecords) window.renderAskRecords();
+setTimeout(() => { if (!sameCid()) return; maybeFollowupAskCard(); }, 1200);
+}, 1500 + Math.random() * 2500);
+}
+}
+// v3.26.x：邀请发送逻辑从 submitChatAsk 抽出，供「我的邀请」字卡点卡直接复用（可重复发送，
+// 行为与手动输入一致：TA 接受/拒绝/未回应，随消息持久化）
+function sendInviteContent(content) {
+closeChatAskPanel();
 addRec({ side: 'out', text: '邀请：' + content, special: 'invite', inviteContent: content, inviteStatus: 'pending' });
 const inviteIdx = msgs.length - 1;
 if (window.logFish) window.logFish();
@@ -4758,7 +5340,7 @@ saveMsgs();
 taFavCard(rec);
 const el = body.querySelector('.msg-ask[data-idx="' + inviteIdx + '"]');
 if (el) {
-el.innerHTML = '<div class="msg-ask-card answered"><div class="msg-ask-q">' + (window.taFit ? window.taFit('邀请TA') : '邀请TA') + ' · ' + escTxt(content) + '</div><div class="msg-ask-a">✓ ' + escTxt(window.taFit ? window.taFit(answer) : answer) + '</div>' + favHeartHtml() + '</div>';
+el.innerHTML = '<div class="msg-ask-card answered"><div class="msg-ask-q">' + (window.taFit ? window.taFit('邀请TA') : '邀请TA') + ' · ' + escTxt(content) + '</div><div class="msg-ask-a">✓ ' + escTxt(window.taFit ? window.taFit(answer) : answer) + '</div>' + favHeartHtml(rec) + '</div>';
 }
 }
 try {
@@ -4770,48 +5352,359 @@ store.set(histKey, JSON.stringify(list));
 if (window.renderAskRecords) window.renderAskRecords();
 setTimeout(() => { if (!sameCid()) return; maybeFollowupAskCard(); }, 1200);
 }, 1500 + Math.random() * 2500);
-} else {
-const isSingle = !!askOpts;
-addRec({ side: 'out', text: '问：' + content, special: 'ask', askQuestion: content, askType: isSingle ? 'single' : 'text', askOptions: askOpts, askStatus: 'pending' });
-const askIdx = msgs.length - 1;
-if (window.logFish) window.logFish();
-const recTs = Date.now();
-const myCid = window.__activeCid || 'default';
-const sameCid = () => (window.__activeCid || 'default') === myCid;
-setTimeout(() => {
-if (!sameCid()) return;
-const defs = window.getInteractPool
-? window.getInteractPool('问问TA·回应', ['嗯嗯', '我想想…', '应该吧', '好呀', '我陪你', '可以的', '那挺好呀', '我觉得可以', '听你的', '当然可以', '我很乐意'])
-: ['嗯嗯', '我想想…', '应该吧', '好呀', '我陪你', '可以的', '那挺好呀', '我觉得可以', '听你的', '当然可以', '我很乐意'];
-let text;
-if (isSingle && askOpts && askOpts.length) {
-const o = askOpts[Math.floor(Math.random() * askOpts.length)];
-text = o.t;
-} else {
-text = (window.pickAskCardReply ? window.pickAskCardReply(defs) : defs[Math.floor(Math.random() * defs.length)]);
 }
-const rec = msgs[askIdx];
-if (rec && rec.special === 'ask') {
-rec.askStatus = 'answered';
-rec.askAnswer = text;
-saveMsgs();
-const el = body.querySelector('.msg-ask[data-idx="' + askIdx + '"]');
-if (el) {
-el.innerHTML = '<div class="msg-ask-card answered"><div class="msg-ask-q">' + (window.taFit ? window.taFit('问问TA') : '问问TA') + ' · ' + escTxt(content) + '</div><div class="msg-ask-a">✓ ' + (window.taFit ? window.taFit('TA：') : 'TA：') + escTxt(window.taFit ? window.taFit(text) : text) + '</div>' + favHeartHtml() + '</div>';
-}
-}
-addIn(text);
+// ===================== 我的邀请（邀请TA 字卡库，仿「我的拍一拍」） =====================
+// v3.26.x：邀请TA 半框内置「我的邀请」——预设 + 用户分组存邀请字卡，点卡即发送（可重复），
+// 输入框可「存入」当前分组；数据按当前桌面联系人命名空间隔离（activePrefix），
+// 结构化写入 IndexedDB 兜底，防止 iOS 存储清理导致字卡丢失（同 pokeUserGroups 策略）。
+const MY_INVITE_PRESETS = ['想和你猜拳，来一局？', '想和你玩一局 Pong，来吗？', '想和你玩双人贪吃蛇，来吗？', '想和你一起听歌'];
+let myInviteDirty = false;
+let myInviteCurGroup = '__preset';
+let myInviteGroups = null;
+function myInviteGroupsKey() { return window.activePrefix() + ':my-invite-groups'; }
+function myInviteGroupsLoad() {
 try {
-const list = JSON.parse(store.get('invite-ask-history') || '[]');
-list.unshift({ type: 'ask', q: content, a: text, ts: recTs });
-if (list.length > 200) list.length = 200;
-store.set('invite-ask-history', JSON.stringify(list));
-} catch (err) {}
-if (window.renderAskRecords) window.renderAskRecords();
-setTimeout(() => { if (!sameCid()) return; maybeFollowupAskCard(); }, 1200);
-}, 1500 + Math.random() * 2500);
+const v = JSON.parse(store.get('my-invite-groups') || 'null');
+if (Array.isArray(v)) return v.filter(g => Array.isArray(g) && Array.isArray(g[1]));
+} catch (e) {}
+return null;
 }
+function myInviteG() {
+if (myInviteGroups === null) {
+	myInviteGroups = myInviteGroupsLoad() || [];
+	if (!myInviteGroups.some(g => g[0] === '我的新增')) myInviteGroups.push(['我的新增', []]);
+	}
+	// v3.28：预设分组持久化——系统内置字卡灌入 '__preset' 条目（首启自动），
+	// 这样预设分组的字卡也能单独「修改/删除」，否则预设 cards 每次 view 实时重建、无持久化可写（用户反馈「无法单独编辑字卡」）
+	if (!myInviteGroups.some(g => g[0] === '__preset')) {
+	myInviteGroups.unshift(['__preset', MY_INVITE_PRESETS.slice()]);
+	myInviteGroupsSave();
+	}
+	return myInviteGroups;
 }
+function myInviteGroupsSave() {
+myInviteDirty = true;
+try {
+const data = JSON.stringify(myInviteGroups);
+store.set('my-invite-groups', data);
+if (window.idbSet) window.idbSet(myInviteGroupsKey(), data);
+} catch (e) {}
+}
+function myInviteCount(arr) { return (arr || []).reduce((n, g) => n + (Array.isArray(g) && Array.isArray(g[1]) ? g[1].length : 0), 0); }
+// IDB 兜底恢复：备份条目多于内存时采用；会话内已改过（myInviteDirty）则跳过防回滚
+function myInviteAdoptFromIdb() {
+if (myInviteDirty || !window.idbGet) return Promise.resolve(false);
+return window.idbGet(myInviteGroupsKey()).then(v => {
+if (!v || myInviteDirty) return false;
+let arr = null;
+try { arr = JSON.parse(v); } catch (e) { return false; }
+if (!Array.isArray(arr)) return false;
+if (myInviteCount(arr) > myInviteCount(myInviteG())) {
+myInviteGroups = arr.filter(g => Array.isArray(g) && Array.isArray(g[1]));
+return true;
+}
+return false;
+}).catch(() => false);
+}
+function myInviteView() {
+	const out = [];
+	const pre = myInviteG().find(g => g[0] === '__preset');
+	out.push({ key: '__preset', label: '预设', cards: (pre && Array.isArray(pre[1])) ? pre[1].slice() : MY_INVITE_PRESETS.slice(), preset: true });
+	myInviteG().forEach(g => {
+	if (g[0] === '__preset') return;
+	if (!Array.isArray(g) || !Array.isArray(g[1]) || !g[0]) return;
+out.push({ key: g[0], label: g[0], cards: g[1].slice(), user: true });
+});
+return out;
+}
+function myInviteCurGroupKey() {
+const groups = myInviteView();
+if (!groups.some(g => g.key === myInviteCurGroup)) myInviteCurGroup = groups.length ? groups[0].key : '__preset';
+return myInviteCurGroup;
+}
+// v3.x：邀请TA ——批量管理模式态（预设为系统内置分组：仅自建分组可进批量，可重命名/删除分组）
+let tiInviteBatch = false;   // 批量管理模式开关
+let tiInviteSel = new Set(); // 批量勾选：当前自建分组内字卡下标集合
+function renderInviteBank() {
+const wrap = document.getElementById('invite-groups');
+const list = document.getElementById('invite-list');
+if (!wrap || !list) return;
+myInviteCurGroupKey();
+const groups = myInviteView();
+const cur = groups.find(g => g.key === myInviteCurGroup) || groups[0] || { key: '__preset', cards: [] };
+const curIsPreset = cur.key === '__preset';
+// 预设为系统内置分组：切回预设时自动退出批量态
+if (curIsPreset && tiInviteBatch) { tiInviteBatch = false; tiInviteSel.clear(); }
+wrap.innerHTML = '';
+groups.forEach(g => {
+const chip = document.createElement('span');
+chip.className = 'emoji-g-chip' + (myInviteCurGroup === g.key ? ' sel' : '');
+if (tiInviteBatch && g.user) {
+chip.innerHTML = escTxt(g.label) + g.cards.length +
+'<span class="inv-g-op" data-op="rn">✎</span>' +
+'<span class="inv-g-op" data-op="rm">✕</span>';
+} else {
+chip.textContent = g.label + g.cards.length;
+}
+const gkey = g.key, glabel = g.label;
+chip.addEventListener('click', (e) => {
+e.stopPropagation();
+const op = e.target && e.target.closest ? e.target.closest('.inv-g-op') : null;
+if (op) {
+if (op.getAttribute('data-op') === 'rn') myInviteRenameGroup(gkey, glabel);
+else if (op.getAttribute('data-op') === 'rm') myInviteRemoveGroup(gkey);
+return;
+}
+if (myInviteCurGroup === gkey) return;
+myInviteCurGroup = gkey;
+tiInviteSel.clear();
+renderInviteBank();
+});
+wrap.appendChild(chip);
+});
+const add = document.createElement('span');
+add.className = 'emoji-g-chip poke-g-add';
+add.textContent = '＋ 分组';
+add.title = '新建我的邀请分组';
+add.addEventListener('click', (e) => { e.stopPropagation(); myInviteNewGroup(); });
+wrap.appendChild(add);
+// v3.x：批量管理 chip（顶部分组栏右侧）——进入后批量勾选字卡，亦可在自建分组上 ✎重命名/✕删除
+const batch = document.createElement('span');
+batch.className = 'emoji-g-chip inv-g-batch' + (tiInviteBatch ? ' on' : '');
+batch.textContent = tiInviteBatch ? '完成' : '批量管理';
+batch.title = '批量管理：勾选字卡后可全选/删除/移动，也支持重命名/删除自建分组';
+batch.addEventListener('click', (e) => { e.stopPropagation(); toggleInviteBatch(); });
+wrap.appendChild(batch);
+list.innerHTML = '';
+if (tiInviteBatch && !curIsPreset) {
+if (!cur.cards.length) {
+list.innerHTML = '<div class="cc-empty">该分组暂无邀请字卡<br>在下方输入邀请内容，点「存入」添加</div>';
+} else {
+cur.cards.forEach((c, i) => {
+const item = document.createElement('div');
+item.className = 'cc-item glass invite-batch-item';
+item.innerHTML = '<label class="inv-batch-cb"><input type="checkbox" class="inv-batch-cb-in" data-bidx="' + i + '"' + (tiInviteSel.has(i) ? ' checked' : '') + '></label><div class="cc-txt"><div class="t">' + escTxt(c) + '</div></div>';
+const cb = item.querySelector('.inv-batch-cb-in');
+if (cb) cb.addEventListener('change', () => {
+if (cb.checked) tiInviteSel.add(i); else tiInviteSel.delete(i);
+updateInviteBatchBarUI();
+});
+list.appendChild(item);
+});
+}
+list.insertAdjacentHTML('beforeend',
+'<div class="ti-batch-bar" id="inv-batch-bar">' +
+'<span class="ti-batch-cnt" id="inv-batch-cnt">已选 <em>' + tiInviteSel.size + '</em> 条</span>' +
+'<button class="ti-batch-btn" id="inv-batch-all">全选</button>' +
+'<button class="ti-batch-btn" id="inv-batch-move"' + (tiInviteSel.size === 0 ? ' disabled' : '') + '>移动</button>' +
+'<button class="ti-batch-btn ti-batch-del-btn" id="inv-batch-del"' + (tiInviteSel.size === 0 ? ' disabled' : '') + '>删除</button>' +
+'<button class="ti-batch-btn" id="inv-batch-cancel">取消</button>' +
+'</div>');
+bindInviteBatchBar();
+return;
+}
+if (!cur.cards.length) {
+list.innerHTML = '<div class="cc-empty">暂无邀请字卡<br>在下方输入邀请内容，点「存入」添加</div>';
+return;
+}
+cur.cards.forEach((c, i) => {
+const item = document.createElement('div');
+item.className = 'cc-item glass';
+item.innerHTML = '<div class="cc-txt"><div class="t">' + escTxt(c) + '</div></div>';
+	// v3.28：所有分组（含预设）的字卡都给「修改/删除」按钮——预设分组已持久化，myInviteEdit/myInviteDel 可直接写回（用户反馈预设字卡没法单独编辑）
+	item.addEventListener('click', () => { sendInviteContent(c); });
+	const ops = document.createElement('div');
+ops.className = 'poke-card-ops';
+const eb = document.createElement('button');
+eb.type = 'button';
+eb.className = 'poke-card-op poke-op-edit';
+eb.title = '修改';
+eb.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 013 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>';
+eb.addEventListener('click', (e) => { e.stopPropagation(); myInviteEdit(i, c); });
+const db = document.createElement('button');
+db.type = 'button';
+db.className = 'poke-card-op poke-op-del';
+db.title = '删除';
+db.textContent = '✕';
+db.addEventListener('click', (e) => { e.stopPropagation(); myInviteDel(i, c); });
+ops.appendChild(eb);
+	ops.appendChild(db);
+	item.appendChild(ops);
+	list.appendChild(item);
+	});
+}
+function toggleInviteBatch() {
+const groups = myInviteView();
+const cur = groups.find(g => g.key === myInviteCurGroup);
+if (!cur) return;
+if (!tiInviteBatch && cur.key === '__preset') {
+toast('预设为系统内置分组，请切换到自建分组后批量管理');
+return;
+}
+tiInviteBatch = !tiInviteBatch;
+tiInviteSel.clear();
+renderInviteBank();
+}
+function myInviteCurGroupArr() {
+const g = myInviteG().find(x => Array.isArray(x) && Array.isArray(x[1]) && x[0] === myInviteCurGroup);
+return (g && Array.isArray(g[1])) ? g[1] : null;
+}
+function updateInviteBatchBarUI() {
+const cnt = document.getElementById('inv-batch-cnt');
+if (cnt) cnt.innerHTML = '已选 <em>' + tiInviteSel.size + '</em> 条';
+const del = document.getElementById('inv-batch-del');
+if (del) del.disabled = tiInviteSel.size === 0;
+const mv = document.getElementById('inv-batch-move');
+if (mv) mv.disabled = tiInviteSel.size === 0;
+}
+function bindInviteBatchBar() {
+const curArr = myInviteCurGroupArr();
+const n = curArr ? curArr.length : 0;
+const all = document.getElementById('inv-batch-all');
+if (all) all.addEventListener('click', () => {
+if (tiInviteSel.size >= n) tiInviteSel.clear();
+else for (let i = 0; i < n; i++) tiInviteSel.add(i);
+renderInviteBank();
+});
+const cancel = document.getElementById('inv-batch-cancel');
+if (cancel) cancel.addEventListener('click', () => {
+tiInviteBatch = false; tiInviteSel.clear(); renderInviteBank();
+});
+const del = document.getElementById('inv-batch-del');
+if (del) del.addEventListener('click', () => {
+if (tiInviteSel.size === 0) { toast('请先勾选要删除的字卡'); return; }
+const cnt = tiInviteSel.size;
+window.openModal('删除选中的 ' + cnt + ' 条邀请字卡？', '', function () {
+const arr = myInviteCurGroupArr();
+if (!arr) return;
+Array.from(tiInviteSel).sort((a, b) => b - a).forEach(i => { if (i >= 0 && i < arr.length) arr.splice(i, 1); });
+myInviteGroupsSave();
+tiInviteSel.clear();
+tiInviteBatch = false;
+myInviteCurGroupKey();
+renderInviteBank();
+toast('已删除 ' + cnt + ' 条');
+}, { noInput: true, staticText: '此操作不可撤销。' });
+});
+const moveBtn = document.getElementById('inv-batch-move');
+if (moveBtn) moveBtn.addEventListener('click', () => {
+if (tiInviteSel.size === 0) { toast('请先勾选要移动的邀请字卡'); return; }
+const groups = myInviteG().filter(g => Array.isArray(g) && Array.isArray(g[1]) && g[0] && g[0] !== myInviteCurGroup);
+if (!groups.length) { toast('没有其他可移动的分组'); return; }
+const opts = groups.map(g => ({ label: g[0], value: g[0] }));
+const cnt = tiInviteSel.size;
+window.openModal('移动到分组', '', function (v) {
+const target = String(v || '');
+if (!target) { toast('请选择目标分组'); return; }
+const src = myInviteCurGroupArr();
+if (!src) return;
+let tArr = myInviteG().find(g => Array.isArray(g) && Array.isArray(g[1]) && g[0] === target);
+if (!tArr) { tArr = [target, []]; myInviteG().push(tArr); }
+let moved = 0;
+Array.from(tiInviteSel).sort((a, b) => b - a).forEach(i => { if (i >= 0 && i < src.length) { tArr[1].push(src[i]); src.splice(i, 1); moved++; } });
+myInviteGroupsSave();
+tiInviteSel.clear();
+tiInviteBatch = false;
+myInviteCurGroupKey();
+renderInviteBank();
+toast('已移动 ' + moved + ' 条到「' + target + '」');
+}, { pills: opts, pill: opts[0].value, noInput: true });
+});
+}
+function myInviteRenameGroup(gk, oldLabel) {
+window.openModal('重命名分组', oldLabel, function (v) {
+v = (v || '').trim();
+if (!v) { toast('请输入分组名'); return; }
+const groups = myInviteG();
+const g = groups.find(x => x[0] === gk);
+if (!g) return;
+if (v === gk) { toast('名称未变化'); return; }
+if (groups.some(x => x[0] === v)) { toast('分组「' + v + '」已存在'); return; }
+g[0] = v;
+if (myInviteCurGroup === gk) myInviteCurGroup = v;
+myInviteGroupsSave();
+renderInviteBank();
+toast('已重命名');
+});
+}
+function myInviteRemoveGroup(gk) {
+window.openModal('删除该分组？', '', function () {
+const groups = myInviteG();
+const g = groups.find(x => x[0] === gk);
+if (!g) return;
+const cnt = Array.isArray(g[1]) ? g[1].length : 0;
+groups.splice(groups.indexOf(g), 1);
+if (myInviteCurGroup === gk) myInviteCurGroup = null;
+myInviteGroupsSave();
+tiInviteSel.clear();
+myInviteCurGroupKey();
+renderInviteBank();
+toast(cnt ? '已删除分组及 ' + cnt + ' 条字卡' : '已删除分组');
+}, { noInput: true, staticText: '删除「' + gk + '」分组及其中的全部字卡？此操作不可撤销。' });
+}
+// end renderInviteBank
+function saveInviteInput() {
+const v = (chatAskInput && chatAskInput.value || '').trim();
+if (!v) { toast('先输入邀请内容'); return; }
+const groups = myInviteG();
+let target = groups.find(g => g[0] === myInviteCurGroup);
+if (!target) { target = ['我的新增', []]; groups.push(target); }
+if (target[1].indexOf(v) >= 0) { toast('「' + target[0] + '」已有相同的邀请'); return; }
+target[1].push(v);
+myInviteGroupsSave();
+myInviteCurGroup = target[0];
+renderInviteBank();
+if (chatAskInput) chatAskInput.value = '';
+toast('已存入「' + target[0] + '」');
+}
+function myInviteNewGroup() {
+window.openModal('新建「我的邀请」分组', '', (v) => {
+v = (v || '').trim();
+if (!v) { toast('请输入分组名'); return; }
+const groups = myInviteG();
+if (groups.some(g => g[0] === v)) { toast('分组「' + v + '」已存在'); return; }
+groups.push([v, []]);
+myInviteGroupsSave();
+myInviteCurGroup = v;
+renderInviteBank();
+toast('已新建分组「' + v + '」');
+});
+}
+function myInviteEdit(idx, old) {
+const g = myInviteG().find(x => x[0] === myInviteCurGroup);
+if (!g || !Array.isArray(g[1])) return;
+window.openModal('修改邀请', old, (v) => {
+v = (v || '').trim();
+if (!v) { toast('请输入邀请内容'); return; }
+const g2 = myInviteG().find(x => x[0] === myInviteCurGroup);
+if (!g2 || !Array.isArray(g2[1]) || idx < 0 || idx >= g2[1].length) return;
+if (g2[1][idx] === v) { toast('内容未变化'); return; }
+if (g2[1].indexOf(v) >= 0) { toast('该分组已有相同的邀请'); return; }
+g2[1][idx] = v;
+myInviteGroupsSave();
+renderInviteBank();
+toast('已修改');
+});
+}
+function myInviteDel(idx, c) {
+const g = myInviteG().find(x => x[0] === myInviteCurGroup);
+if (!g || !Array.isArray(g[1])) return;
+window.openModal('删除这条邀请？', '', () => {
+const g2 = myInviteG().find(x => x[0] === myInviteCurGroup);
+if (!g2 || !Array.isArray(g2[1]) || idx < 0 || idx >= g2[1].length) return;
+g2[1].splice(idx, 1);
+myInviteGroupsSave();
+renderInviteBank();
+toast('已删除');
+}, { noInput: true, staticText: '「' + c + '」\n\n删除后无法恢复。' });
+}
+document.addEventListener('contact-switched', function () {
+myInviteDirty = false;
+myInviteGroups = null;
+myInviteCurGroup = '__preset';
+tiInviteBatch = false;
+tiInviteSel.clear();
+});
 const moreInvite = document.getElementById('more-invite');
 if (moreInvite) {
 moreInvite.addEventListener('click', (e) => {
@@ -4831,6 +5724,8 @@ openChatAskPanel('ask');
 if (chatAskOk) chatAskOk.addEventListener('click', (e) => { e.stopPropagation(); submitChatAsk(); });
 if (chatAskCancel) chatAskCancel.addEventListener('click', (e) => { e.stopPropagation(); closeChatAskPanel(); });
 if (chatAskClose) chatAskClose.addEventListener('click', (e) => { e.stopPropagation(); closeChatAskPanel(); });
+const chatAskSaveBtn = document.getElementById('chat-ask-save');
+if (chatAskSaveBtn) chatAskSaveBtn.addEventListener('click', (e) => { e.stopPropagation(); saveInviteInput(); });
 if (chatAskInput) chatAskInput.addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.isComposing && e.keyCode !== 229) { e.stopPropagation(); submitChatAsk(); } });
 const chatSearchEl = document.getElementById('chat-search');
 const chatSearchInput = document.getElementById('chat-search-input');
@@ -4906,7 +5801,7 @@ let head = '共 ' + results.length + ' 条 · 点击结果跳转到对应消息'
 if (dateLabel) head = dateLabel + ' · 共 ' + results.length + ' 条 · 点击结果跳转';
 let html = '<div style="font-size:11px;color:var(--muted);margin:6px 2px 10px">' + esc(head) + '</div>';
 results.slice(0, 80).forEach(r => {
-const isImg = r.txt.indexOf('data:') === 0;
+const isImg = r.txt.indexOf('data:') === 0 || (window.mochiMediaIsToken && window.mochiMediaIsToken(r.txt)); // #148 令牌化图片消息搜索结果不直出令牌串
 const label = isImg ? '[图片]' : (r.txt.length > 60 ? r.txt.slice(0, 60) + '…' : r.txt);
 const who = r.m.side === 'out' ? myName : partnerName;
 const time = r.m.ts ? fmtSearchTime(r.m.ts) : '';
@@ -5155,7 +6050,143 @@ let activeMsgEl = null;   // 当前操作的消息 DOM
 let activeSide = 'in';    // 当前操作消息方向
 let lastQuote = null;     // 待引用内容
 function getFav() { try { return JSON.parse(store.get('fav-msgs') || '[]'); } catch (e) { return []; } }
-function saveFav(list) { store.set('fav-msgs', JSON.stringify(list)); }
+function saveFav(list) { store.set('fav-msgs', JSON.stringify(list)); try { scheduleFavImgPass(2500); } catch (e) {} }
+// ===== v3.26.x #139：收藏图片压缩 =====
+// 收藏把消息 parts / 图片 dataURL 原样整份进库，与聊天记录重复存同一批图（诊断实证
+// fav-msgs 全桌面 ≈21MB）。压缩走「读-压缩-写前 CAS 比对」：压缩期间任何其他写入
+// （再收藏/删除/换桌面）都会使快照失效并重排，绝不覆盖新数据，绝不丢收藏。
+// 规则（宁可不压，不可压坏）：只压 data:image/*（GIF 保动画、SVG 矢量、<4KB 小图跳过）；
+// 480px 上限（气泡显示宽度内）；优先 WebP（iOS canvas 不支持会回退返回 PNG，前缀检测后
+// 改试 JPEG 白底）；结果必须比原图更小才采用；单张失败只影响该张，整批异常放弃本轮。
+function compressFavDataUrl(src) {
+return new Promise((resolve) => {
+try {
+if (typeof src !== 'string' || src.indexOf('data:image/') !== 0 || src.length < 4096) { resolve(null); return; }
+if (/^data:image\/(gif|svg)/i.test(src)) { resolve(null); return; }
+const img = new Image();
+img.onload = () => {
+try {
+const scale = Math.min(1, 480 / Math.max(img.width, img.height));
+const w = Math.max(1, Math.round(img.width * scale));
+const h = Math.max(1, Math.round(img.height * scale));
+const c = document.createElement('canvas');
+c.width = w; c.height = h;
+const ctx = c.getContext('2d');
+ctx.drawImage(img, 0, 0, w, h);
+let out = c.toDataURL('image/webp', 0.82);
+if (out.indexOf('data:image/webp') !== 0) {
+ctx.fillStyle = '#ffffff'; ctx.fillRect(0, 0, w, h);
+ctx.drawImage(img, 0, 0, w, h);
+out = c.toDataURL('image/jpeg', 0.82);
+}
+resolve(out.length < src.length ? out : null);
+} catch (e) { resolve(null); }
+};
+img.onerror = () => resolve(null);
+img.src = src;
+} catch (e) { resolve(null); }
+});
+}
+async function compressFavListImages(list) {
+let changed = false;
+const out = new Array(list.length);
+for (let i = 0; i < list.length; i++) {
+let f = list[i];
+try {
+if (f && typeof f.text === 'string' && f.text.indexOf('data:image/') === 0) {
+const v = await compressFavDataUrl(f.text);
+if (v) { f = Object.assign({}, f, { text: v }); changed = true; }
+}
+if (f && Array.isArray(f.parts) && f.parts.length) {
+const parts = new Array(f.parts.length);
+let pChanged = false;
+for (let j = 0; j < f.parts.length; j++) {
+const p = f.parts[j];
+let np = p;
+if (p && typeof p.v === 'string' && p.v.indexOf('data:image/') === 0) {
+const v = await compressFavDataUrl(p.v);
+if (v) { np = Object.assign({}, p, { v: v }); pChanged = true; }
+}
+parts[j] = np;
+}
+if (pChanged) { f = Object.assign({}, f, { parts: parts }); changed = true; }
+}
+} catch (e) {}
+out[i] = f;
+}
+return changed ? out : null;
+}
+// #142：收藏图片令牌化——压缩后把 data:image 替换为媒体池引用（与聊天记录同一池，
+// 同一张图聊天/收藏只存一份）。池落盘先于收藏落盘（mochiMediaFlush）。
+async function tokenizeFavList(list) {
+if (!window.mochiMediaTokenize) return null;
+let changed = false;
+const out = new Array(list.length);
+for (let i = 0; i < list.length; i++) {
+let f = list[i];
+try {
+if (f && typeof f.text === 'string' && f.text.indexOf('data:image/') === 0) {
+const t = await window.mochiMediaTokenize(f.text);
+if (t) { f = Object.assign({}, f, { text: t }); changed = true; }
+}
+if (f && Array.isArray(f.parts) && f.parts.length) {
+const parts = new Array(f.parts.length);
+let pChanged = false;
+for (let j = 0; j < f.parts.length; j++) {
+const p = f.parts[j];
+let np = p;
+if (p && typeof p.v === 'string' && p.v.indexOf('data:image/') === 0) {
+const t = await window.mochiMediaTokenize(p.v);
+if (t) { np = Object.assign({}, p, { v: t }); pChanged = true; }
+}
+parts[j] = np;
+}
+if (pChanged) { f = Object.assign({}, f, { parts: parts }); changed = true; }
+}
+} catch (e) {}
+out[i] = f;
+}
+return changed ? out : null;
+}
+let _favImgPassT = null, _favImgPassRetries = 0;
+function scheduleFavImgPass(delay) {
+clearTimeout(_favImgPassT);
+_favImgPassT = setTimeout(favImgPass, delay || 3000);
+}
+// 返回 true=完整跑完一轮（无论是否压缩了内容）；false=期间有并发写入被 CAS 打断（已自动重排）
+async function favImgPass() {
+try {
+const rawSnap = store.get('fav-msgs');
+if (!rawSnap || rawSnap.length < 4096) return true;
+let list;
+try { list = JSON.parse(rawSnap); } catch (e) { return true; }
+if (!Array.isArray(list)) return true;
+const compressed = await compressFavListImages(list);
+const tokened = await tokenizeFavList(compressed || list);
+if (!compressed && !tokened) return true;
+const out = tokened || compressed;
+await window.mochiMediaFlush(); // #142：池数据先落盘，收藏里的令牌才有据可查
+const rawNow = store.get('fav-msgs');
+if (rawNow !== rawSnap) {
+// 压缩期间收藏被写过——以最新数据重排（最多 5 次，防极端高频写入空转）
+if (++_favImgPassRetries < 5) { scheduleFavImgPass(5000); return false; }
+return true;
+}
+_favImgPassRetries = 0;
+store.set('fav-msgs', JSON.stringify(out));
+return true;
+} catch (e) { return true; }
+}
+// 存量一次性迁移：本桌面没跑过压缩/令牌化扫描才执行（新收藏由 saveFav 钩子触发增量处理）
+function favImgMigrateIfNeed() {
+try { if (store.get('fav-img-cmp-v1') === '1' && store.get('fav-media-v1') === '1') return; } catch (e) {}
+favImgPass().then(function (settled) {
+if (settled) { try { store.set('fav-img-cmp-v1', '1'); store.set('fav-media-v1', '1'); } catch (e) {} }
+});
+}
+window.favImgPassNow = favImgPass; // 可测性/诊断钩子（verify-media-pool 用）
+document.addEventListener('mochi-restore-done', function () { setTimeout(favImgMigrateIfNeed, 12000); });
+document.addEventListener('contact-switched', function () { setTimeout(favImgMigrateIfNeed, 12000); });
 function syncFavMsgText(oldText, newText) {
 if (oldText === newText) return;
 const fav = getFav();
@@ -5197,6 +6228,13 @@ else if (special === 'ask-curious') { q = rec.curiousQuestion || ''; mine = rec.
 else if (special === 'ask-roast') { q = rec.roastText || ''; mine = rec.roastAnswer || ''; ta = rec.roastReply || ''; }
 else if (special === 'ask-card') { q = rec.askQuestion || ''; mine = rec.askAnswer || ''; ta = rec.askReply || ''; }
 else if (special === 'invite') { q = rec.inviteContent || ''; ta = rec.inviteAnswer || ''; }
+// v3.28.x 修复：以下卡片在 renderMsg 都渲染了收藏心形（favHeartHtml），但 cardSnapshot
+// 未覆盖 → 点收藏静默无效（无 toast、不进收藏夹）。补齐快照，收藏夹按通用卡渲染。
+else if (special === 'ask') { q = rec.askQuestion || rec.text || ''; mine = rec.askAnswer || ''; ta = rec.askReply || ''; }
+else if (special === 'redpacket') { mine = (rec.side === 'out' ? '我发出' : chatPartnerName() + '发出'); q = '红包 ¥' + Number(rec.rpAmount || 0).toFixed(2) + (rec.rpWish ? ' · ' + rec.rpWish : ''); }
+else if (special === 'flower') { q = (rec.flName || '花') + (rec.flWish ? '：' + rec.flWish : ''); }
+else if (special === 'gift') { q = (rec.giftName || '礼物') + (rec.giftWish ? '：“' + rec.giftWish + '”' : '') + (rec.giftPrice != null ? ' · ¥' + Number(rec.giftPrice || 0).toFixed(2) : ''); }
+else if (special === 'dish') { q = (rec.dishName || '菜肴') + (rec.dishWish ? '：“' + rec.dishWish + '”' : '') + (rec.dishPrice != null ? ' · ¥' + Number(rec.dishPrice || 0).toFixed(2) : ''); }
 else return null;
 return { kind: 'card', special: special, q: q, mine: mine, ta: ta, ts: rec.ts || Date.now() };
 }
@@ -5208,8 +6246,14 @@ if (!f) return;
 if (window.addMyFavItem(f)) toast('已收藏互动卡片');
 else toast('已收藏过这张卡片');
 };
-function favHeartHtml() {
-return '<button class="msg-fav-heart" title="收藏整张互动卡片"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z"/></svg>收藏</button>';
+function favHeartHtml(rec) {
+const heart = '<button class="msg-fav-heart" title="收藏整张互动卡片"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z"/></svg>收藏</button>';
+let time = '';
+if (rec && rec.ts) {
+const who = rec.side === 'out' ? chatUserName() : chatPartnerName();
+time = '<div class="msg-fav-time">' + escTxt(who) + ' ' + fmtTime(rec.ts) + ' 发送</div>';
+}
+return heart + time;
 }
 function taFavCard(rec) {
 const _favProbCard = (window.favCfg ? window.favCfg().taCard : 30);
@@ -5223,16 +6267,18 @@ if (msgActions) msgActions.hidden = true;
 activeMsgEl = null;
 }
 function quoteTextOf(m) {
+// #148：图片载荷判定加媒体池令牌（@@m:hash）——令牌化后的图片消息引用不出缩略图、
+// 令牌串被当引用文本存进 quote，渲染端 data: 过滤再把缩略图整段丢掉
+const isMedia = (s) => typeof s === 'string' && (s.indexOf('data:') === 0 || /^https?:\/\//i.test(s) || (window.mochiMediaIsToken && window.mochiMediaIsToken(s)));
 const qi = (m.parts || []).filter(p => p.k === 'img').map(p => p.v).slice(0, 3);
 if (!qi.length && (m.type === 'sticker' || m.type === 'image')
-&& typeof m.text === 'string'
-&& (m.text.indexOf('data:') === 0 || /^https?:\/\//i.test(m.text))) {
+&& isMedia(m.text)) {
 qi.push(m.text);
 }
 let qt = m.text;
 if (m.type === 'voice') qt = '[语音] ' + String(qt || '').split('|||')[0];
 else if (m.type === 'sticker') qt = '表情包';
-else if (qi.length && (String(qt || '').indexOf('data:') === 0 || /^https?:\/\//i.test(String(qt || '')))) qt = '图片';
+else if (qi.length && isMedia(String(qt || ''))) qt = '图片';
 // 兜底：type 仍是 text 却夹带 |||data: 载荷的记录（导入的字卡音频/历史数据）
 else if (typeof qt === 'string' && qt.indexOf('|||') > 0 && qt.indexOf('data:') > 0) qt = qt.split('|||')[0];
 return { text: qt, imgs: qi };
@@ -5400,8 +6446,11 @@ closeMsgActions();
 } else if (act === 'edit') {
 if (rec && window.openModal) {
 const orig = rec.text;
+// #142：媒体池令牌展开——图片消息 text 已令牌化（@@m:<hash>），编辑入口先解出
+// 原 dataURL 判定图片消息（输入框置空）；否则令牌字符串会进输入框被当文字保存
+const _origMedia = (window.mochiMediaExpand && window.mochiMediaExpand(orig)) || null;
 const editEl = activeMsgEl;
-window.openModal('编辑消息', orig.indexOf('data:') === 0 ? '' : orig, (v) => {
+window.openModal('编辑消息', (_origMedia || orig.indexOf('data:') === 0) ? '' : orig, (v) => {
 const val = (v || '').trim();
 if (!val) return;
 rec.text = val;
@@ -5450,6 +6499,10 @@ const favPage = document.getElementById('page-fav');
 const favList = document.getElementById('fav-list');
 let favTab = 'mine'; // mine=我的收藏 ta=联系人的收藏
 let favKind = 'all'; // 收藏分类筛选：all=全部 msg=聊天消息 card=互动卡片 mail=信件 feed=朋友圈
+let favBatch = false;   // v3.31.x 批量管理模式（多选删除）
+let favBatchSel = [];   // 批量模式选中的收藏对象引用（与当次渲染的数组同源，切 tab/分类后被收窄）
+let favBatchArr = null; // 当次渲染使用的收藏数组引用（批量删除直接改它，避免重复 getFav 解析导致引用失效）
+let favBatchVis = [];   // 当前 tab+分类筛选下可见条目（全选用）
 const FAV_KINDS = [
 { k: 'all', label: '全部', icon: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg>' },
 { k: 'msg', label: '聊天', icon: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 11.5a8.38 8.38 0 01-.9 3.8 8.5 8.5 0 01-7.6 4.7 8.38 8.38 0 01-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 01-.9-3.8 8.5 8.5 0 014.7-7.6 8.38 8.38 0 013.8-.9h.5a8.48 8.48 0 018 8v.5z"/></svg>' },
@@ -5457,6 +6510,16 @@ const FAV_KINDS = [
 { k: 'mail', label: '信件', icon: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M3 7l9 6 9-6"/></svg>' },
 { k: 'feed', label: '朋友圈', icon: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="8" r="3"/><path d="M3 19c0-3 3-5 6-5s6 2 6 5"/><circle cx="17" cy="9.5" r="2.2"/><path d="M14.5 19c0-2 2-3.5 4-3.5s2.5 1.5 2.5 3.5"/></svg>' }
 ];
+// v3.31.x 批量管理：按当前勾选数同步底部操作栏（删除按钮文案/可用态 + 全选按钮文案）
+function syncBatchBar() {
+const delBtn = document.getElementById('fav-batch-del');
+if (delBtn) {
+delBtn.textContent = '删除' + (favBatchSel.length ? '(' + favBatchSel.length + ')' : '');
+delBtn.disabled = !favBatchSel.length;
+}
+const allBtn = document.getElementById('fav-batch-all');
+if (allBtn) allBtn.textContent = (favBatchVis.length && favBatchSel.length === favBatchVis.length) ? '取消全选' : '全选';
+}
 function renderFav() {    if (!favList) return;
 const fav = getFav();
 favList.innerHTML = '';
@@ -5483,6 +6546,14 @@ if (cnt) cnt.textContent = n > 0 ? String(n) : '';
 }
 const list2 = favKind === 'all' ? list : list.filter(f => (f.kind || 'msg') === favKind);
 list2.sort((a, b) => (b.ts || 0) - (a.ts || 0));
+// v3.31.x 批量管理：记录本次渲染的数组与可见条目；勾选只保留当前筛选下仍可见的（切 tab/分类自动收窄）
+favBatchArr = fav;
+favBatchVis = list2;
+if (favBatch) favBatchSel = favBatchSel.filter(s => list2.indexOf(s) >= 0);
+const manageBtn = document.getElementById('fav-manage-btn');
+if (manageBtn) manageBtn.classList.toggle('sel', favBatch);
+const barEl = document.getElementById('fav-batch-bar');
+if (barEl) { barEl.hidden = !favBatch; syncBatchBar(); }
 const title = favTab === 'ta' ? partnerName + ' 的收藏' : myName + ' 的收藏';
 let empty = favTab === 'ta' ? 'TA 还没有收藏' : '暂无收藏';
 if (favKind !== 'all') {
@@ -5499,7 +6570,8 @@ return;
 }
 const FAV_KIND_LABEL = {
 'ask-choose': '小问题', 'ask-curious': '好奇', 'ask-roast': '吐槽',
-'ask-card': '问问TA', 'invite': '邀请TA'
+'ask-card': '问问TA', 'invite': '邀请TA', 'ask': '问问TA',
+'redpacket': '红包', 'flower': '送花', 'gift': '礼物', 'dish': '佳肴'
 };
 function favTextHtml(s) {
 const str = String(s || '');
@@ -5538,8 +6610,8 @@ let html = '<div class="fav-item-card">' +
 '<span class="fav-item-tag">' + tag + (f.title ? ' · 《' + escTxt(f.title) + '》' : '') + '</span>' +
 '<div class="fav-item-body">' + favTextHtml(f.text) + '</div>' +
 '</div>';
-m.innerHTML = html + side;
-fillAvatar(m.querySelector('.msg-av'), 'cs-avatar-user');
+// v3.26.x：信件收藏不显示头像——不再复用聊天行的 .msg-av 头像槽（时间保留），纯卡片观感
+m.innerHTML = html + '<div class="msg-side">' + timeHtml + '</div>';
 } else if (kind === 'feed') {
 let html = '<div class="fav-item-card">' +
 '<span class="fav-item-tag">朋友圈动态</span>' +
@@ -5607,6 +6679,23 @@ function matchFav(x) {
 return (x.kind || 'msg') === kind &&
 (x.q || '') === (f.q || '') && (x.text || '') === (f.text || '') && x.ts === f.ts;
 }
+// v3.31.x 批量管理：条目变多选——外侧加圆圈勾选，点击整条切换勾选；
+// 用捕获阶段监听，抢先于气泡内图片的 click（查看大图）并 stopPropagation 拦下
+if (favBatch) {
+const ck = document.createElement('div');
+ck.className = 'fav-check' + (favBatchSel.indexOf(f) >= 0 ? ' on' : '');
+ck.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.5l4.5 4.5L19 7"/></svg>';
+if (f.side === 'out') m.appendChild(ck); else m.insertBefore(ck, m.firstChild);
+m.addEventListener('click', (e) => {
+e.stopPropagation();
+const i = favBatchSel.indexOf(f);
+if (i >= 0) favBatchSel.splice(i, 1); else favBatchSel.push(f);
+ck.classList.toggle('on', favBatchSel.indexOf(f) >= 0);
+syncBatchBar();
+}, true);
+favList.appendChild(m);
+return;
+}
 let pressTimer = null;
 m.addEventListener('touchstart', (e) => {
 pressTimer = setTimeout(() => {
@@ -5660,6 +6749,48 @@ if (!tb) return;
 favKind = tb.dataset.kind;
 renderFav();
 });
+// v3.31.x 批量管理：顶栏入口 / 底部操作栏（取消 / 全选 / 删除）
+const favManageBtn = document.getElementById('fav-manage-btn');
+if (favManageBtn) {
+favManageBtn.addEventListener('click', () => {
+favBatch = !favBatch;
+favBatchSel = [];
+renderFav();
+if (favBatch) toast('点选要删除的收藏');
+});
+}
+const favBatchCancel = document.getElementById('fav-batch-cancel');
+if (favBatchCancel) {
+favBatchCancel.addEventListener('click', () => {
+favBatch = false;
+favBatchSel = [];
+renderFav();
+});
+}
+const favBatchAll = document.getElementById('fav-batch-all');
+if (favBatchAll) {
+favBatchAll.addEventListener('click', () => {
+if (!favBatch) return;
+const all = favBatchVis.length && favBatchSel.length === favBatchVis.length;
+favBatchSel = all ? [] : favBatchVis.slice();
+renderFav();
+});
+}
+const favBatchDel = document.getElementById('fav-batch-del');
+if (favBatchDel) {
+favBatchDel.addEventListener('click', () => {
+if (!favBatch || !favBatchSel.length) return;
+const n = favBatchSel.length;
+if (!window.openModal) return;
+window.openModal('删除选中的 ' + n + ' 条收藏？', '', () => {
+favBatchSel.forEach(s => { const i = favBatchArr ? favBatchArr.indexOf(s) : -1; if (i >= 0) favBatchArr.splice(i, 1); });
+if (favBatchArr) saveFav(favBatchArr);
+favBatchSel = [];
+renderFav();
+toast('已删除 ' + n + ' 条收藏');
+}, { noInput: true });
+});
+}
 window.renderFav = renderFav;
 const favApp = document.querySelector('.app[data-app="note"]');
 if (favApp && favPage) {
@@ -5674,6 +6805,8 @@ renderFav();
 const favBack = document.getElementById('fav-back');
 if (favBack) {
 favBack.addEventListener('click', () => {
+favBatch = false; // v3.31.x 离开收藏页退出批量模式
+favBatchSel = [];
 document.querySelectorAll('.page').forEach(p => p.hidden = true);
 const phonePage = document.getElementById('page-phone');
 if (phonePage) phonePage.hidden = false;
@@ -5727,29 +6860,79 @@ function myEmojiLoad() {
 try { const v = JSON.parse(myEmojiStore().get('my-emoji-groups') || 'null'); if (Array.isArray(v)) return v; } catch (e) {}
 return [];
 }
+// FIX 2026-09-05 #172 我的表情包刷新必丢：超启动回填预算的大键（实例 34.93MB）每次刷新都被
+// idbRestore 挂起在 __xyIdbDeferredKeys，且大键从不落 localStorage 快照——store 三路全空，
+// 唯一恢复链是裸 idbGet 固定 4s+4s 超时，低端机读不完即静默放弃 → 面板永远空（用户视角=
+// 每次刷新全丢）；恢复失败期间保存还会把空态写回、把 IDB 全量顶掉。修复三件套（与字卡库
+// hydrateScope 同机制）：
+//   ① myeApplyIdb：读到 IDB 值后的统一应用（内容更多才覆盖 + 面板开着即重绘，原 tryRestore/
+//      reloadMyEmojiFromIdb 两处重复逻辑收口）；
+//   ② myeHydrateFallback：idbGet 读空时走 idbHydrateKey 按需取回（6s+8s 慢读友好、成功后
+//      进驻存并移出挂起名单），tryRestore 重试穷尽 / reloadMyEmojiFromIdb 共用；
+//   ③ myEmojiSave 防覆盖闸门：该键仍挂起（=本会话从未成功恢复全量）时先取回 IDB 全量与
+//      内存新增按分组去重合并再写，防几十 MB 表情包被小包覆盖成真丢失。
+function myeApplyIdb(v) {
+try {
+const data = typeof v === 'string' ? JSON.parse(v) : v;
+if (!Array.isArray(data)) return false;
+const cnt = (g) => { let n = 0; g.forEach(x => n += (Array.isArray(x[1]) ? x[1].length : 0)); return n; };
+// #172：与内存面板态（myGroups）比张数——挂起场景下 hydrate 会把全量写进 store 层，
+// 与内存脱节，若以 store 快照为基准会误判「同量不覆盖」→ 恢复永不落内存（面板仍空）
+const lc = Array.isArray(myGroups) ? cnt(myGroups) : -1;
+if (lc < 0 || cnt(data) > lc) {
+myGroups = data;
+if (!emojiPanel.hidden) renderEmojiPanel();
+}
+return true;
+} catch (e) { return false; }
+}
+function myeHydrateFallback() {
+if (!window.idbHydrateKey) return;
+window.idbHydrateKey(MYE_KEY()).then(ok => {
+if (ok !== true) return;
+try { const raw = myEmojiStore().get('my-emoji-groups'); if (raw) myeApplyIdb(raw); } catch (e) {}
+});
+}
 function myEmojiSave() {
-const data = JSON.stringify(myGroups);
-myEmojiStore().set('my-emoji-groups', data);
+// #172 防覆盖闸门：挂起名单仍含本键 = 本会话没恢复过全量，盲写会顶掉 IDB 全量
+if (window.__xyIdbDeferredKeys && window.__xyIdbDeferredKeys.indexOf(MYE_KEY()) >= 0 && window.idbHydrateKey) {
+window.idbHydrateKey(MYE_KEY()).then(ok => {
+// 取回失败不写回——防用小包覆盖 IDB 全量；键保持挂起，本会话内下次保存/开面板再试
+if (ok === false) return;
+if (ok === true) {
+try {
+const full = JSON.parse(myEmojiStore().get('my-emoji-groups') || 'null');
+if (Array.isArray(full)) {
+full.forEach(g => {
+if (!g || typeof g[0] !== 'string' || !Array.isArray(g[1])) return;
+let t = myGroups.find(x => x[0] === g[0]);
+if (!t) { myGroups.push([g[0], g[1].slice()]); return; }
+g[1].forEach(item => { if (t[1].indexOf(item) < 0) t[1].push(item); });
+});
+}
+} catch (e) {}
+}
+myEmojiStore().set('my-emoji-groups', JSON.stringify(myGroups));
+});
 return true;
 }
+myEmojiStore().set('my-emoji-groups', JSON.stringify(myGroups));
+return true;
+}
+// FIX 2026-09-04 #154 朋友圈评论「我的表情包」与聊天面板不同步——把 chat 维护的
+// 最新内存副本暴露给 feed.js：本副本经启动 tryRestore / 每次打开面板
+// reloadMyEmojiFromIdb 以 IDB 权威值回读自愈；而 store 层对该键可能停在旧 LS 快照
+//（大键不回写 LS、启动回填受驻留预算/LS 优先规则限制），朋友圈面板旧读法只看
+// store 层，读不到 IDB 新值 → 两侧不同步。
+window.getMyEmojiGroups = function () { return myGroups || []; };
 (function () {
 if (!window.idbGet) return;
 let retry = 0;
 function tryRestore() {
 window.idbGet(MYE_KEY()).then(v => {
-if (!v) { if (retry < 3) { retry++; setTimeout(tryRestore, 800 * retry); } return; }
-try {
-const data = typeof v === 'string' ? JSON.parse(v) : v;
-if (!Array.isArray(data)) return;
-const cnt = (g) => { let n = 0; g.forEach(x => n += (Array.isArray(x[1]) ? x[1].length : 0)); return n; };
-let local = null;
-try { local = JSON.parse(myEmojiStore().get('my-emoji-groups') || 'null'); } catch (e) {}
-const lc = Array.isArray(local) ? cnt(local) : -1;
-if (lc < 0 || cnt(data) > lc) {
-myGroups = data;
-if (!emojiPanel.hidden) renderEmojiPanel();
-}
-} catch (e) {}
+// #172：重试穷尽仍读空 → idbHydrateKey 兜底（大键挂起/慢读场景裸 idbGet 永远拿不到值）
+if (!v) { if (retry < 3) { retry++; setTimeout(tryRestore, 800 * retry); } else myeHydrateFallback(); return; }
+myeApplyIdb(v);
 });
 }
 tryRestore();
@@ -6004,19 +7187,9 @@ emojiInsertAllowUrl = false;
 function reloadMyEmojiFromIdb() {
 if (!window.idbGet) return;
 window.idbGet(MYE_KEY()).then(v => {
-if (!v) return;
-try {
-const data = typeof v === 'string' ? JSON.parse(v) : v;
-if (!Array.isArray(data)) return;
-const cnt = (g) => { let n = 0; g.forEach(x => n += (Array.isArray(x[1]) ? x[1].length : 0)); return n; };
-let local = null;
-try { local = JSON.parse(myEmojiStore().get('my-emoji-groups') || 'null'); } catch (e) {}
-const lc = Array.isArray(local) ? cnt(local) : -1;
-if (lc < 0 || cnt(data) > lc) {
-myGroups = data;
-if (!emojiPanel.hidden) renderEmojiPanel();
-}
-} catch (e) {}
+// #172：读空（大键挂起/事务超时）不再静默放弃 → hydrate 按需取回
+if (!v) { myeHydrateFallback(); return; }
+myeApplyIdb(v);
 });
 }
 document.addEventListener('contact-switched', function () {
@@ -6034,10 +7207,12 @@ emojiInsertAllowUrl = !!(opts && opts.allowUrl);
 openEmojiPanel();
 document.body.classList.add('mail-emoji-mode');
 };
+window.closeEmojiPanelForInsert = closeEmojiPanel; // #145：群聊表情按钮切换关闭复用（面板同属聊天页共享浮层）
 window.closeIme = function () { try { closeIme(); } catch (e) {} };
 if (emojiBtn) {
 emojiBtn.addEventListener('click', (e) => {
 e.stopPropagation();
+if (emojiPanel && !emojiPanel.hidden) { closeEmojiPanel(); return; } // #145：再次点击=关闭（按钮切换开关）
 emojiInsertCb = null; // 聊天入口始终是发消息
 emojiInsertAllowUrl = false;
 openEmojiPanel();
@@ -6258,7 +7433,7 @@ syncBatchBtn();
 const micBtn = document.getElementById('chat-mic-btn');
 const voicePanel = document.getElementById('voice-panel');
 const VOICE_MAX_MS = 60000;
-let voiceStream = null, voiceRec = null, voiceChunks = [], voiceTimer = null;
+let voiceStream = null, voiceRec = null, voiceChunks = [], voiceTimer = null, voiceStarting = false; // FIX 2026-09-05 #169 录音启动进行中闸门
 let voiceStartTs = 0, voiceDataUrl = '', voiceDur = 0, voiceSilent = false, voicePreviewAudio = null, voiceVisHandler = null;
 function voiceEnabled() {
 try { return store.get('cs-voice-send') === '1'; } catch (e) { return false; }
@@ -6319,32 +7494,67 @@ scrollChatBottom();
 }
 // 外部（群聊等）打开录音面板并把语音发到自己的消息列表：window.openVoicePanelFor(onSend)
 window.openVoicePanelFor = function (onSend) { openVoicePanel({ onSend: onSend }); };
+// v3.26.x：区分「标准安卓浏览器」与「iOS/安卓 WebView」——两者的录音格式与麦克风约束
+// 偏好不同，荣耀 90/Edge 等标准 Chromium 对 audio/mp4(AAC) 的 MediaRecorder 路径会录出
+//「滋啦滋啦」爆音（输入 48k 与 AAC 44.1k 采样率不匹配的已知内核缺陷），而其原生默认的
+// audio/webm;codecs=opus 路径稳定无爆音、Chromium 也能正常播放；iOS Safari 只支持
+// mp4/aac 可录可播，安卓 WebView（vivo/iQOO 的雨见、微信、QQ/UC/百度自带壳等）对
+// webm/opus 能录却解不了（录出来试听/播放没声）——这两种环境仍须走 mp4/aac。
+function isAndroidWebView() {
+try {
+  const ua = navigator.userAgent || '';
+  return /wv\b|MicroMessenger|MicroApp|VivoBrowser|OPBrowser|MQQBrowser|QQBrowser|baiduboxapp|UCBrowser|XiaoMi|MiuiBrowser|HuaweiBrowser|Quark|SogouMobileBrowser|SamsungBrowser|MetaSr|OBABROWSER|dingtalk/i.test(ua);
+} catch (e) { return true; } // 拿不到 UA 时保守按 WebView 处理（走 mp4/aac，只影响音质不影响可用）
+}
+// 标准安卓 Chromium（Chrome/Edge 等非内嵌壳）→ webm/opus 优先；iOS/安卓 WebView → mp4/aac 优先
+function voiceMimePreferOpus() {
+const md = (window.mochiDevice) || {};
+return !!md.isAndroid && !isAndroidWebView();
+}
 function pickVoiceMime() {
 if (typeof MediaRecorder === 'undefined' || !MediaRecorder.isTypeSupported) return '';
-// 优先级：mp4/aac 在最前——这是本机「能录又能播」的稳妥格式（字卡里 mp3/caf/amr/aac 都能播，
-// mp4/aac 覆盖面最广，也是 iOS Safari 唯一可录可播的格式）。webm/opus 只做兜底：
-// 部分安卓 WebView（vivo/iQOO 的雨见等）对 webm/opus 能录却解不了——录出来试听/播放没声。
-const list = ['audio/mp4', 'audio/aac', 'audio/webm;codecs=opus', 'audio/webm', 'audio/ogg;codecs=opus'];
+// 优先级：标准安卓浏览器把 webm/opus 放最前（Chromium 原生默认、稳且无爆音），mp4/aac 兜底；
+// iOS/WebView 仍把 mp4/aac 放最前（iOS 唯一可录可播；WebView 对 webm 能录不能播）。
+const list = voiceMimePreferOpus()
+  ? ['audio/webm;codecs=opus', 'audio/webm', 'audio/mp4', 'audio/aac', 'audio/ogg;codecs=opus']
+  : ['audio/mp4', 'audio/aac', 'audio/webm;codecs=opus', 'audio/webm', 'audio/ogg;codecs=opus'];
 for (let i = 0; i < list.length; i++) {
 try { if (MediaRecorder.isTypeSupported(list[i])) return list[i]; } catch (e) {}
 }
 return '';
 }
-// 获取麦克风轨道：先以「关闭回声消除/降噪/自动增益 + 单声道」请求——这是 vivo/iQOO 等
-// 安卓机上「权限开了却录不到声/录出来为空」的已知根因；若该约束组合不被设备支持
-//（OverconstrainedError 等）则回退到最普通的 {audio:true}，绝不让报障机型彻底录不了。
+// 获取麦克风轨道：标准安卓浏览器优先用最普通的 {audio:true}（AGC/降噪默认开，音质干净不爆音、
+// 不削波），被设备拒绝再回退「关回声消除/降噪/自动增益 + 单声道」组合；iOS/安卓 WebView 仍先
+// 以「关回声消除/降噪/自动增益 + 单声道」请求——这是 vivo/iQOO 等安卓机上「权限开了却录不到声/
+// 录出来为空」的已知根因，若该约束组合不被设备支持（OverconstrainedError 等）再回退 {audio:true}，
+// 绝不让报障机型彻底录不了。
 async function acquireVoiceStream() {
-const tries = [
-  { audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false, channelCount: 1 } },
-  { audio: true }
-];
+const tries = voiceMimePreferOpus()
+  ? [
+      { audio: true },
+      { audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false, channelCount: 1 } }
+    ]
+  : [
+      { audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false, channelCount: 1 } },
+      { audio: true }
+    ];
 let lastErr = null;
 for (let i = 0; i < tries.length; i++) {
 try { return await navigator.mediaDevices.getUserMedia(tries[i]); } catch (e) { lastErr = e; }
 }
 throw lastErr;
 }
+// FIX 2026-09-05 #169（用户报障 OPPO Reno6 5G+雨见浏览器「一直提示已达最长60秒」）：防重入包装。
+// startVoiceRec 在 await getUserMedia 期间（慢壳开麦可达数秒，期间按钮文案未变，用户必然连点）
+// 重复进入会整体覆盖 voiceRec/voiceStartTs 并把 voiceTimer 覆盖成新 id——旧计时器永久丢失成孤儿，
+// 自上次 voiceStartTs 起 60 秒后开始每 250ms 误报「已达最长 60 秒」且永不自停（面板关了仍弹，
+// 只能刷新页面），同时第一路 MediaRecorder+麦克风流被覆盖泄漏。进行中的启动直接忽略重复调用。
 async function startVoiceRec() {
+if (voiceStarting) return;
+voiceStarting = true;
+try { await startVoiceRecInner(); } finally { voiceStarting = false; }
+}
+async function startVoiceRecInner() {
 if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia || typeof MediaRecorder === 'undefined') {
 toast('当前浏览器不支持录音'); return;
 }
@@ -6395,12 +7605,18 @@ stopVoiceRec(false); toast('页面切到后台，录音已停止');
 }
 };
 document.addEventListener('visibilitychange', voiceVisHandler);
-voiceTimer = setInterval(() => {
+if (voiceTimer) { clearInterval(voiceTimer); voiceTimer = null; } // FIX #169 入场先清残留计时器
+const voiceTid = setInterval(() => {
+// FIX 2026-09-05 #169 计时器自证：非当前录音的孤儿计时器自毁；仅确认仍处 recording 态才判 60s——
+// 历史上重复进入录音后，被覆盖丢弃的旧计时器会在停止 60 秒后每 250ms 误报「已达最长 60 秒」不止不休
+if (voiceTimer !== voiceTid) { clearInterval(voiceTid); return; }
+if (!voiceRec || voiceRec.state !== 'recording') { clearInterval(voiceTid); voiceTimer = null; return; }
 const el = Math.floor((Date.now() - voiceStartTs) / 1000);
 const tm = document.getElementById('voice-time');
 if (tm) tm.textContent = voiceFmt(Math.min(el, 60));
 if (Date.now() - voiceStartTs >= VOICE_MAX_MS) { stopVoiceRec(false); toast('已达最长 60 秒，自动停止'); }
 }, 250);
+voiceTimer = voiceTid;
 }
 function stopVoiceRec(silent) {
 if (voiceTimer) { clearInterval(voiceTimer); voiceTimer = null; }
@@ -6974,10 +8190,20 @@ return parts;
 }
 const SEND_GUARD_MS = 2500;
 let lastSendTxt = '', lastSendTs = 0;
+// v3.26.x #115：守卫必须只挡「内核迟到写回」，绝不挡用户真实编辑。
+// 原缺陷：三处防复活守卫的判据都是「内容与刚发送文本完全一致」——用户重打
+// 同一条短句（「好的」「在吗」「嗯」这类）时，第一次 input 事件就命中并被
+// 静默 textContent='' 吞掉（红米 K60 至尊版 + Edge 报「输入栏打字不显示、
+// 空白、发不出去」，实测这条路径 100% 复现吞字）。
+// 两者唯一可靠的区分信号：真实编辑之前一定有用户输入活动（keydown /
+// compositionstart / insert 类 beforeinput），内核的迟到写回没有。
+let lastUserEditAt = 0, clearAppliedAt = 0;
+function userEditedAfterClear() { return lastUserEditAt > clearAppliedAt; }
 function clearChatInput() {
 if (!input) return;
 // 先挂复活守卫再清空——清空动作本身会同步派发 input 事件，守卫需已就位
 input._mClearTxt = lastSendTxt || '';
+clearAppliedAt = Date.now();
 const sentTxt = lastSendTxt || '';
 // v3.14.x：vivo Edge 等内核实测——聚焦中的 contenteditable 直写 textContent=''
 // 后，输入法会把刚提交的组合文本整体写回输入框（迟到、且常不派发 input 事件），
@@ -7005,7 +8231,7 @@ setTimeout(() => {
 try {
 if (!input || !input.isContentEditable) return;
 const now = (input.innerText || '').trim();
-if (now && now === sentTxt && Date.now() - lastSendTs < SEND_GUARD_MS) {
+if (now && now === sentTxt && Date.now() - lastSendTs < SEND_GUARD_MS && !userEditedAfterClear()) {
 input.textContent = '';
 input._mClearTxt = '';
 }
@@ -7016,7 +8242,7 @@ input._mClearTxt = '';
 }
 const addMsg = (text) => {
 const t0 = (text || '').trim();
-if (t0 && t0 === lastSendTxt && Date.now() - lastSendTs < SEND_GUARD_MS) {
+if (t0 && t0 === lastSendTxt && Date.now() - lastSendTs < SEND_GUARD_MS && !userEditedAfterClear()) {
 clearChatInput();
 draftImgs = [];
 renderDraft();
@@ -7045,17 +8271,36 @@ if (window.logFish) window.logFish();
 try { window.__replyOnceDiag = 0; console.log('[mochi-reply] addMsg 发送, 重置 replyOnce 计数'); } catch(e){}
 scheduleReply();
 };
-if (send) send.addEventListener('click', () => addMsg(input.innerText));
+if (send) {
+// v3.30.x：点发送不收输入法——点按按钮的 mousedown 默认把焦点从输入框抢走（移动端键盘随即收起），
+// preventDefault 阻止焦点转移；发送后回焦输入框兜底（部分内核 click 路径仍会失焦，见 FIX-REGRESSION #127）
+send.addEventListener('mousedown', (e) => { e.preventDefault(); });
+send.addEventListener('click', () => { addMsg(input.innerText); try { input.focus(); } catch (e) {} });
+}
 // v3.17.x：删除了此前的 pointerup 监听——它在 click 之前把 lastSendTs 刷新为当前时间，
 // 使 addMsg 的防重发守卫（t0===lastSendTxt 且间隔<2.5s）对「用户重新输入相同文本后
 // 再点发送」必然命中：消息被吞、输入框被清空（红米 K80 Chrome 反馈「点发送无法发送」，
 // 发「嗯/好的/在吗」等重复短句必现）。双击防重仍由守卫承担：真实双击时第二次 click
 // 距上次发送 <2.5s 且文本相同，同样会命中守卫，不会重复发送。
 if (input) {
+// v3.26.x #115：真实输入活动跟踪（守卫判据来源）——捕获阶段早于 input 事件，
+// 用户敲的每一键/每一次组合开始/每一次插入式编辑都会刷新 lastUserEditAt；
+// 内核的迟到写回不会（它没有对应的输入活动）。beforeinput 只认 insert* 类型，
+// delete* 不算「把文本打进来」。老内核无 beforeinput 也不影响（前两类已覆盖）。
+try {
+input.addEventListener('keydown', () => { lastUserEditAt = Date.now(); }, true);
+input.addEventListener('compositionstart', () => { lastUserEditAt = Date.now(); }, true);
+input.addEventListener('beforeinput', (e) => {
+if (!e || typeof e.inputType !== 'string' || e.inputType.indexOf('insert') === 0) lastUserEditAt = Date.now();
+}, true);
+} catch (e) {}
 input.addEventListener('input', () => {
 if (!input._mClearTxt) return;
 const now = input.innerText.trim();
 if (now === input._mClearTxt && Date.now() - lastSendTs < SEND_GUARD_MS) {
+// 本次清空之后用户真打过字＝重发了同一条内容，放行（原实现在此静默清框，
+// 用户看到的就是「输入的字不显示、空白」）；只有无输入活动的迟到写回才清。
+if (userEditedAfterClear()) { input._mClearTxt = ''; return; }
 input.textContent = '';
 input._mClearTxt = '';
 } else if (now && now !== input._mClearTxt) {
@@ -7064,6 +8309,8 @@ input._mClearTxt = '';
 });
 input.addEventListener('keydown', (e) => {
 if (e.key === 'Enter' && !e.isComposing && e.keyCode !== 229) {
+// 聊天设置「回车键发送消息」关闭时不发送：不 preventDefault，安卓 ce-box 走原事件默认行为插入换行
+try { if (store.get('cs-enter-send') === 'off') return; } catch (err) {}
 e.preventDefault();
 addMsg(input.innerText);
 }
@@ -7091,7 +8338,10 @@ window.__chatDbLoadedPrefix = function () {
   } catch (e) { return ''; }
 };
 bootAutoSend();
-loadMsgs();
+// FIX 2026-09-01 #120：启动不再无条件预读当前桌面聊天——大历史桌面（账本 b 超门槛）
+// 冷启动跳过，进入聊天页才读（enterChat 会 loadMsgs），防低端机"打开网站"即崩溃。
+// 小历史/账本缺失仍按原预读行为（数据零风险，见 chatPrefetchIfLight 说明）。
+try { chatPrefetchIfLight(function () { loadMsgs(); }); } catch (e) {}
 setTimeout(rpExpireCheck, 2000);
 setInterval(rpExpireCheck, 60 * 60 * 1000);
 try {
@@ -7127,4 +8377,76 @@ updateChatBadge();
 document.addEventListener('ta-word-changed', function () {
 try { if (msgs.length) renderWindow(false, false); } catch (e) {}
 });
+// v3.26.x #181：气泡 CSS 通用映射导出（单聊 chat-settings.js / 群聊 group-chat.js 共用）。
+// 旧逻辑只认固定别名表，网页下载的气泡模板类名对不上时，整份模板替换后一条规则都匹配
+// 不到节点 → 「已设置但气泡零变化」（EC-PAD01 SE/vivo Edge 等多机型反复反馈；与机型无关，
+// 只与上传内容有关）。现行为：①别名表扩充（bubble-left/right、msg/message/chat-left/right、
+// you/sent/received 等）；②剥离注释、跳过 keyframes 帧；③映射后若没有任何规则命中气泡 →
+// 兜底把模板里全部声明块（含 --var 定义）抽出整体套用到双方气泡 !important，保证上传必有
+// 可见变化；④:root/body/* 等命中不了气泡的选择器不原样注入，防全局重置泄漏污染整页。
+window.mochiMapBubbleCss = function (css, scope) {
+  scope = scope || '';
+  var wrap = function (decls) {
+    return scope + '.msg-out .msg-bubble{' + decls + '!important;}' +
+           scope + '.msg-in .msg-bubble{' + decls + '!important;}';
+  };
+  css = String(css || '').replace(/\/\*[\s\S]*?\*\//g, '').trim();
+  if (!css) return { out: '', hint: null };
+  // 纯声明（无大括号）→ 直接套双方气泡
+  if (css.indexOf('{') < 0) return { out: wrap(css), hint: null };
+  var _mapBc = function (src, names, rep) {
+    var r = src;
+    for (var i = 0; i < names.length; i++) {
+      var n = names[i];
+      var re2 = new RegExp('\\.' + n.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '(?![\\-\\w])', 'g');
+      r = r.replace(re2, rep);
+    }
+    return r;
+  };
+  var OUT_B = scope + '.msg-out .msg-bubble', IN_B = scope + '.msg-in .msg-bubble';
+  var OUT_NAMES = [
+    'message-sent', 'message-me', 'message-mine', 'chat-me', 'msg-me', 'msg-sent', 'sent',
+    'mine', 'me', 'left', 'my-bubble', 'bubble-mine', 'bubble-self', 'self', 'myself', 'sender',
+    'bubble-left', 'msg-left', 'message-left', 'chat-left'
+  ];
+  var IN_NAMES = [
+    'message-received', 'received', 'message-you', 'message-friend', 'chat-you', 'chat-friend',
+    'msg-you', 'msg-recv', 'msg-incoming', 'incoming', 'friend', 'other', 'right', 'you',
+    'bubble-other', 'partner-bubble', 'them', 'recipient', 'guest', 'receiver',
+    'bubble-right', 'msg-right', 'message-right', 'chat-right'
+  ];
+  var SH_NAMES = [
+    'chat-bubble', 'message-bubble', 'text-bubble', 'word-bubble', 'chat-text',
+    'bubble', 'message', 'msg'
+  ];
+  var out = '', hasMapped = false, fallbackDecls = [];
+  var re = /([^{}]*)\{([^{}]*)\}/g, m;
+  while ((m = re.exec(css))) {
+    var sel = m[1].trim(), decls = m[2].trim();
+    if (!decls) continue;
+    if (!sel || /^(-?\d+\.?\d*%|from|to)$/i.test(sel)) { // 无选择器声明块 / keyframes 帧
+      if (!sel) { out += wrap(decls); hasMapped = true; }
+      continue;
+    }
+    var mapped = sel;
+    mapped = _mapBc(mapped, ['msg-out'], scope + '.msg-out');
+    mapped = _mapBc(mapped, ['msg-in'], scope + '.msg-in');
+    mapped = _mapBc(mapped, ['mb.self'], OUT_B);
+    mapped = _mapBc(mapped, ['mb.other'], IN_B);
+    mapped = _mapBc(mapped, OUT_NAMES, OUT_B);
+    mapped = _mapBc(mapped, IN_NAMES, IN_B);
+    mapped = _mapBc(mapped, SH_NAMES, scope + '.msg-bubble');
+    if (/\.msg-bubble|\.msg-out|\.msg-in/.test(mapped)) {
+      out += mapped + '{' + decls + '}';
+      hasMapped = true;
+    } else if (fallbackDecls.indexOf(decls) < 0) {
+      fallbackDecls.push(decls);
+    }
+  }
+  // 一条都没认出气泡类名 → 整包声明兜底（含 --var，var() 引用同元素可解析）
+  if (!hasMapped && fallbackDecls.length) {
+    return { out: wrap(fallbackDecls.join(';')), hint: '未认出模板里的气泡类名，已把全部样式整体套用到双方气泡' };
+  }
+  return { out: out, hint: null };
+};
 })();

@@ -112,13 +112,16 @@
     if (t === 'checkbox' || t === 'range' || t === 'file' || t === 'color' || t === 'hidden' ||
         t === 'date' || t === 'time' || t === 'datetime-local' || t === 'month' || t === 'week') return;
     inp.dataset.ceDone = '1';
-    // 退场为幽灵锚点（占位1px不可见，保留 id 供现有代码 getElementById）
+    // v3.26.x #118：先抓原始 className 再加 ce-ghost——避免可见的 ce-box div 继承到
+    // ce-ghost 类别名（CSS 当前只对 input/textarea 生效未致视觉异常，但逻辑 bug：
+    // 未来加 div.ce-ghost 规则会误伤；box 只需继承原始边框/背景等视觉类）
+    var origClass = inp.className || '';
     inp.classList.add('ce-ghost');
     inp.setAttribute('aria-hidden', 'true');
     // 创建接管输入的 contenteditable div（插到 input 后面）
     var box = document.createElement('div');
     // 继承原输入框样式类（边框/背景/圆角等视觉不变）+ ce-box 基础排版
-    box.className = 'ce-box ' + (inp.className || '');
+    box.className = 'ce-box ' + origClass;
     box.setAttribute('contenteditable', 'true');
     box.setAttribute('spellcheck', 'false');
     box.dataset.for = inp.id || '';
@@ -382,6 +385,60 @@
     }
   } catch (e) {}
 
+  // v3.5.139：聚焦瞬间兜底转换（捕获阶段）——修复动态输入框的时序竞态：
+  // 弹层输入框（如问问TA回答框 qa-input）是动态插入的，面板打开时代码可能
+  // 立即 focus()；MutationObserver 的转换是异步微任务，来不及接管时 Chrome
+  // 已对「原生 input 聚焦」瞬间弹出「自动填充」条（用户实测：问问TA顶部
+  // 问题输入栏仍弹条）。这里在 focusin 捕获阶段同步转换并把焦点移交 ce-box，
+  // 原生 input 随即失焦，Chrome 收回弹条；已转换的（有 __ceBox）直接跳过。
+  if (!isIOS) {
+    document.addEventListener('focusin', function (e) {
+      var t = e.target;
+      if (!t || t.tagName !== 'INPUT' && t.tagName !== 'TEXTAREA') return;
+      if (t.dataset.ceDone || t.__ceBox) return;
+      var ty = t.type;
+      if (ty === 'checkbox' || ty === 'range' || ty === 'file' || ty === 'color' || ty === 'hidden' ||
+          ty === 'date' || ty === 'time' || ty === 'datetime-local' || ty === 'month' || ty === 'week') return;
+      ceConvert(t);
+      if (t.__ceBox) { try { t.__ceBox.focus(); } catch (err) {} }
+    }, true);
+  }
+
+  // v3.5.140：focus 原型层拦截——竞态根治（focusin 兜底是事后补救，
+  // Chrome 对原生 input 聚焦的瞬间就可能已弹出「自动填充」条，弹条后再
+  // 移交焦点个别版本不收回）。这里在 focus 调用发生「之前」拦截：
+  // 未转换的文本输入框被 focus() 时先同步转换、再聚焦 ce-box——
+  // 任何代码路径（弹窗打开即聚焦等）都无法让原生 input 真正持焦，
+  // Chrome 从头到尾看不到「聚焦的表单字段」，弹条无从触发。
+  // 已转换（__ceBox）走实例代理；ceDone 标记的（OPPO 等兼容名单）与
+  // checkbox/date 等类型直接放行原生 focus，行为不变。
+  if (!isIOS) {
+    function ceNeedsConv(t) {
+      if (!t || t.dataset.ceDone || t.__ceBox) return false;
+      var ty = t.type;
+      return !(ty === 'checkbox' || ty === 'range' || ty === 'file' || ty === 'color' || ty === 'hidden' ||
+        ty === 'date' || ty === 'time' || ty === 'datetime-local' || ty === 'month' || ty === 'week');
+    }
+    var _origInpFocus = HTMLInputElement.prototype.focus;
+    HTMLInputElement.prototype.focus = function () {
+      if (this.__ceBox) { try { this.__ceBox.focus(); } catch (e) {} return; }
+      if (ceNeedsConv(this)) {
+        ceConvert(this);
+        if (this.__ceBox) { try { this.__ceBox.focus(); } catch (e) {} return; }
+      }
+      return _origInpFocus.apply(this, arguments);
+    };
+    var _origTAFocus = HTMLTextAreaElement.prototype.focus;
+    HTMLTextAreaElement.prototype.focus = function () {
+      if (this.__ceBox) { try { this.__ceBox.focus(); } catch (e) {} return; }
+      if (ceNeedsConv(this)) {
+        ceConvert(this);
+        if (this.__ceBox) { try { this.__ceBox.focus(); } catch (e) {} return; }
+      }
+      return _origTAFocus.apply(this, arguments);
+    };
+  }
+
   // v3.16.x：ce-box 合成层通用刷新（AI-B 域，通用化 ta-ask.js 的 .ta-add 局部缓解，
   // 合入 AI-A 留言：见 WORKLOG 2026-08-23 问 TA 管理页「文字与输入框边框分离」）。
   // ceConvert 把文本输入框转成 contenteditable .ce-box，输入文字渲染在独立合成层；
@@ -391,6 +448,10 @@
   // 与 ta-ask.js 同法：对可见 .ce-box 强制 reflow + toggle transform:translateZ(0)
   // 触发合成层重新提交到当前位置，随即还原（不带位移动，不改变布局）。仅安卓启用。
   function _aRefreshCe() {
+    // v3.28.x：键盘收起动画期跳过——此时每帧 resize 已驱动 .phone height 跟随，
+    // ce-box 作为正常流元素位置随 layout 自动更新合成层，无需 toggle transform
+    // 强制 reflow；收起期高频 reflow 是"收起键盘卡顿"主因。复原后自然恢复。
+    try { if (_aClosing) return; } catch (e) {}
     // 摩托罗拉G100/雨见：用户刚敲了键、正在输入时，禁止对其它/自身 ce-box
     // toggle transform。正在被输入的元素在 WebKit 内核里被强制重排/重建合成层，
     // 会丢掉当前键入/组合的第一段输入（症状：打完字框里没字，重打一遍才好）。
@@ -420,6 +481,9 @@
   // 供 _aRefreshCe 在用户正在敲键时跳过「toggle 输入元素 transform」的合成层刷新
   // （该 toggle 在部分 WebKit 内核上会丢掉当前键入/组合的第一段输入）。
   var _aUserTypos = Date.now();
+  // v3.28.x：安卓键盘收起动画进行中标记——此期间 _aRefreshCe 跳过 ce-box 强制 reflow
+  //（收起期每帧 resize 叠加 reflow 是"收起键盘卡顿"的主因之一）。仅安卓分支置位/清理。
+  var _aClosing = false;
   try {
     document.addEventListener('keydown', function () { _aUserTypos = Date.now(); }, true);
   } catch (e) {}
@@ -446,9 +510,32 @@
       : el.isContentEditable === true);
   }
   var nudgeTimer = null;
+  // v3.26.x：聚焦可编辑框「内部滚动残留」自愈——修红米 K60 至尊版 + Edge 报障
+  // 「聊天输入栏打字不显示、一片空白、消息发不出去」。
+  // 机理：.chat-input 是 overflow-y:auto + max-height:96px 的 contenteditable，
+  // 安卓内核为露出光标会把它自身的 scrollTop 顶上去；文字被删短/一次重排后
+  // scrollHeight 已 ≤ clientHeight，scrollTop 却不回零 → 框内其实有字，只是被
+  // 自己的滚动推出了可见裁剪区：看着就是「输了但空白」，而数据是对的（所以
+  // 有的用户能盲发出去）。只在内容不超高时归零，多行真滚动绝不干预。
+  function healEditableScroll(el) {
+    try {
+      if (!el || !(el.scrollTop > 0)) return;
+      if (el.scrollHeight <= el.clientHeight + 1) el.scrollTop = 0;
+    } catch (e) {}
+  }
+  // 删字/清空/输入法提交后立刻复检（input 是唯一可靠时机，此时 scrollHeight
+  // 已按新内容重算）；焦点仍在同一元素上，归零不会打断光标。
+  try {
+    document.addEventListener('input', function (e) {
+      var t = e.target;
+      if (!isTextEl(t)) return;
+      healEditableScroll(t);
+    }, true);
+  } catch (e) {}
   function nudgeInputVisible() {
     var active = document.activeElement;
     if (!isTextEl(active) || !active.getBoundingClientRect) return;
+    healEditableScroll(active);
     var r = active.getBoundingClientRect();
     try {
       var scroller = active.closest('.chat-body, .card-list, .gs-scroll, .tc-body, .mem-scroll, .cal-scroll, .div-scroll, .fav-list, .mail-list, .qa-body, .modal, .chat-ask-body, .poke-card-scroll, .chat-decision-body');
@@ -881,9 +968,62 @@
       // --mochi-safe-bottom：底部被浏览器工具条占据时归零。见下方 CSS 侧
       //   var(--mochi-safe-bottom, env(safe-area-inset-bottom, 0px)) 的 27 处替换。
       var _vvFitOn = false;
+      var _envTopCache = -1; // #148：env(safe-area-inset-top) 探针缓存（-1=未测）；旋转时失效
+      var _zoomFixCnt = 0, _zoomFixAt = 0; // #174：缩放异常自愈计数（每会话 ≤3 次，间隔 4s）
       function syncVvFit() {
         try {
           var d = document.documentElement;
+          // ===== v3.26.x #148：iOS standalone 顶部安全区改用 env() 实测探针 =====
+          // 原差值法（screen.height - 可视高）在 iOS 26.x「系统不把网页垫到状态栏
+          // 下方」的形态上失真：该形态系统已把网页起点放在状态栏下方（innerHeight
+          // = screen - 状态栏高），差值却还是量出状态栏高度并写进 --mochi-safe-top
+          // → .phone padding-top 与系统避让双重叠加，Mochi 行上方 ~76px 空白、
+          // 整页下坠（iPhone 16 Pro + Safari 26.1 主屏幕全屏实测）。
+          // env(safe-area-inset-top) 语义恰好区分两种形态：「内容已避让」时返回 0
+          // （系统已处理，页面不再加），「内容覆盖到状态栏下」时返回真实高度。
+          // 探针结果按横竖屏缓存（env 只随旋转变化），避免每次 vv 事件都建 DOM。
+          var _ih2 = window.innerHeight || 0;
+          var _sh2 = (window.screen && window.screen.height) || 0;
+          var _vh2 = _vv ? Math.round(_vv.height * ((_vv.scale && _vv.scale > 0.5) ? _vv.scale : 1)) : _ih2;
+          var _safeTop = 0;
+          if (d.classList.contains('ios-pwa-standalone') && _sh2 > 0 && _vh2 > 0) {
+            if (_envTopCache < 0) {
+              try {
+                var _probe = document.createElement('div');
+                _probe.style.cssText = 'position:fixed;top:0;left:0;width:0;height:0;padding-top:env(safe-area-inset-top,0px);visibility:hidden;pointer-events:none;';
+                document.body.appendChild(_probe);
+                _envTopCache = parseFloat(getComputedStyle(_probe).paddingTop) || 0;
+                document.body.removeChild(_probe);
+              } catch (e4) { _envTopCache = 0; }
+            }
+            // env 实测 ≥20 才需要页面避让（覆盖形态）；=0 说明系统已避让，不再叠加
+            if (_envTopCache >= 20 && _envTopCache <= 160) _safeTop = _envTopCache;
+          }
+          var _topPx = _safeTop ? _safeTop + 'px' : '';
+          if (d.style.getPropertyValue('--mochi-safe-top') !== _topPx) {
+            if (_topPx) d.style.setProperty('--mochi-safe-top', _topPx);
+            else d.style.removeProperty('--mochi-safe-top');
+          }
+          // v3.26.x #148：全屏态（原生 fs-active / CSS 兜底 fs-css-active / iOS 兜底
+          // ios-fs-active / iOS 原生 ios-native-fs）改为「健康态写 --mochi-ios-h」——
+          // 原实现摘除属性回落 100vh，但 iOS 26.x 独立应用 100vh = 整块物理屏
+          // （874），可视高只有 812 → .phone 底部 tabbar 被裁出屏幕外（同一台设备
+          // 实测 .phone高=874 底部空隙=-62）。--mochi-ios-h = visualViewport 实测
+          // 可视高（812），两种形态都贴合；键盘/推定态仍摘除（上方分支），全屏过渡
+          // 期短暂波动由常驻自愈 rAF 连续校正。真机状态以诊断「.phone高/底部空隙」复核。
+          if (d.classList.contains('fs-active') || d.classList.contains('fs-css-active')
+              || d.classList.contains('ios-fs-active') || d.classList.contains('ios-native-fs')) {
+            // v3.26.x #179：高度 = 顶部安全区(env 实测) + 可视高——覆盖形态（内容垫到
+            // 状态栏下，env=59，如 iPhone 14 Pro/15 Pro）可视区=整块物理屏 852，单用
+            // vv(793) 会在底部留出 60px 白带（#179 实测：.phone高=793 底边=793）；
+            // 已避让形态（env=0，如 16 Pro 26.1）= inner 812。min 屏高防异常超界。
+            var _pxFs = (_vh2 >= 300) ? (Math.min(_safeTop + _ih2, _sh2 || (_safeTop + _ih2)) + 'px') : '';
+            if (d.style.getPropertyValue('--mochi-ios-h') !== _pxFs) {
+              if (_pxFs) d.style.setProperty('--mochi-ios-h', _pxFs);
+              else d.style.removeProperty('--mochi-ios-h');
+            }
+            return;
+          }
           // 键盘会话期间不写（摘除属性）：那段时间 .phone 高度由 _setPhoneH 内联值
           // 负责，两套写高度会互相改写
           if (_kbActive || _iProv || _kbNowLike()) {
@@ -892,6 +1032,11 @@
           }
           var ih = window.innerHeight || 0;
           var vh = _vv ? Math.round(_vv.height * ((_vv.scale && _vv.scale > 0.5) ? _vv.scale : 1)) : ih;
+          // v3.26.x #179：非全屏 standalone 同样用 envTop+inner（覆盖形态可视=整屏，
+          // 单用 vv 会在底部留出状态栏高度的空白；已避让形态 env=0 数值不变）
+          if (d.classList.contains('ios-pwa-standalone') && _safeTop > 0 && _ih2 > 0) {
+            vh = Math.min(_safeTop + _ih2, _sh2 || (_safeTop + _ih2));
+          }
           if (!vh) return;
           if (!_vvFitOn) { _vvFitOn = true; d.classList.add('ios-vv-fit'); }
           var px = vh + 'px';
@@ -908,8 +1053,12 @@
           // 铺满物理屏（standalone / 真全屏 / 桌面 F11）→ 摘除属性让 CSS 回落 env()
           // v3.26.x：值未变不写 DOM——1s 常驻自愈轮询期间避免每秒 setProperty
           //   同值触发无谓样式失效（与 syncVvFit 同款先比后写）
+          // v3.27.x #129：iOS PWA standalone 下不归零——standalone 没有浏览器工具条，
+          //   screen-innerHeight 是系统状态栏/Home 指示条（非工具条），且 viewport-fit=cover
+          //   下 Home 指示条在可视区内，归零会让 tabbar/底部组件不避让被遮（iPhone 主屏幕
+          //   打开报障"桌面组件显示不全"）。standalone 下摘除属性让 CSS 回落 env() 正确避让。
           var cur = d.style.getPropertyValue('--mochi-safe-bottom');
-          if (sh && ih && sh - ih > 60) {
+          if (sh && ih && sh - ih > 60 && !d.classList.contains('ios-pwa-standalone')) {
             if (cur !== '0px') d.style.setProperty('--mochi-safe-bottom', '0px');
           } else if (cur) {
             d.style.removeProperty('--mochi-safe-bottom');
@@ -940,6 +1089,22 @@
         try {
           syncVvFit();
           syncSafeBottom();
+          // v3.26.x #174：独立应用缩放异常自愈——iOS 26.x 个别更新在主屏幕形态会把
+          // 页面缩到 scale≈0.85（iPhone 15 Pro 实测 visualViewport 462×932@0.85，
+          // 物理可见只剩 393×792，盖不满 852 高的屏幕 → 顶部状态栏区域露出白底、
+          // UI 整体缩小），maximum-scale=1 也拦不住。苹果没有 API 直接设置缩放，
+          // 重写 viewport meta（content 变化强制 Safari 重新解析并按 initial-scale
+          // 吸附）是唯一恢复手段；meta 已含 minimum-scale=1（#174）锁定缩放下限，
+          // 重写后缩放吸附回 1。每会话最多 3 次 + 间隔 4s 防循环。
+          if (d.classList.contains('ios-pwa-standalone') && _vv && _vv.scale && _vv.scale < 0.95) {
+            var _now = Date.now();
+            if (_zoomFixCnt < 3 && _now - _zoomFixAt > 4000) {
+              _zoomFixCnt++; _zoomFixAt = _now;
+              document.querySelectorAll('meta[name="viewport"]').forEach(function (m) {
+                m.setAttribute('content', 'width=device-width, initial-scale=1.0, minimum-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover, interactive-widget=resizes-content');
+              });
+            }
+          }
           var foc = isTextEl(_textFocused) || isTextEl(document.activeElement);
           if (!foc && !_kbNowLike()) {
             // 键盘会话其实已经结束，却还残留收缩/顶对齐/文档锁/推定停靠 → 无条件复原
@@ -992,6 +1157,8 @@
       //  会立刻补一次，覆盖切后台回来视口已变的场景。
       window.addEventListener('resize', onIosVvEvent);
       window.addEventListener('orientationchange', onIosVvEvent);
+      // v3.26.x #148：旋转后 env(safe-area-inset-top) 可能变化，失效探针缓存重测
+      window.addEventListener('orientationchange', function () { try { _envTopCache = -1; } catch (e) {} });
       window.addEventListener('pageshow', onIosVvEvent);
       document.addEventListener('visibilitychange', onIosVvEvent);
       setInterval(function () {
@@ -1083,11 +1250,37 @@
         // 摩托罗拉G100/雨见 focusout/vv.resize 漏触发，但轮询读 vv.height 能读到
         // 回升，据此立即清除推顶，不用等 2200ms 无活动（用户感知"输入框停留几秒才回底"）
         var _aLastVVH = 0;
+        // v3.29.x（#141）：上一帧 vv.height——syncAndroidKb 顶部「高度上升=正在收起」
+        // 探测的基准（返回键/手势收键盘时焦点保留、focusout 不来，#89 的 _aClosing
+        // 闸门挂不上，收起动画每帧仍跑强制布局读取致灰块几秒才收，见 syncAndroidKb）
+        var _aPrevH = 0;
         // v3.16.x：focusin 后短时高频补偿宽限期——此期间 _aPinPan 即使 _aKb/_aProv 都
         // false 也执行，归零浏览器为露焦点提前平移的视口残留（红米 K80 Chrome 首次
         // 点击输入栏键盘弹出动画期间 vv.offsetTop 先起、vv.height 后缩，_aKb 未置位时
         // 平移已残留 → 输入栏错位+灰条）。850ms 后交回稳态条件。
         var _aBurstUntil = 0;
+        // v3.26.x：安卓键盘内部状态只读探针（与 iOS __mochiIosKb 同字段名，供
+        // device.js window.mochiVvDiag() 合并）。此前诊断文本「键盘/锁残留：
+        // kbActive=… 推定停靠=… 基线 inner/vv=…」几行只读 iOS 探针，安卓下永远
+        // 输出 n/a —— 安卓键盘类报障（输入栏空白/被盖/飞顶）拿不到一点现场证据。
+        // docLocked 恒 false：安卓分支不做 html{overflow:hidden} 文档锁。
+        window.__mochiAndroidKb = function () {
+          return {
+            kbActive: !!_aKb,
+            prov: !!_aProv,
+            closing: !!_aClosing,
+            docLocked: false,
+            fullInner: Math.round(_aIH),
+            fullVv: Math.round(_aH),
+            vvNow: Math.round(_aVV.height),
+            offsetTop: Math.round(_aVV.offsetTop || 0),
+            burstLeft: Math.max(0, _aBurstUntil - Date.now()),
+            focusTag: _aTextFocused ? String(_aTextFocused.tagName || '').toLowerCase() : '',
+            watching: !!_aWatch,
+            lastActAgo: Date.now() - _aLastAct,
+            typosAgo: Date.now() - _aUserTypos
+          };
+        };
         // v3.15.x：键盘期「页面平移归零」自愈（红米 K80 Chrome 报修：更多功能里的小功能
         // 页面键盘一弹整页飞走、下方全灰；帮我决定打字输入框不弹到屏幕上方）。机理与
         // iOS Edge 当年同款：聚焦底部半框内输入框时，浏览器为让焦点可见先把【视觉视口
@@ -1189,9 +1382,21 @@
         function syncAndroidKb() {
           if (!_aVV || !_aPhone) return;
           var h = _aVV.height;
+          // v3.29.x（#141）：高度【上升】且键盘开着=收起动画进行中——不依赖 focusout
+          //（安卓返回键/手势收键盘焦点保留，focusout 不触发，#89 的 _aClosing 闸门挂
+          // 不上；此前每帧 resize 仍跑 _aPinPan/nudgeInputVisible 的强制布局读取，
+          // 重聊天页（数千条消息）单帧 reflow ~100ms 积压 → 输入栏下方灰块几秒才收）。
+          // 门控只要求「相对上一帧在涨」+ 键盘仍在开启态（_aKb 置位本身就代表
+          // h < _aH-60 的收缩世界），动画早期帧（h 仍 < _aH-60）也能第一时间置位；
+          // 与 #89 失焦路径汇合进入「动画期只写 height 跟随」分支，收起期彻底零
+          // 强制布局读取；复原走 _aPanComp 兜底，v3.27.x 输入行不飞语义不变。
+          if (_aKb && h > _aPrevH && _aPrevH > 0) {
+            _aClosing = true;
+          }
+          _aPrevH = h;
           var open = h < _aH - 60; // 可视高度明显变小 = 键盘弹出
           if (!open && h > _aH) _aH = h; // 无键盘时更新基准，地址栏变化不误判
-          if (open && !_aKb) { _aKb = true; _aPhone.style.alignSelf = 'flex-start'; kbDockPanels(); }
+          if (open && !_aKb) { _aClosing = false; _aKb = true; _aPhone.style.alignSelf = 'flex-start'; kbDockPanels(); }
           if (!open && _aKb) {
             // v3.27.x：键盘收起——动画期 visualViewport 还没回到无键盘基准（_aH）时，
             // 不要提前把 .phone 撑回全高 + 面板摘停靠。否则键盘收起动画中途就恢复：
@@ -1199,13 +1404,23 @@
             // 底部输入行整行飞」）。改为动画期持续跟随 vv 平滑上浮、面板保持停靠，
             // 等 vv 回到基准附近（≤12px 误差）才真正恢复，杜绝中途下沉跳变。
             if (h < _aH - 12) {
+              // v3.28.x：收起动画期只写 height 跟随 vv，不再调 _aPinPan——_aPinPan 读
+              // _aVV.offsetTop/scrollY 会强制同步 reflow，每帧 resize 叠加致主线程拥堵
+              //（用户报"手动收起键盘那一刻卡顿"，红米/小米 Chrome 复现）。收起期 offsetTop
+              // 通常 ~0（键盘往下收、视口不平移），平移无需逐帧归零；复原时 _aPanComp 统一兜底。
+              _aClosing = true;
               if (_aPhone.style.height !== h + 'px') _aPhone.style.height = h + 'px';
-              _aPinPan();
               return;
             }
             _aKb = false;
+            _aClosing = false;
             _aPhone.style.height = '';
             _aPhone.style.alignSelf = '';
+            // v3.29.x（#141）：收起瞬间把基准钳回布局视口全高——键盘期 _aH 可能被
+            // 内核/地址栏瞬态值抬错，若停留低位，h < _aH-60 恒真 → 下一帧误判
+            // 「键盘又弹出」把 .phone 锁死在中间高度 = 输入栏下方灰块几秒不收。
+            // innerHeight 即布局视口高（resizes-visual 下不随键盘收缩），恒可靠。
+            if (_aH < window.innerHeight - 12) _aH = window.innerHeight;
             _aPanComp();
             kbUndockPanels();
             return;
@@ -1215,7 +1430,9 @@
             // 值不变不写 DOM（字符串比对早退），打字/滚动时不重排
             if (_aPhone.style.height !== hs) _aPhone.style.height = hs;
             // v3.15.x：收缩后浏览器为露焦点做的视口平移已无必要，残留会整页飞走露灰
-            _aPinPan();
+            // v3.28.x：收起动画期（_aClosing）跳过 _aPinPan——其读 offsetTop/scrollY 强制
+            // 同步 reflow，每帧 resize 叠加致"收起键盘卡顿"。弹起期仍需归零平移残留。
+            if (!_aClosing) _aPinPan();
           }
         }
         // v3.10.x：聚焦期间主动轮询兜底——安卓 visualViewport.resize 在键盘弹出时
@@ -1248,6 +1465,12 @@
                 // vv.resize 漏触发，但轮询能读到 vv.height 回升）→ 立即清除推顶，
                 // 不等 2200ms。悬浮键盘 vv 恒接近 _aH，_aLastVVH 不会小于 _aH-60，不误清除
                 var _hNow = _aVV.height;
+                // v3.29.x（#141）：返回键/手势收键盘时 focusout 不来，_aClosing 的
+                // 失焦置位路径失效——这里按「vv 从小变大=收起动画」补置（与
+                // syncAndroidKb 顶部探测同判据），收起动画期照常跳过强制布局读取
+                if (_aKb && !_aClosing && _aLastVVH && _aLastVVH < _hNow) {
+                  _aClosing = true;
+                }
                 if (_aProv && _aLastVVH && _aLastVVH < _aH - 60 && _hNow >= _aH - 60) {
                   _aProvClear();
                 }
@@ -1263,6 +1486,7 @@
                 // 提前把 .phone 撑回全高导致面板/输入行下沉跳变（与 syncAndroidKb 同判据）
                 if (_aVV.height >= _aH - 12) {
                   _aKb = false;
+                  _aClosing = false;
                   _aPhone.style.height = '';
                   _aPhone.style.alignSelf = '';
                   _aPanComp();
@@ -1303,6 +1527,25 @@
           try { window.scrollTo(0, 0); } catch (e) {}
           _aPinPan(); // v3.15.x：推顶后残留的 vv 平移同样归零（K80 同症状）
         }
+        // v3.29.x（#141）：推定收口——悬浮键盘内核收回键盘（focusout 不可靠、
+        // vv 不变化时原 _aProvCheck 自愈最迟要等 2200ms 无活动），用户输入
+        // 中的真实编辑立即放行：.phone 马上撑回全高，输入栏下方灰块不再残留。
+        // 编辑信号用本模块自有 _aUserTypos（文档级 keydown 捕获，AI-B 自有），
+        // 不耦合 chat.js 内部守卫函数（跨域状态随时可能被对方重构改名）。
+        function _aProvUserConfirm() {
+          try {
+            if (!_aProv || _aKb) return;
+            var tgt = (_aIsText(_aTextFocused) ? _aTextFocused : null) ||
+              (_aIsText(document.activeElement) ? document.activeElement : null);
+            if (!tgt || Date.now() - _aUserTypos > 1200) return;
+            _aProvClear();
+            startAWatch();
+          } catch (e) {}
+        }
+        try {
+          document.addEventListener('input', function () { _aProvUserConfirm(); }, true);
+          document.addEventListener('compositionstart', function () { _aUserTypos = Date.now(); _aProvUserConfirm(); }, true);
+        } catch (eProvUser) {}
         function _aProvClear() {
           if (!_aProv) return;
           _aProv = false;
@@ -1354,6 +1597,7 @@
         // 首次聚焦兜底：键盘弹出的 resize 偶发前置/漏触发，紧跟一次判定
         document.addEventListener('focusin', function (e) {
           try {
+            _aClosing = false; // v3.28.x：聚焦=弹键盘（或保持），退出收起态
             if (_aIsText(e.target)) { _aTextFocused = e.target; _aFocusAt = Date.now(); _aBump(); }
             if (e.target && (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.isContentEditable)) {
               try { syncAndroidKb(); } catch (e3) {}
@@ -1383,6 +1627,7 @@
         // 失焦兜底：键盘收起偶发漏 resize，稍作延迟按可视高度复原
         document.addEventListener('focusout', function (e) {
           try { if (e.target === _aTextFocused) _aTextFocused = null; } catch (e2) {}
+          if (_aKb) _aClosing = true; // v3.28.x：键盘开着时失焦=正在收起，标记以跳过逐帧 _aPinPan
           setTimeout(syncAndroidKb, 120);
           setTimeout(syncAndroidKb, 350);
           // v3.12.x：失焦后复查保底停靠——键盘已收/无聚焦即复原 .phone
@@ -1393,6 +1638,7 @@
           setTimeout(function () {
             if (_aKb && _aVV.height >= _aH - 60) {
               _aKb = false;
+              _aClosing = false;
               _aPhone.style.height = '';
               _aPhone.style.alignSelf = '';
               _aPanComp();
@@ -1408,6 +1654,7 @@
               _aProvClear();
               if (_aKb) {
                 _aKb = false;
+                _aClosing = false;
                 _aPhone.style.height = '';
                 _aPhone.style.alignSelf = '';
                 _aPanComp();

@@ -11,6 +11,133 @@
   setInterval(update, 15000); // 每 15 秒校准一次
 })();
 
+// ===== v3.26.x：防骗+署名禁倒卖声明「运行时回填」——删掉源码/产物里的字也没用 =====
+// template.html 里放的两条置顶声明是静态兜底；这里再用 JS 常量 + 官方远程源强制回填。
+// 只要元素缺失（被删）或文案被改，加载时就会重新写回「开屏顶部两条 + 设置页底部」。
+// 想彻底去掉必须连这段逻辑一起删——等于改代码本身；有网时再从作者官方站点取权威文案
+// 覆盖本地（二传者自己部署的副本也会向官方域名拉取），防二改者连 JS 里的字一起改。
+// （本机制 f7a8b5c 首建、0965278 清理时被整块移除，现按防倒卖需求恢复并扩展双条。）
+(function () {
+  const OFFICIAL_NOTICE = 'https://ling233330-star.github.io/mochi/notice.json';
+  const MARK_KEY = '小红书@言序（1842523578）';
+  // 两条声明：tag 对应静态 DOM 的 data-anti-scam 标记；key 为 notice.json 权威字段；marks 为在位判定特征词
+  const BARS = [
+    { tag: '1', title: '防骗提醒', key: 'alert', marks: ['免费', '诈骗', MARK_KEY],
+      fallback: 'Mochi字卡网站完全免费，作者只有小红书这一个账号：小红书@言序（1842523578）。如有出现任何收费情况，均为诈骗，注意防止被骗。' },
+    { tag: '2', title: '转载署名 · 严禁倒卖', key: 'alert2', marks: ['署名', '倒卖', MARK_KEY],
+      fallback: '二传、分享本站链接必须标注作者署名：小红书 @言序（1842523578），禁止删除或修改。严禁冒为自己制作、删除篡改署名，或以任何形式收费倒卖本站链接、安装包——本站完全免费，收费即诈骗。如果你是花钱买来的链接：你被骗了，请拒付退款并举报卖家。' }
+  ];
+  const texts = {}; // key -> 当前权威文案（先本地兜底，官方拉取后覆盖）
+  BARS.forEach(function (b) { texts[b.key] = b.fallback; });
+  // 判定一条置顶块文案是否仍为官方声明（标题+全部特征词在位才认为在位，避免每次重建；
+  // 空白归一化——文案里「小红书 @言序」带空格而锚点串不带，空格差异不能算被篡改）
+  function marked(box, bar) {
+    const t = (box.textContent || '').replace(/\s+/g, '');
+    const title = bar.title.replace(/\s+/g, '');
+    return t.indexOf(title) > -1 && bar.marks.every(function (m) { return t.indexOf(m) > -1; });
+  }
+  // 开屏置顶块（#splash-notice 最顶部两条：防骗在上、署名禁倒卖紧随）
+  function ensureBar(bar, refNode) {
+    const notice = document.getElementById('splash-notice');
+    if (!notice) return null;
+    let box = notice.querySelector('.splash-alert[data-anti-scam="' + bar.tag + '"]');
+    if (!box) {
+      // 兼容旧副本/标记被删：按官方标题文本认领已有置顶块
+      const heads = notice.querySelectorAll('.splash-alert .splash-alert-t');
+      for (let i = 0; i < heads.length; i++) {
+        if (heads[i].textContent.trim() === bar.title) { box = heads[i].parentNode; break; }
+      }
+    }
+    if (!box) {
+      box = document.createElement('div');
+      box.className = 'splash-alert';
+      notice.insertBefore(box, refNode || notice.firstChild);
+    }
+    box.setAttribute('data-anti-scam', bar.tag);
+    if (!marked(box, bar)) { // 缺失或被改 → 重建/改写回官方文案
+      box.innerHTML = '<div class="splash-alert-t"></div><p></p>';
+      box.querySelector('.splash-alert-t').textContent = bar.title;
+      box.querySelector('p').textContent = texts[bar.key];
+    }
+    return box;
+  }
+  // 设置页底部块（#page-setting 版本行下方）：防骗+署名禁倒卖 合并为一段
+  function ensureSettings() {
+    const page = document.getElementById('page-setting');
+    if (!page) return;
+    let box = page.querySelector('.set-alert');
+    const st = box ? (box.textContent || '') : '';
+    if (box && MARK_KEY && st.indexOf(MARK_KEY) > -1 && st.indexOf('免费') > -1 && st.indexOf('倒卖') > -1) return;
+    if (!box) {
+      box = document.createElement('div');
+      const anchor = page.querySelector('.ver-credit') || null;
+      page.insertBefore(box, anchor ? anchor.nextSibling : null);
+    }
+    box.className = 'set-alert';
+    box.setAttribute('data-anti-scam', 's');
+    box.innerHTML = '<b></b>';
+    box.querySelector('b').textContent = texts['alert'];
+    box.appendChild(document.createTextNode(' ' + texts['alert2']));
+  }
+  // 远程时效公告（可选）：官方 notice.json 下发 { bulletin: { text, until } }，until=epoch 毫秒（缺省/过期自动摘除）。
+  // 用途：临时插播场景（如发现倒卖，对所有联网副本含二传远程挂横幅）；notice.json 不带 bulletin 字段 = 完全不显示，零开销。
+  let bulletin = null;
+  function ensureBulletin() {
+    const notice = document.getElementById('splash-notice');
+    if (!notice) return;
+    let box = notice.querySelector('.splash-alert[data-anti-scam="3"]');
+    const active = !!(bulletin && typeof bulletin.text === 'string' && bulletin.text.trim()
+      && (!bulletin.until || Date.now() < bulletin.until));
+    if (!active) { if (box) box.remove(); return; }
+    const want = bulletin.text.trim();
+    if (!box) {
+      box = document.createElement('div');
+      box.className = 'splash-alert';
+      const b2 = notice.querySelector('.splash-alert[data-anti-scam="2"]');
+      notice.insertBefore(box, b2 ? b2.nextSibling : notice.firstChild);
+    }
+    box.setAttribute('data-anti-scam', '3');
+    if (box.textContent !== '公告' + want) { // 内容变化 → 重写（标题固定「公告」）
+      box.innerHTML = '<div class="splash-alert-t"></div><p></p>';
+      box.querySelector('.splash-alert-t').textContent = '公告';
+      box.querySelector('p').textContent = want;
+    }
+  }
+  function run() {
+    const b1 = ensureBar(BARS[0], null);
+    ensureBar(BARS[1], b1 ? b1.nextSibling : null);
+    ensureSettings();
+    ensureBulletin();
+  }
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', run);
+  else run();
+  // 可选官方远程源：失败（离线/被墙/CORS）不阻塞，保留本地兜底；权威文案有变才强刷
+  fetch(OFFICIAL_NOTICE, { cache: 'no-store' })
+    .then(function (r) { if (!r.ok) throw new Error('http ' + r.status); return r.json(); })
+    .then(function (d) {
+      let dirty = false;
+      BARS.forEach(function (b) {
+        if (d && typeof d[b.key] === 'string' && d[b.key].trim() && d[b.key].trim() !== texts[b.key]) {
+          texts[b.key] = d[b.key].trim();
+          dirty = true;
+        }
+      });
+      // 远程时效公告：与本地状态不同才刷（含下发/摘除）
+      if (d && typeof d.bulletin === 'object' && d.bulletin) {
+        const nb = { text: String(d.bulletin.text || ''), until: Number(d.bulletin.until) || 0 };
+        if (nb.text && (!bulletin || bulletin.text !== nb.text || bulletin.until !== nb.until)) {
+          bulletin = nb;
+          dirty = true;
+        } else if (!nb.text && bulletin) {
+          bulletin = null;
+          dirty = true;
+        }
+      }
+      if (dirty) run(); // 强刷回写
+    })
+    .catch(function () { /* 保留本地兜底 */ });
+})();
+
 // ===== 开屏加载动画：页面就绪后淡出并移除 =====
 (function () {
   const splash = document.getElementById('splash');
@@ -60,6 +187,17 @@
   const enterEl = document.getElementById('splash-enter');
   const loadingEl = document.getElementById('splash-loading');
   const hintEl = document.getElementById('splash-enter-hint');
+  // v3.26.x：数据加载较慢（idbRestore 12 秒保险丝触发）且未真就绪时显示的逃生口链接
+  const forceEnterEl = document.getElementById('splash-force-enter');
+  let slow = false;
+  try { if (window.__mochiDataSlow) slow = true; } catch (e) {} // 事件先于监听派发时兜底
+  // v3.26.x：进入门控补「页面加载完成」——此前只等数据就绪：GitHub Pages 冷启动
+  //   资源慢时，数据先就绪或保险丝先触发，「点击进入」/「仍要进入」在浏览器还没
+  //   拉完页面时就能点，用户点进去看到网页还在加载（数据不全的实况与错觉）。
+  //   现在两个入口都要求页面自身加载完成（window load / readyState complete）才放行；
+  //   30 秒兜底：个别资源挂起导致 load 永不触发时，到点视为已加载，避免开屏永远卡住。
+  let windowLoaded = false;
+  const loaded = () => windowLoaded || (typeof document !== 'undefined' && document.readyState === 'complete');
   // v3.8.y：整页一体滚动——滚动判定用 .splash-box（顶部+公告一起滚，需滚到整页底部）
   const splashBox = document.getElementById('splash-box');
   // v3.8.x：开屏即公告1页——原「开屏公告 + 进入后的报修确认层」两页合并为一页，
@@ -76,29 +214,88 @@
     }
     if (bottom !== scrolledBottom) { scrolledBottom = bottom; updateEnterState(); }
   }
+  // v3.26.x #135：20 秒硬保险丝——数据层有未知永久挂起形态（iPad 7 + Edge：
+  // indexedDB.open 永不落地 → __mochiDataReady 永不置位 → updateEnterState 的
+  // ready() 恒假 → 「点击进入/仍要进入」永远出不来，开屏彻底死锁）。此前只有
+  // mochi-restore-slow 慢标志（仍要进入也要求 ready 门控下的显隐路径）。现 20s
+  // 未就绪时 readyForced=true：进入门控按已就绪放行（仍要求滑到底），点进入走
+  // forceEnter 同款「数据仍在加载」提示；数据随后真就绪时 ready() 优先、标志自动失效。
+  let readyForced = false;
   function updateEnterState() {
-    const ok = ready() && scrolledBottom;
-    if (loadingEl) loadingEl.hidden = ready();
-    if (hintEl) hintEl.hidden = !ready() || ok;
+    const r = ready() || readyForced;
+    const ok = r && scrolledBottom;
+    if (loadingEl) {
+      // 数据未就绪 → 仍在加载数据；数据已就绪但页面资源未加载完 → 提示等待页面
+      loadingEl.hidden = r && loaded();
+      loadingEl.textContent = (!ready() && slow) ? '数据较多，仍在加载…' : (r ? '正在加载页面…' : '正在加载数据…');
+    }
+    if (hintEl) hintEl.hidden = !r || !loaded() || ok;
     if (enterEl) {
-      enterEl.hidden = !ready();
+      enterEl.hidden = !r || !loaded();
       enterEl.classList.toggle('is-disabled', !ok); // div 上设 disabled 属性不落 DOM，用 class 控制置灰
     }
+    // 仍要进入：仅在「页面已加载完成 + 较慢且未真就绪」时显示，真就绪后隐藏
+    if (forceEnterEl) forceEnterEl.hidden = ready() || readyForced || !slow || !loaded();
   }
   const enter = () => {
     if (splash.classList.contains('hide')) return;
-    if (!ready() || !scrolledBottom) return; // 数据未就绪或未滑到底：禁止进入
+    // v3.26.x #135：未真就绪但已硬放行（20s 保险丝）→ 走 forceEnter：
+    // 隐藏开屏 + 弹「数据仍在加载」提示（不静默进入，用户知情数据可能不全）
+    if (!ready()) {
+      if (readyForced) { forceEnter(); }
+      return; // 数据未就绪且未硬放行：禁止进入（原有门控）
+    }
+    if (!scrolledBottom || !loaded()) return; // 未滑到底 / 页面未加载完：禁止进入
     // 今日首次进入（本次仍强制通读）→ 记下已读，当日再次打开不再展开全文
     if (!seenToday) {
       try { localStorage.setItem(seenKey, '1'); seenToday = true; } catch (e) {}
     }
     hide();
+    // v3.26.x：开屏进入后预加载字卡大键——中高端机（deviceMemory>4GB 或无法判断，含所有 iOS）
+    //   后台静默取回【当前桌面专属】字卡(own)，避免用户点进字卡库才看到"字卡较多，正在加载"。
+    //   低端机（deviceMemory≤4GB）保持懒加载，与 idb.js v3.14.x OOM 预算 12MB 对齐防压崩。
+    //   只预取 own 不预取 public：public 是跨所有桌面共享的公用字卡大键（chatcard.js 注释提到
+    //   27MB 公用库真机压崩案例），老 iOS（SE2/8 等 2-3GB，deviceMemory 缺失被当 8GB）预拉它会
+    //   绕过 idb.js 24MB 预算；own 是单联系人专属，通常远小于公用库，风险最低收益最高。public
+    //   留懒加载（点字卡库时 MutationObserver 取回 + toast 提示）。延迟 1.5s 让开屏隐藏动画(400ms)
+    //   +首屏桌面渲染先完成再取回，避免抢主线程/堆；hydrateLibScopes 自带"有数据/已确认无键跳过"
+    //   +in-flight 去重，已就绪零开销，未就绪时用户再点字卡库复用同一取回链不重复。只在用户主动
+    //   点击进入后跑（非 mochi-restore-done 后台事件），符合"用户正在看的场景按需拉一把"红线。
+    //   Promise 兜底 catch 防 unhandledrejection。
+    try {
+      const dgb = (typeof navigator !== 'undefined' && navigator.deviceMemory) || 8;
+      if (dgb > 4 && window.hydrateLibScopes) {
+        setTimeout(function () {
+          try { window.hydrateLibScopes(['own']).catch(function () {}); } catch (e) {}
+        }, 1500);
+      }
+    } catch (e) {}
+  };
+  // v3.26.x：数据较慢时用户主动「仍要进入」——hide 后提示数据可能不全
+  const forceEnter = () => {
+    if (splash.classList.contains('hide')) return;
+    if (!seenToday) {
+      try { localStorage.setItem(seenKey, '1'); seenToday = true; } catch (e) {}
+    }
+    hide();
+    try {
+      if (window.openModal) {
+        window.openModal('数据仍在加载', '数据较多仍在后台加载，部分内容（字卡 / 图片 / 聊天记录等）可能暂时看不见，建议稍后刷新页面。', null);
+      }
+    } catch (e) {}
   };
   updateEnterState();
   if (splashBox) splashBox.addEventListener('scroll', checkScrolled, { passive: true });
   if (enterEl) enterEl.addEventListener('click', (e) => { e.stopPropagation(); enter(); });
+  if (forceEnterEl) forceEnterEl.addEventListener('click', (e) => { e.stopPropagation(); forceEnter(); });
+  // 页面加载完成 → 刷新进入状态（window load + readyState 轮询双保险）
+  window.addEventListener('load', function () { windowLoaded = true; updateEnterState(); });
+  // 30 秒兜底：页面个别资源挂起导致 load 永不触发时，到点视为已加载，避免开屏永远卡住
+  setTimeout(function () { if (!windowLoaded) { windowLoaded = true; updateEnterState(); } }, 30000);
   // 数据回填完成 → 刷新状态（事件 + 轮询双保险：空数据场景只置标志不派发事件）
   document.addEventListener('mochi-restore-done', updateEnterState);
+  // idbRestore 12 秒保险丝触发 → 标记较慢，显示「仍要进入」逃生口（不自动进入）
+  document.addEventListener('mochi-restore-slow', function () { slow = true; updateEnterState(); });
   // 公告由 notice.json 异步渲染完成 → 重新判定是否已滑到底
   document.addEventListener('mochi-notice-rendered', checkScrolled);
   // 轮询：数据就绪 + 已到底后停止；期间持续校正滚动/高度变化
@@ -107,9 +304,17 @@
     updateEnterState();
     checkScrolled();
   }, 300);
-  // 20 秒保险丝：数据极端异常未就绪时兜底放行（不自动跳过滑动）；
-  //   idbRestore 自身 12 秒必置就绪，正常不触发
-  setTimeout(() => { if (!ready()) hide(); }, 20000);
+  // 20 秒硬保险丝：数据极端异常未就绪时①置 slow 显示「仍要进入」逃生口（idbRestore
+  //   12s 的 mochi-restore-slow 通常已先触发，这里兜底事件丢失场景）；②置 readyForced
+  //   解除 ready() 硬门控——点击进入改走 forceEnter（隐藏开屏+数据不全提示），开屏
+  //   永不因数据层挂起而彻底死锁（#135 iPad 7 + Edge：open() 挂起形态）
+  setTimeout(() => {
+    if (!ready()) {
+      slow = true;
+      readyForced = true;
+      updateEnterState();
+    }
+  }, 20000);
 })();
 
 // v3.8.y：章节渲染

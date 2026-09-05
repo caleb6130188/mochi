@@ -48,7 +48,7 @@ const baseUrl = 'http://127.0.0.1:' + server.address().port;
 const candidates = [process.env.CHROME_PATH, 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe', 'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe', 'C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe', 'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe'].filter(Boolean);
 const chromePath = candidates.find((p) => { try { return statSync(p).isFile(); } catch (e) { return false; } });
 if (!chromePath) { console.error('找不到 Chrome/Edge'); process.exit(1); }
-const cdpPort = 9950 + Math.floor(Math.random() * 49);
+const cdpPort = Number(process.env.MOCHI_CDP_PORT) || (9950 + Math.floor(Math.random() * 49));
 const chrome = spawn(chromePath, ['--headless=new', '--disable-gpu', '--no-first-run', '--no-default-browser-check', '--user-data-dir=' + join(tmpdir(), 'mochi-ab-' + Date.now()), '--remote-debugging-port=' + cdpPort, 'about:blank'], { stdio: 'ignore' });
 
 let ws = null, msgId = 0;
@@ -98,7 +98,7 @@ await sleep(400);
 
 // T1 设置页只有合并入口
 let r1 = J(await evalJs("(function(){var ra=document.getElementById('row-about');var rl=document.getElementById('row-license');var txt=ra?ra.querySelector('.txt').textContent:'';return JSON.stringify({hasAbout:!!ra,label:txt,noLicense:!rl});})()"));
-check('T1 合并入口存在、旧许可入口已删', r1.hasAbout && r1.noLicense && r1.label === '功能介绍与二传二改说明', r1.label);
+check('T1 合并入口存在、旧许可入口已删', r1.hasAbout && r1.noLicense && r1.label.indexOf('功能介绍') >= 0 && r1.label.indexOf('许可') >= 0, r1.label);
 
 // T2 点击进入合并页：hero / 原版徽章 / 版本号已替换
 await evalJs("(function(){var b=document.getElementById('row-about');if(b)b.click();return true;})()");
